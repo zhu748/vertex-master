@@ -104,3 +104,33 @@ func TestParseURIVmessKeepsSNIAndFingerprint(t *testing.T) {
 		t.Fatalf("alpn not preserved: %#v", out["alpn"])
 	}
 }
+
+func TestParseURIStandardProxies(t *testing.T) {
+	tests := []struct {
+		raw      string
+		wantType string
+		wantPort int
+		wantUser string
+	}{
+		{"http://127.0.0.1:8080", "http", 8080, ""},
+		{"https://user:pass@example.com:8443#secure", "https", 8443, "user"},
+		{"socks4://127.0.0.1:1080", "socks4", 1080, ""},
+		{"socks4a://name@proxy.example:1080", "socks4a", 1080, "name"},
+		{"socks5://user:pass@127.0.0.1:1080", "socks5", 1080, "user"},
+		{"socks5h://proxy.example:1080", "socks5h", 1080, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.wantType, func(t *testing.T) {
+			out, err := ParseURI(tt.raw)
+			if err != nil {
+				t.Fatalf("ParseURI(%q): %v", tt.raw, err)
+			}
+			if out["type"] != tt.wantType || out["port"] != tt.wantPort {
+				t.Fatalf("unexpected parsed proxy: %#v", out)
+			}
+			if tt.wantUser != "" && out["username"] != tt.wantUser {
+				t.Fatalf("username=%#v, want %q", out["username"], tt.wantUser)
+			}
+		})
+	}
+}

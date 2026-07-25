@@ -58,7 +58,7 @@ https://<你的服务名>.onrender.com/v1
 
 ## 四、免费方案与持久化
 
-`render.yaml` 默认使用 Render Free Web Service。免费实例的文件系统是临时的，实例休眠、重启或重新部署后，通过后台修改的配置、节点、SQLite 数据和上传的背景图会丢失。但 Blueprint 中的管理密码和 API Key 来自 Render 环境变量，重启后仍然有效。
+`render.yaml` 默认使用 Render Free Web Service。免费实例的文件系统是临时的，实例休眠、重启或重新部署后，通过后台修改的配置、代理池订阅、节点、SQLite 数据和上传的背景图会丢失。但 Blueprint 中的管理密码和 API Key 来自 Render 环境变量，重启后仍然有效。
 
 如果需要保留所有后台修改：
 

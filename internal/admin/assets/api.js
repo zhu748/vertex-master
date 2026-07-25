@@ -28,6 +28,7 @@ const API = {
   },
   nodes: {
     list() { return API.raw('/api/admin/nodes'); },
+    addProxy(v) { return API.raw('/api/admin/nodes', { method: 'POST', body: JSON.stringify(v) }); },
     delete(uri) { return API.raw('/api/admin/nodes', { method: 'DELETE', body: JSON.stringify({ raw_uri: uri }) }); },
     test(uri, opts) { return API.raw('/api/admin/nodes/test', { method: 'POST', body: JSON.stringify(Object.assign({ raw_uri: uri, auto_disable: true, timeout_seconds: 25 }, opts || {})) }); },
     enable(uri) { return API.raw('/api/admin/nodes/enable', { method: 'POST', body: JSON.stringify({ raw_uri: uri }) }); },
@@ -47,6 +48,10 @@ const API = {
   },
   subscriptions: {
     fetch(url) { return API.raw('/api/admin/subscriptions/fetch', { method: 'POST', body: JSON.stringify({ url }) }); },
+    list() { return API.raw('/api/admin/proxy-subscriptions'); },
+    save(v) { return API.raw('/api/admin/proxy-subscriptions', { method: v.id ? 'PUT' : 'POST', body: JSON.stringify(v) }); },
+    refresh(id) { return API.raw('/api/admin/proxy-subscriptions/refresh', { method: 'POST', body: JSON.stringify({ id }) }); },
+    del(id) { return API.raw('/api/admin/proxy-subscriptions', { method: 'DELETE', body: JSON.stringify({ id }) }); },
   },
   useNode(uri) { return this.raw('/api/admin/use-node', { method: 'POST', body: JSON.stringify({ raw_uri: uri }) }); },
 };

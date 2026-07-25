@@ -16,6 +16,7 @@ var totalNodePages = 1;
 var cachedNodesList = [];
 window.selectedNodeURIs = window.selectedNodeURIs || new Set();
 var testProgressTimer = null;
+var cachedProxySubscriptions = [];
 
 function changeNodePage(p) {
   if (p < 1) p = 1;
@@ -292,6 +293,169 @@ async function loadNodes() {
   if (btnLast) btnLast.disabled = curNodePage >= totalNodePages;
 
   updateSelectHeaderAndBanner();
+  await loadProxySubscriptions();
+}
+
+async function addStandardProxy() {
+  var address = document.getElementById('manualProxyAddress').value.trim();
+  if (!address) return toast('请填写代理地址');
+  try {
+    await API.nodes.addProxy({
+      type: document.getElementById('manualProxyType').value,
+      address: address,
+      name: document.getElementById('manualProxyName').value.trim(),
+      username: document.getElementById('manualProxyUsername').value.trim(),
+      password: document.getElementById('manualProxyPassword').value
+    });
+    document.getElementById('manualProxyAddress').value = '';
+    document.getElementById('manualProxyName').value = '';
+    document.getElementById('manualProxyUsername').value = '';
+    document.getElementById('manualProxyPassword').value = '';
+    await loadNodes();
+    toast('代理已加入节点池');
+  } catch (e) {
+    toast('添加失败: ' + e.message);
+  }
+}
+
+async function loadProxySubscriptions() {
+  var tbody = document.getElementById('proxySubsBody');
+  if (!tbody) return;
+  try {
+    var data = await API.subscriptions.list();
+    cachedProxySubscriptions = data.subscriptions || [];
+    tbody.textContent = '';
+    if (!cachedProxySubscriptions.length) {
+      var emptyRow = document.createElement('tr');
+      var emptyCell = document.createElement('td');
+      emptyCell.colSpan = 6;
+      emptyCell.textContent = '暂无自动代理订阅';
+      emptyCell.style.cssText = 'text-align:center;color:var(--text-dim);padding:18px;';
+      emptyRow.appendChild(emptyCell);
+      tbody.appendChild(emptyRow);
+      return;
+    }
+    cachedProxySubscriptions.forEach(function (sub) {
+      var tr = document.createElement('tr');
+      var nameTd = document.createElement('td');
+      nameTd.textContent = sub.name;
+      nameTd.title = sub.url;
+      tr.appendChild(nameTd);
+
+      var typeTd = document.createElement('td');
+      typeTd.textContent = (sub.proxy_type || 'auto').toUpperCase() + ' / ' + sub.refresh_interval_minutes + ' 分钟';
+      tr.appendChild(typeTd);
+
+      var countTd = document.createElement('td');
+      countTd.textContent = String(sub.node_count || 0);
+      tr.appendChild(countTd);
+
+      var refreshTd = document.createElement('td');
+      refreshTd.textContent = sub.last_refreshed_at ? new Date(sub.last_refreshed_at * 1000).toLocaleString() : '尚未刷新';
+      tr.appendChild(refreshTd);
+
+      var statusTd = document.createElement('td');
+      statusTd.textContent = sub.last_error ? ('失败: ' + sub.last_error) : (sub.enabled ? '自动刷新' : '已停用');
+      statusTd.style.color = sub.last_error ? 'var(--red)' : 'var(--text-dim)';
+      tr.appendChild(statusTd);
+
+      var actionTd = document.createElement('td');
+      actionTd.style.cssText = 'text-align:right;white-space:nowrap;';
+      [
+        ['编辑', 'ghost', function () { editProxySubscription(sub.id); }],
+        ['刷新', 'ghost', function () { refreshProxySubscription(sub.id); }],
+        ['删除', 'danger', function () { deleteProxySubscription(sub.id); }]
+      ].forEach(function (spec) {
+        var btn = document.createElement('button');
+        btn.className = 'btn ' + spec[1];
+        btn.style.cssText = 'padding:4px 8px;font-size:12px;margin-left:4px;';
+        btn.textContent = spec[0];
+        btn.onclick = spec[2];
+        actionTd.appendChild(btn);
+      });
+      tr.appendChild(actionTd);
+      tbody.appendChild(tr);
+    });
+  } catch (e) {
+    tbody.textContent = '';
+    var row = document.createElement('tr');
+    var cell = document.createElement('td');
+    cell.colSpan = 6;
+    cell.textContent = '订阅加载失败: ' + e.message;
+    row.appendChild(cell);
+    tbody.appendChild(row);
+  }
+}
+
+async function saveProxySubscription() {
+  var url = document.getElementById('proxySubUrl').value.trim();
+  if (!url) return toast('请填写文本代理订阅 URL');
+  var interval = Number(document.getElementById('proxySubInterval').value);
+  if (!Number.isFinite(interval) || interval < 1 || interval > 10080) {
+    return toast('刷新间隔必须在 1 到 10080 分钟之间');
+  }
+  try {
+    var result = await API.subscriptions.save({
+      id: Number(document.getElementById('proxySubId').value) || 0,
+      name: document.getElementById('proxySubName').value.trim(),
+      url: url,
+      proxy_type: document.getElementById('proxySubType').value,
+      refresh_interval_minutes: Math.round(interval),
+      enabled: document.getElementById('proxySubEnabled').checked,
+      refresh_now: true
+    });
+    resetProxySubscriptionForm();
+    await loadNodes();
+    toast('订阅已保存，当前导入 ' + (result.count || 0) + ' 个代理');
+  } catch (e) {
+    await loadProxySubscriptions();
+    toast(e.message);
+  }
+}
+
+function editProxySubscription(id) {
+  var sub = cachedProxySubscriptions.find(function (item) { return item.id === id; });
+  if (!sub) return;
+  document.getElementById('proxySubId').value = String(sub.id);
+  document.getElementById('proxySubName').value = sub.name || '';
+  document.getElementById('proxySubUrl').value = sub.url || '';
+  document.getElementById('proxySubType').value = sub.proxy_type || 'auto';
+  document.getElementById('proxySubInterval').value = String(sub.refresh_interval_minutes || 60);
+  document.getElementById('proxySubEnabled').checked = !!sub.enabled;
+  document.getElementById('proxySubUrl').focus();
+}
+
+function resetProxySubscriptionForm() {
+  document.getElementById('proxySubId').value = '';
+  document.getElementById('proxySubName').value = '';
+  document.getElementById('proxySubUrl').value = '';
+  document.getElementById('proxySubType').value = 'auto';
+  document.getElementById('proxySubInterval').value = '60';
+  document.getElementById('proxySubEnabled').checked = true;
+}
+
+async function refreshProxySubscription(id) {
+  toast('正在拉取代理列表...');
+  try {
+    var result = await API.subscriptions.refresh(id);
+    await loadNodes();
+    toast('刷新成功，代理池现有 ' + (result.count || 0) + ' 个该订阅节点');
+  } catch (e) {
+    await loadProxySubscriptions();
+    toast('刷新失败: ' + e.message);
+  }
+}
+
+async function deleteProxySubscription(id) {
+  if (!confirm('删除该订阅及其导入的代理节点？')) return;
+  try {
+    await API.subscriptions.del(id);
+    resetProxySubscriptionForm();
+    await loadNodes();
+    toast('订阅及其节点已删除');
+  } catch (e) {
+    toast('删除失败: ' + e.message);
+  }
 }
 
 async function addAndFetchSub() {

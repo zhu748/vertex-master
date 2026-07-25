@@ -100,7 +100,13 @@ func injectProxy(opts []tls_client.HttpClientOption, proxyURI string, reqID stri
 		return opts, nil
 	}
 	// 用户自定义的外部标准代理，直接使用 URL
-	if strings.HasPrefix(proxyURI, "http://") || strings.HasPrefix(proxyURI, "https://") || strings.HasPrefix(proxyURI, "socks5://") {
+	lowerProxyURI := strings.ToLower(proxyURI)
+	if strings.HasPrefix(lowerProxyURI, "http://") ||
+		strings.HasPrefix(lowerProxyURI, "https://") ||
+		strings.HasPrefix(lowerProxyURI, "socks4://") ||
+		strings.HasPrefix(lowerProxyURI, "socks4a://") ||
+		strings.HasPrefix(lowerProxyURI, "socks5://") ||
+		strings.HasPrefix(lowerProxyURI, "socks5h://") {
 		return append(opts, tls_client.WithProxyUrl(proxyURI)), nil
 	}
 

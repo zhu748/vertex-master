@@ -22,6 +22,7 @@ type Node struct {
 	Name     string `json:"name"`
 	RawURI   string `json:"raw_uri"`
 	Disabled bool   `json:"disabled"`
+	SourceID int64  `json:"source_id,omitempty"`
 }
 
 type NodeHealth struct { //nolint:govet
@@ -58,7 +59,7 @@ func ensureLoaded() {
 	}
 
 	// Load nodes
-	rows, err := db.GlobalDB.Query("SELECT raw_uri, type, name, disabled FROM nodes")
+	rows, err := db.GlobalDB.Query("SELECT raw_uri, type, name, disabled, source_id FROM nodes")
 	if err == nil {
 		defer func() {
 			_ = rows.Close()
@@ -66,7 +67,7 @@ func ensureLoaded() {
 		nodes := []Node{}
 		for rows.Next() {
 			var n Node
-			if err := rows.Scan(&n.RawURI, &n.Type, &n.Name, &n.Disabled); err == nil {
+			if err := rows.Scan(&n.RawURI, &n.Type, &n.Name, &n.Disabled, &n.SourceID); err == nil {
 				nodes = append(nodes, n)
 			}
 		}
@@ -119,10 +120,10 @@ func saveNodesUnsafe() {
 	// 为了简单起见，可以先全量删除再插入，但最好的方式是逐个插入或在添加删除时调用单个 SQL
 	// 这里保持原来 saveNodesUnsafe 的全量保存语义，执行全量同步
 	_, _ = tx.Exec("DELETE FROM nodes")
-	stmt, _ := tx.Prepare("INSERT INTO nodes (raw_uri, type, name, disabled) VALUES (?, ?, ?, ?)")
+	stmt, _ := tx.Prepare("INSERT INTO nodes (raw_uri, type, name, disabled, source_id) VALUES (?, ?, ?, ?, ?)")
 	for _, n := range nodeList {
 		if stmt != nil {
-			_, _ = stmt.Exec(n.RawURI, n.Type, n.Name, n.Disabled)
+			_, _ = stmt.Exec(n.RawURI, n.Type, n.Name, n.Disabled, n.SourceID)
 		}
 	}
 	if stmt != nil {
@@ -372,6 +373,7 @@ func MergeNodes(newNodes []Node) {
 		existing[n.RawURI] = true
 	}
 	for _, n := range newNodes {
+		n.SourceID = 0
 		if !existing[n.RawURI] {
 			nodeList = append(nodeList, n)
 			existing[n.RawURI] = true
@@ -379,6 +381,56 @@ func MergeNodes(newNodes []Node) {
 	}
 	pruneHealthUnsafe()
 	saveNodesUnsafe()
+}
+
+// ReplaceSubscriptionNodes 原子替换某个订阅产生的节点，不影响手工节点或其他订阅。
+func ReplaceSubscriptionNodes(sourceID int64, newNodes []Node) (added, removed int) {
+	if sourceID <= 0 {
+		return 0, 0
+	}
+
+	mu.Lock()
+	ensureLoaded()
+	kept := make([]Node, 0, len(nodeList)+len(newNodes))
+	existing := make(map[string]bool, len(nodeList)+len(newNodes))
+	var removedURIs []string
+	for _, n := range nodeList {
+		if n.SourceID == sourceID {
+			removed++
+			removedURIs = append(removedURIs, n.RawURI)
+			delete(healthMap, n.RawURI)
+			globalStickyPool.Evict(n.RawURI)
+			continue
+		}
+		kept = append(kept, n)
+		existing[n.RawURI] = true
+	}
+	for _, n := range newNodes {
+		if strings.TrimSpace(n.RawURI) == "" || existing[n.RawURI] {
+			continue
+		}
+		n.SourceID = sourceID
+		kept = append(kept, n)
+		existing[n.RawURI] = true
+		added++
+	}
+	nodeList = kept
+	saveNodesUnsafe()
+	saveHealthUnsafe()
+	cb := DeleteNodeCallback
+	mu.Unlock()
+
+	if cb != nil {
+		for _, uri := range removedURIs {
+			cb(uri)
+		}
+	}
+	return added, removed
+}
+
+func DeleteSubscriptionNodes(sourceID int64) int {
+	_, removed := ReplaceSubscriptionNodes(sourceID, nil)
+	return removed
 }
 
 func DeleteNode(uri string) {

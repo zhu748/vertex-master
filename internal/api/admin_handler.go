@@ -51,9 +51,32 @@ func (adm *AdminHandler) handleAdminAPI(w http.ResponseWriter, r *http.Request) 
 		switch r.Method {
 		case http.MethodGet:
 			adm.adminGetNodes(w, r)
+		case http.MethodPost:
+			adm.adminAddStandardProxy(w, r)
 		case http.MethodDelete:
 			adm.adminDeleteNode(w, r)
+		default:
+			adm.adminMethodNotAllowed(w)
 		}
+		return
+	case "/proxy-subscriptions":
+		switch r.Method {
+		case http.MethodGet:
+			adm.adminListProxySubscriptions(w, r)
+		case http.MethodPost, http.MethodPut:
+			adm.adminSaveProxySubscription(w, r)
+		case http.MethodDelete:
+			adm.adminDeleteProxySubscription(w, r)
+		default:
+			adm.adminMethodNotAllowed(w)
+		}
+		return
+	case "/proxy-subscriptions/refresh":
+		if r.Method != http.MethodPost {
+			adm.adminMethodNotAllowed(w)
+			return
+		}
+		adm.adminRefreshProxySubscription(w, r)
 		return
 	case "/nodes/test":
 		adm.adminTestNode(w, r)

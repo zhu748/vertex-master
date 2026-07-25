@@ -75,7 +75,8 @@ func createTables(db *sql.DB) error {
 		raw_uri TEXT PRIMARY KEY,
 		type TEXT NOT NULL,
 		name TEXT NOT NULL,
-		disabled BOOLEAN NOT NULL DEFAULT 0
+		disabled BOOLEAN NOT NULL DEFAULT 0,
+		source_id INTEGER NOT NULL DEFAULT 0
 	);
 
 	CREATE TABLE IF NOT EXISTS node_health (
@@ -90,11 +91,27 @@ func createTables(db *sql.DB) error {
 		cooldown_until INTEGER NOT NULL DEFAULT 0,
 		FOREIGN KEY(raw_uri) REFERENCES nodes(raw_uri) ON DELETE CASCADE
 	);
+
+	CREATE TABLE IF NOT EXISTS proxy_subscriptions (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		name TEXT NOT NULL,
+		url TEXT NOT NULL,
+		proxy_type TEXT NOT NULL DEFAULT 'auto',
+		refresh_interval_minutes INTEGER NOT NULL DEFAULT 60,
+		enabled BOOLEAN NOT NULL DEFAULT 1,
+		last_refreshed_at INTEGER NOT NULL DEFAULT 0,
+		last_error TEXT NOT NULL DEFAULT '',
+		node_count INTEGER NOT NULL DEFAULT 0,
+		created_at INTEGER NOT NULL DEFAULT 0,
+		updated_at INTEGER NOT NULL DEFAULT 0
+	);
 	`
 	_, err := db.Exec(schema)
 	if err != nil {
 		return fmt.Errorf("error: %w", err)
 	}
+	// 兼容旧数据库；新数据库已包含该列，重复添加错误可安全忽略。
+	_, _ = db.Exec("ALTER TABLE nodes ADD COLUMN source_id INTEGER NOT NULL DEFAULT 0")
 	return nil
 
 }

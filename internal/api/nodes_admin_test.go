@@ -208,6 +208,42 @@ func TestParseImportedNodesSupportsSIP008(t *testing.T) {
 	}
 }
 
+func TestParseProxyListNodes(t *testing.T) {
+	text := `
+# comment
+1.2.3.4:8080
+user:pass@proxy.example.com:3128
+5.6.7.8:1080:alice:secret
+socks5://bob:pwd@9.9.9.9:1080
+invalid
+1.2.3.4:8080
+`
+	imported := parseProxyListNodes(text, "http")
+	if len(imported) != 4 {
+		t.Fatalf("expected 4 unique proxies, got %d: %#v", len(imported), imported)
+	}
+	if imported[0].Type != "http" || imported[3].Type != "socks5" {
+		t.Fatalf("proxy types were not normalized correctly: %#v", imported)
+	}
+	out, err := transport.ParseURI(imported[2].RawURI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["username"] != "alice" || out["password"] != "secret" {
+		t.Fatalf("host:port:user:pass credentials lost: %#v", out)
+	}
+}
+
+func TestParseImportedNodesSupportsStandardProxyURI(t *testing.T) {
+	imported := parseImportedNodes("socks4://127.0.0.1:1080\nhttp://user:pass@example.com:8080")
+	if len(imported) != 2 {
+		t.Fatalf("expected 2 standard proxies, got %d", len(imported))
+	}
+	if imported[0].Type != "socks4" || imported[1].Type != "http" {
+		t.Fatalf("unexpected types: %#v", imported)
+	}
+}
+
 func TestParseImportedNodesSupportsV2RayOutbounds(t *testing.T) {
 	text := `{
   "outbounds": [

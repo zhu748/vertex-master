@@ -4,8 +4,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/bsfdsagfadg/vertex/internal/nodes"
@@ -128,6 +130,84 @@ func parseFlexibleImportedNodeLine(line string) (nodes.Node, bool) {
 		return node, true
 	}
 	return parseV2RayNNodeLine(line)
+}
+
+func parseProxyListNodes(text, defaultType string) []nodes.Node {
+	defaultType = strings.ToLower(strings.TrimSpace(defaultType))
+	if defaultType == "" || defaultType == "auto" {
+		return parseImportedNodes(text)
+	}
+
+	imported := make([]nodes.Node, 0)
+	seen := make(map[string]bool)
+	for _, line := range strings.Split(strings.ReplaceAll(text, "\r", ""), "\n") {
+		raw, ok := normalizeProxyListLine(line, defaultType)
+		if !ok || seen[raw] {
+			continue
+		}
+		node, ok := parseImportedNodeLine(raw)
+		if !ok {
+			continue
+		}
+		seen[raw] = true
+		imported = append(imported, node)
+	}
+	return imported
+}
+
+func normalizeProxyListLine(line, defaultType string) (string, bool) {
+	line = strings.TrimSpace(line)
+	if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+		return "", false
+	}
+	if fields := strings.Fields(line); len(fields) > 0 {
+		line = fields[0]
+	}
+
+	if parsed, err := url.Parse(line); err == nil && strings.Contains(line, "://") {
+		scheme := strings.ToLower(parsed.Scheme)
+		if !isStandardProxyType(scheme) || parsed.Hostname() == "" {
+			return "", false
+		}
+		parsed.Scheme = scheme
+		return parsed.String(), true
+	}
+	if !isStandardProxyType(defaultType) {
+		return "", false
+	}
+
+	// 常见纯文本格式：host:port:user:pass。
+	parts := strings.Split(line, ":")
+	if len(parts) >= 4 && !strings.Contains(parts[0], "[") {
+		port, err := strconv.Atoi(parts[1])
+		if err == nil && port > 0 && port <= 65535 {
+			u := &url.URL{
+				Scheme: defaultType,
+				User:   url.UserPassword(parts[2], strings.Join(parts[3:], ":")),
+				Host:   net.JoinHostPort(parts[0], parts[1]),
+			}
+			return u.String(), true
+		}
+	}
+
+	u, err := url.Parse(defaultType + "://" + line)
+	if err != nil || u.Hostname() == "" {
+		return "", false
+	}
+	port, err := strconv.Atoi(u.Port())
+	if err != nil || port < 1 || port > 65535 {
+		return "", false
+	}
+	return u.String(), true
+}
+
+func isStandardProxyType(proxyType string) bool {
+	switch strings.ToLower(strings.TrimSpace(proxyType)) {
+	case "http", "https", "socks4", "socks4a", "socks5", "socks5h":
+		return true
+	default:
+		return false
+	}
 }
 
 func (adm *AdminHandler) adminImportNodes(w http.ResponseWriter, r *http.Request) {

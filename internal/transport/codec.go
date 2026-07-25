@@ -19,6 +19,9 @@ func padB64(s string) string {
 
 // ParseURI 解析各种协议的节点链接
 func ParseURI(uri string) (map[string]any, error) {
+	if out, ok := parseStandardProxyURI(uri); ok {
+		return out, nil
+	}
 	if strings.HasPrefix(uri, "vless://") {
 		return parseSimple(uri, "vless")
 	}
@@ -48,6 +51,57 @@ func ParseURI(uri string) (map[string]any, error) {
 		safeURI = safeURI[:10]
 	}
 	return nil, fmt.Errorf("unsupported or complex protocol: %s", safeURI)
+}
+
+func parseStandardProxyURI(raw string) (map[string]any, bool) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return nil, false
+	}
+	scheme := strings.ToLower(u.Scheme)
+	switch scheme {
+	case "http", "https", "socks4", "socks4a", "socks5", "socks5h":
+	default:
+		return nil, false
+	}
+	if u.Hostname() == "" {
+		return nil, false
+	}
+	port, _ := strconv.Atoi(u.Port())
+	if port == 0 {
+		switch scheme {
+		case "http":
+			port = 80
+		case "https":
+			port = 443
+		default:
+			port = 1080
+		}
+	}
+	if port < 1 || port > 65535 {
+		return nil, false
+	}
+
+	name := strings.TrimSpace(u.Fragment)
+	if decoded, err := url.QueryUnescape(name); err == nil {
+		name = decoded
+	}
+	if name == "" {
+		name = scheme + "-" + u.Hostname() + ":" + strconv.Itoa(port)
+	}
+	out := map[string]any{
+		"name":   name,
+		"type":   scheme,
+		"server": u.Hostname(),
+		"port":   port,
+	}
+	if u.User != nil {
+		out["username"] = u.User.Username()
+		if password, ok := u.User.Password(); ok {
+			out["password"] = password
+		}
+	}
+	return out, true
 }
 
 func parseSimple(uri, typ string) (map[string]any, error) {

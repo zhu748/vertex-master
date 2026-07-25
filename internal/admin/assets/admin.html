@@ -129,10 +129,63 @@
           </div>
           <div class="grid grid-1">
             <div class="card glass">
-              <div class="field"><label for="globalProxy">全局外部代理 (SOCKS5/HTTP)</label>
+              <div class="field"><label for="globalProxy">全局外部代理 (HTTP/HTTPS/SOCKS4/SOCKS5)</label>
                 <div class="toolbar m-0"><input id="globalProxy" placeholder="socks5://127.0.0.1:1080"><button
                     class="btn" onclick="saveGlobalProxy()">保存</button></div>
                 <div class="desc">配置后默认走该代理；如果未启用并发池且无锁定节点，将使用此代理。</div>
+              </div>
+            </div>
+            <div class="card glass">
+              <div class="field-heading label-gold">添加标准代理</div>
+              <div class="toolbar m-0 gap-8">
+                <select id="manualProxyType" aria-label="代理类型">
+                  <option value="http">HTTP</option>
+                  <option value="https">HTTPS</option>
+                  <option value="socks4">SOCKS4</option>
+                  <option value="socks4a">SOCKS4A</option>
+                  <option value="socks5" selected>SOCKS5</option>
+                  <option value="socks5h">SOCKS5H</option>
+                </select>
+                <input id="manualProxyAddress" placeholder="主机:端口，例如 127.0.0.1:1080">
+                <input id="manualProxyName" placeholder="名称（可选）">
+              </div>
+              <div class="toolbar m-0 gap-8 mt-8">
+                <input id="manualProxyUsername" placeholder="用户名（可选）">
+                <input id="manualProxyPassword" type="password" placeholder="密码（可选）">
+                <button class="btn" onclick="addStandardProxy()">添加到代理池</button>
+              </div>
+              <div class="desc">也可在地址框填写完整 URI；支持 HTTP、HTTPS、SOCKS4、SOCKS4A、SOCKS5 和 SOCKS5H。</div>
+            </div>
+            <div class="card glass">
+              <div class="field-heading label-gold">文本代理池订阅</div>
+              <input type="hidden" id="proxySubId" value="">
+              <div class="toolbar m-0 gap-8">
+                <input id="proxySubName" placeholder="订阅名称">
+                <input id="proxySubUrl" placeholder="https://example.com/proxies.txt">
+                <select id="proxySubType" aria-label="订阅代理类型">
+                  <option value="auto">自动识别完整 URI</option>
+                  <option value="http">HTTP</option>
+                  <option value="https">HTTPS</option>
+                  <option value="socks4">SOCKS4</option>
+                  <option value="socks4a">SOCKS4A</option>
+                  <option value="socks5">SOCKS5</option>
+                  <option value="socks5h">SOCKS5H</option>
+                </select>
+              </div>
+              <div class="toolbar m-0 gap-8 mt-8">
+                <label for="proxySubInterval">每</label>
+                <input id="proxySubInterval" type="number" min="1" max="10080" value="60" class="w-120">
+                <span>分钟刷新</span>
+                <label><input id="proxySubEnabled" type="checkbox" checked> 启用自动刷新</label>
+                <button class="btn" onclick="saveProxySubscription()">保存并立即拉取</button>
+                <button class="btn ghost" onclick="resetProxySubscriptionForm()">清空</button>
+              </div>
+              <div class="desc">纯文本地址支持每行一个代理：host:port、user:pass@host:port、host:port:user:pass，或带协议的完整 URI。</div>
+              <div class="table-wrap mt-12">
+                <table>
+                  <thead><tr><th>名称</th><th>类型/间隔</th><th>节点</th><th>最近刷新</th><th>状态</th><th></th></tr></thead>
+                  <tbody id="proxySubsBody"></tbody>
+                </table>
               </div>
             </div>
             <div class="card glass">

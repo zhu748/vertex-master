@@ -192,6 +192,7 @@ func main() {
 	api.StartAdminSessionCleanup(time.Hour)
 
 	vc := vertex.NewVertexAIClient(cfg)
+	stopProxySubscriptionScheduler := api.StartProxySubscriptionScheduler(vc, cfg)
 
 	telemetryEnabled := true
 	if cfg.TelemetryEnabled() != nil {
@@ -225,6 +226,7 @@ func main() {
 				log.Printf("[vproxy] 关闭超时/出错：%v(强制结束)", err)
 			}
 			cancel()
+			stopProxySubscriptionScheduler()
 			transport.StopAllProxies()
 			telemetry.Stop()
 			_ = dailyLogger.Close()
