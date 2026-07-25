@@ -146,21 +146,27 @@
                   <option value="socks5" selected>SOCKS5</option>
                   <option value="socks5h">SOCKS5H</option>
                 </select>
+                <label for="manualProxyAddress" class="sr-only">代理地址</label>
                 <input id="manualProxyAddress" placeholder="主机:端口，例如 127.0.0.1:1080">
+                <label for="manualProxyName" class="sr-only">代理名称</label>
                 <input id="manualProxyName" placeholder="名称（可选）">
               </div>
               <div class="toolbar m-0 gap-8 mt-8">
+                <label for="manualProxyUsername" class="sr-only">代理用户名</label>
                 <input id="manualProxyUsername" placeholder="用户名（可选）">
+                <label for="manualProxyPassword" class="sr-only">代理密码</label>
                 <input id="manualProxyPassword" type="password" placeholder="密码（可选）">
-                <button class="btn" onclick="addStandardProxy()">添加到代理池</button>
+                <button class="btn" id="addStandardProxyBtn" onclick="addStandardProxy()">添加到代理池</button>
               </div>
-              <div class="desc">也可在地址框填写完整 URI；支持 HTTP、HTTPS、SOCKS4、SOCKS4A、SOCKS5 和 SOCKS5H。</div>
+              <div class="desc">也可填写完整 URI，此时以 URI 中的协议和凭据为准；支持 HTTP、HTTPS、SOCKS4、SOCKS4A、SOCKS5 和 SOCKS5H。</div>
             </div>
             <div class="card glass">
-              <div class="field-heading label-gold">文本代理池订阅</div>
+              <div class="field-heading label-gold">自动文本代理订阅</div>
               <input type="hidden" id="proxySubId" value="">
               <div class="toolbar m-0 gap-8">
+                <label for="proxySubName" class="sr-only">订阅名称</label>
                 <input id="proxySubName" placeholder="订阅名称">
+                <label for="proxySubUrl" class="sr-only">文本代理订阅地址</label>
                 <input id="proxySubUrl" placeholder="https://example.com/proxies.txt">
                 <select id="proxySubType" aria-label="订阅代理类型">
                   <option value="auto">自动识别完整 URI</option>
@@ -177,12 +183,12 @@
                 <input id="proxySubInterval" type="number" min="1" max="10080" value="60" class="w-120">
                 <span>分钟刷新</span>
                 <label><input id="proxySubEnabled" type="checkbox" checked> 启用自动刷新</label>
-                <button class="btn" onclick="saveProxySubscription()">保存并立即拉取</button>
+                <button class="btn" id="proxySubSaveBtn" onclick="saveProxySubscription()">保存并立即拉取</button>
                 <button class="btn ghost" onclick="resetProxySubscriptionForm()">清空</button>
               </div>
               <div class="desc">纯文本地址支持每行一个代理：host:port、user:pass@host:port、host:port:user:pass，或带协议的完整 URI。</div>
               <div class="table-wrap mt-12">
-                <table>
+                <table id="proxySubscriptionsTable">
                   <thead><tr><th>名称</th><th>类型/间隔</th><th>节点</th><th>最近刷新</th><th>状态</th><th></th></tr></thead>
                   <tbody id="proxySubsBody"></tbody>
                 </table>
@@ -213,9 +219,48 @@
 
               <div class="divider"></div>
 
+              <div class="field-heading label-gold">一次性协议节点订阅</div>
               <div class="toolbar"><label for="subUrl" class="sr-only">订阅链接</label><input id="subUrl"
                   placeholder="订阅链接 (vless/vmess/trojan/ss/ssr...)"><button class="btn"
                   onclick="addAndFetchSub()">拉取并保存</button></div>
+              <div class="desc field-mb-20px">仅执行一次拉取和导入，不会创建自动刷新任务。</div>
+              <div class="toolbar node-filter-toolbar">
+                <label for="nodeSearch" class="sr-only">搜索节点</label>
+                <input id="nodeSearch" type="search" placeholder="搜索名称、地址或协议">
+                <select id="nodeTypeFilter" aria-label="按协议筛选">
+                  <option value="all">全部协议</option>
+                  <option value="http">HTTP</option>
+                  <option value="https">HTTPS</option>
+                  <option value="socks4">SOCKS4</option>
+                  <option value="socks4a">SOCKS4A</option>
+                  <option value="socks5">SOCKS5</option>
+                  <option value="socks5h">SOCKS5H</option>
+                  <option value="vless">VLESS</option>
+                  <option value="vmess">VMess</option>
+                  <option value="trojan">Trojan</option>
+                  <option value="ss">Shadowsocks</option>
+                  <option value="ssr">SSR</option>
+                </select>
+                <select id="nodeStatusFilter" aria-label="按状态筛选">
+                  <option value="all">全部状态</option>
+                  <option value="enabled">已启用</option>
+                  <option value="disabled">已禁用</option>
+                  <option value="healthy">测试可用</option>
+                  <option value="unhealthy">测试失败</option>
+                  <option value="untested">未测试</option>
+                </select>
+                <select id="nodeSourceFilter" aria-label="按来源筛选">
+                  <option value="all">全部来源</option>
+                  <option value="manual">手工/一次性导入</option>
+                  <option value="subscription">自动订阅</option>
+                </select>
+                <select id="nodePageSize" aria-label="每页节点数">
+                  <option value="25">每页 25</option>
+                  <option value="50" selected>每页 50</option>
+                  <option value="100">每页 100</option>
+                  <option value="200">每页 200</option>
+                </select>
+              </div>
               <div class="desc summary-text" id="nodesSummary">当前共 0 个节点</div>
               <div class="actions">
                 <button class="btn ghost" onclick="testAllNodes()">批量测试</button>
@@ -252,7 +297,7 @@
                   onclick="selectAllNodesAcrossPages()">全选所有页共 <span id="crossPageSelectTotal">0</span> 个节点</button>
               </div>
               <div class="table-wrap">
-                <table>
+                <table id="nodesTable">
                   <thead>
                     <tr>
                       <th class="th-center"><label for="selectAllNodesCheckbox" class="sr-only">全选</label><input

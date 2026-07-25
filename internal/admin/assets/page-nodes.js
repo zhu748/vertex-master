@@ -13,10 +13,80 @@ document.getElementById('nodesBody').addEventListener('click', function (e) {
 var curNodePage = 1;
 var nodePageSize = 50;
 var totalNodePages = 1;
+var totalNodeCount = 0;
+var filteredNodeCount = 0;
 var cachedNodesList = [];
 window.selectedNodeURIs = window.selectedNodeURIs || new Set();
 var testProgressTimer = null;
 var cachedProxySubscriptions = [];
+var nodesLoadSequence = 0;
+var proxySubscriptionsLoadSequence = 0;
+
+function setActionBusy(button, busy, busyText) {
+  if (!button) return;
+  if (busy) {
+    if (!button.dataset.originalText) button.dataset.originalText = button.textContent;
+    button.disabled = true;
+    button.textContent = busyText || '处理中...';
+  } else {
+    button.disabled = false;
+    button.textContent = button.dataset.originalText || button.textContent;
+    delete button.dataset.originalText;
+  }
+}
+
+function maskedSubscriptionURL(rawURL) {
+  try {
+    var parsed = new URL(rawURL);
+    var path = parsed.pathname === '/' ? '' : parsed.pathname;
+    var value = parsed.origin + path;
+    return value.length > 72 ? value.slice(0, 69) + '...' : value;
+  } catch (e) {
+    return '地址格式异常';
+  }
+}
+
+var proxySubEnabledInput = document.getElementById('proxySubEnabled');
+if (proxySubEnabledInput) {
+  proxySubEnabledInput.addEventListener('change', updateProxySubscriptionSaveLabel);
+}
+
+function currentNodeListOptions(extra) {
+  var options = {
+    query: document.getElementById('nodeSearch').value.trim(),
+    type: document.getElementById('nodeTypeFilter').value,
+    status: document.getElementById('nodeStatusFilter').value,
+    source: document.getElementById('nodeSourceFilter').value
+  };
+  return Object.assign(options, extra || {});
+}
+
+function applyNodeFilters() {
+  curNodePage = 1;
+  window.selectedNodeURIs.clear();
+  loadNodes();
+}
+
+var nodeSearchTimer = null;
+var nodeSearchInput = document.getElementById('nodeSearch');
+if (nodeSearchInput) {
+  nodeSearchInput.addEventListener('input', function () {
+    clearTimeout(nodeSearchTimer);
+    nodeSearchTimer = setTimeout(applyNodeFilters, 250);
+  });
+}
+['nodeTypeFilter', 'nodeStatusFilter', 'nodeSourceFilter'].forEach(function (id) {
+  var element = document.getElementById(id);
+  if (element) element.addEventListener('change', applyNodeFilters);
+});
+var nodePageSizeInput = document.getElementById('nodePageSize');
+if (nodePageSizeInput) {
+  nodePageSizeInput.addEventListener('change', function () {
+    nodePageSize = Number(this.value) || 50;
+    curNodePage = 1;
+    loadNodes();
+  });
+}
 
 function changeNodePage(p) {
   if (p < 1) p = 1;
@@ -37,38 +107,43 @@ function updateSelectHeaderAndBanner() {
     return;
   }
 
-  var startIdx = (curNodePage - 1) * nodePageSize;
-  var endIdx = Math.min(startIdx + nodePageSize, cachedNodesList.length);
-  var pageNodes = cachedNodesList.slice(startIdx, endIdx);
+  var pageNodes = cachedNodesList;
 
   var allPageChecked = pageNodes.length > 0 && pageNodes.every(function (n) { return window.selectedNodeURIs.has(n.raw_uri); });
   if (mainCb) mainCb.checked = allPageChecked;
 
-  if (allPageChecked && cachedNodesList.length > pageNodes.length && window.selectedNodeURIs.size < cachedNodesList.length) {
+  if (allPageChecked && filteredNodeCount > pageNodes.length && window.selectedNodeURIs.size < filteredNodeCount) {
     if (banner) {
       banner.style.display = 'block';
       if (bannerText) bannerText.textContent = '当前已选择本页 ' + pageNodes.length + ' 个节点。';
-      if (bannerTotal) bannerTotal.textContent = cachedNodesList.length;
+      if (bannerTotal) bannerTotal.textContent = filteredNodeCount;
     }
   } else {
     if (banner) banner.style.display = 'none';
   }
 }
 
-function selectAllNodesAcrossPages() {
-  cachedNodesList.forEach(function (n) { window.selectedNodeURIs.add(n.raw_uri); });
-  var cbs = document.querySelectorAll('.node-select-cb');
-  cbs.forEach(function (cb) { cb.checked = true; });
-  var banner = document.getElementById('crossPageSelectBanner');
-  if (banner) banner.style.display = 'none';
-  var mainCb = document.getElementById('selectAllNodesCheckbox');
-  if (mainCb) mainCb.checked = true;
-  toast('已选择全部 ' + window.selectedNodeURIs.size + ' 个节点');
+async function selectAllNodesAcrossPages() {
+  try {
+    var data = await API.nodes.list(currentNodeListOptions({ uris_only: true }));
+    (data.uris || []).forEach(function (uri) { window.selectedNodeURIs.add(uri); });
+    var cbs = document.querySelectorAll('.node-select-cb');
+    cbs.forEach(function (cb) { cb.checked = true; });
+    var banner = document.getElementById('crossPageSelectBanner');
+    if (banner) banner.style.display = 'none';
+    var mainCb = document.getElementById('selectAllNodesCheckbox');
+    if (mainCb) mainCb.checked = true;
+    toast('已选择当前筛选结果中的全部 ' + window.selectedNodeURIs.size + ' 个节点');
+  } catch (e) {
+    toast('全选失败: ' + e.message);
+  }
 }
 
 async function loadNodes() {
+  var loadSequence = ++nodesLoadSequence;
   try {
     const sd = await API.settings.get();
+    if (loadSequence !== nodesLoadSequence) return;
     if (typeof curSettings !== 'undefined') {
       curSettings = sd.settings || sd;
     }
@@ -78,9 +153,17 @@ async function loadNodes() {
     }
   } catch (e) { }
 
-  const d = await API.nodes.list();
+  const d = await API.nodes.list(currentNodeListOptions({
+    page: curNodePage,
+    page_size: nodePageSize
+  }));
+  if (loadSequence !== nodesLoadSequence) return;
   const nodes = d.nodes || [];
   cachedNodesList = nodes;
+  totalNodeCount = Number(d.overall_total !== undefined ? d.overall_total : d.total) || 0;
+  filteredNodeCount = Number(d.total) || 0;
+  curNodePage = Number(d.page) || 1;
+  totalNodePages = Number(d.total_pages) || 1;
 
   try {
     const prog = await API.nodes.testProgress();
@@ -92,17 +175,17 @@ async function loadNodes() {
       if (progressEl) progressEl.style.display = 'none';
     }
   } catch (e) { }
+  if (loadSequence !== nodesLoadSequence) return;
 
-  const enabledCount = nodes.filter(n => !n.disabled).length;
-  const disabledCount = nodes.filter(n => n.disabled).length;
-  document.getElementById('nodesSummary').textContent = '\u5F53\u524D\u5171 ' + nodes.length + ' \u4E2A\u8282\u70B9\uFF08\u542F\u7528 ' + enabledCount + ' / \u7981\u7528 ' + disabledCount + '\uFF09';
-
-  totalNodePages = Math.max(1, Math.ceil(nodes.length / nodePageSize));
-  if (curNodePage > totalNodePages) curNodePage = totalNodePages;
+  const enabledCount = Number(d.enabled_count) || 0;
+  const disabledCount = Number(d.disabled_count) || 0;
+  var summary = '\u5F53\u524D\u5171 ' + totalNodeCount + ' \u4E2A\u8282\u70B9\uFF08\u542F\u7528 ' + enabledCount + ' / \u7981\u7528 ' + disabledCount + '\uFF09';
+  if (filteredNodeCount !== totalNodeCount) summary += '，筛选结果 ' + filteredNodeCount + ' 个';
+  document.getElementById('nodesSummary').textContent = summary;
 
   const startIdx = (curNodePage - 1) * nodePageSize;
-  const endIdx = Math.min(startIdx + nodePageSize, nodes.length);
-  const pageNodes = nodes.slice(startIdx, endIdx);
+  const endIdx = startIdx + nodes.length;
+  const pageNodes = nodes;
 
   const tbody = document.getElementById('nodesBody');
   const frag = document.createDocumentFragment();
@@ -281,7 +364,7 @@ async function loadNodes() {
   const pageNumDisplay = document.getElementById('nodesPageNumDisplay');
   if (pageNumDisplay) pageNumDisplay.textContent = curNodePage + ' / ' + totalNodePages;
   const pageInfo = document.getElementById('nodesPaginationInfo');
-  if (pageInfo) pageInfo.textContent = nodes.length > 0 ? ('显示第 ' + (startIdx + 1) + ' - ' + endIdx + ' 条，共 ' + nodes.length + ' 条') : '共 0 条';
+  if (pageInfo) pageInfo.textContent = filteredNodeCount > 0 ? ('显示第 ' + (startIdx + 1) + ' - ' + endIdx + ' 条，共 ' + filteredNodeCount + ' 条') : '共 0 条';
 
   const btnFirst = document.getElementById('btnPageFirst');
   const btnPrev = document.getElementById('btnPagePrev');
@@ -299,6 +382,9 @@ async function loadNodes() {
 async function addStandardProxy() {
   var address = document.getElementById('manualProxyAddress').value.trim();
   if (!address) return toast('请填写代理地址');
+  var button = document.getElementById('addStandardProxyBtn');
+  if (button && button.disabled) return;
+  setActionBusy(button, true, '正在添加...');
   try {
     await API.nodes.addProxy({
       type: document.getElementById('manualProxyType').value,
@@ -315,14 +401,18 @@ async function addStandardProxy() {
     toast('代理已加入节点池');
   } catch (e) {
     toast('添加失败: ' + e.message);
+  } finally {
+    setActionBusy(button, false);
   }
 }
 
 async function loadProxySubscriptions() {
   var tbody = document.getElementById('proxySubsBody');
   if (!tbody) return;
+  var loadSequence = ++proxySubscriptionsLoadSequence;
   try {
     var data = await API.subscriptions.list();
+    if (loadSequence !== proxySubscriptionsLoadSequence) return;
     cachedProxySubscriptions = data.subscriptions || [];
     tbody.textContent = '';
     if (!cachedProxySubscriptions.length) {
@@ -338,8 +428,14 @@ async function loadProxySubscriptions() {
     cachedProxySubscriptions.forEach(function (sub) {
       var tr = document.createElement('tr');
       var nameTd = document.createElement('td');
-      nameTd.textContent = sub.name;
-      nameTd.title = sub.url;
+      var nameDiv = document.createElement('div');
+      nameDiv.style.cssText = 'font-weight:600;';
+      nameDiv.textContent = sub.name;
+      var urlDiv = document.createElement('div');
+      urlDiv.style.cssText = 'font-size:11px;color:var(--text-dim);margin-top:3px;word-break:break-all;';
+      urlDiv.textContent = maskedSubscriptionURL(sub.url);
+      nameTd.appendChild(nameDiv);
+      nameTd.appendChild(urlDiv);
       tr.appendChild(nameTd);
 
       var typeTd = document.createElement('td');
@@ -351,26 +447,42 @@ async function loadProxySubscriptions() {
       tr.appendChild(countTd);
 
       var refreshTd = document.createElement('td');
-      refreshTd.textContent = sub.last_refreshed_at ? new Date(sub.last_refreshed_at * 1000).toLocaleString() : '尚未刷新';
+      if (sub.last_refreshed_at) {
+        refreshTd.textContent = new Date(sub.last_refreshed_at * 1000).toLocaleString();
+      } else if (sub.last_attempt_at) {
+        refreshTd.textContent = '尚未成功';
+      } else {
+        refreshTd.textContent = '尚未刷新';
+      }
       tr.appendChild(refreshTd);
 
       var statusTd = document.createElement('td');
-      statusTd.textContent = sub.last_error ? ('失败: ' + sub.last_error) : (sub.enabled ? '自动刷新' : '已停用');
-      statusTd.style.color = sub.last_error ? 'var(--red)' : 'var(--text-dim)';
+      var statusPill = document.createElement('span');
+      statusPill.className = sub.last_error ? 'pill off' : (sub.enabled ? 'pill on' : 'pill off');
+      statusPill.textContent = sub.last_error ? '刷新失败' : (sub.enabled ? '自动刷新' : '已停用');
+      statusTd.appendChild(statusPill);
+      if (sub.last_error) {
+        var errorDiv = document.createElement('div');
+        errorDiv.className = 'proxy-sub-error';
+        errorDiv.textContent = sub.last_error;
+        errorDiv.title = sub.last_error;
+        statusTd.appendChild(errorDiv);
+      }
       tr.appendChild(statusTd);
 
       var actionTd = document.createElement('td');
       actionTd.style.cssText = 'text-align:right;white-space:nowrap;';
       [
         ['编辑', 'ghost', function () { editProxySubscription(sub.id); }],
-        ['刷新', 'ghost', function () { refreshProxySubscription(sub.id); }],
-        ['删除', 'danger', function () { deleteProxySubscription(sub.id); }]
+        [sub.enabled ? '停用' : '启用', 'ghost', function (button) { toggleProxySubscriptionEnabled(sub.id, !sub.enabled, button); }],
+        ['刷新', 'ghost', function (button) { refreshProxySubscription(sub.id, button); }],
+        ['删除', 'danger', function (button) { deleteProxySubscription(sub.id, button); }]
       ].forEach(function (spec) {
         var btn = document.createElement('button');
         btn.className = 'btn ' + spec[1];
         btn.style.cssText = 'padding:4px 8px;font-size:12px;margin-left:4px;';
         btn.textContent = spec[0];
-        btn.onclick = spec[2];
+        btn.onclick = function () { spec[2](btn); };
         actionTd.appendChild(btn);
       });
       tr.appendChild(actionTd);
@@ -394,6 +506,10 @@ async function saveProxySubscription() {
   if (!Number.isFinite(interval) || interval < 1 || interval > 10080) {
     return toast('刷新间隔必须在 1 到 10080 分钟之间');
   }
+  var button = document.getElementById('proxySubSaveBtn');
+  if (button && button.disabled) return;
+  var enabled = document.getElementById('proxySubEnabled').checked;
+  setActionBusy(button, true, enabled ? '保存并拉取中...' : '正在保存...');
   try {
     var result = await API.subscriptions.save({
       id: Number(document.getElementById('proxySubId').value) || 0,
@@ -401,15 +517,24 @@ async function saveProxySubscription() {
       url: url,
       proxy_type: document.getElementById('proxySubType').value,
       refresh_interval_minutes: Math.round(interval),
-      enabled: document.getElementById('proxySubEnabled').checked,
-      refresh_now: true
+      enabled: enabled,
+      refresh_now: enabled
     });
     resetProxySubscriptionForm();
     await loadNodes();
-    toast('订阅已保存，当前导入 ' + (result.count || 0) + ' 个代理');
+    if (result.refresh_ok === false) {
+      toast('订阅已保存，但本次拉取失败：' + (result.refresh_error || '未知错误'));
+    } else if (!enabled) {
+      toast('订阅已保存，自动刷新已停用');
+    } else {
+      toast('订阅已保存，当前导入 ' + (result.count || 0) + ' 个代理');
+    }
   } catch (e) {
     await loadProxySubscriptions();
-    toast(e.message);
+    toast('保存失败: ' + e.message);
+  } finally {
+    setActionBusy(button, false);
+    updateProxySubscriptionSaveLabel();
   }
 }
 
@@ -422,6 +547,7 @@ function editProxySubscription(id) {
   document.getElementById('proxySubType').value = sub.proxy_type || 'auto';
   document.getElementById('proxySubInterval').value = String(sub.refresh_interval_minutes || 60);
   document.getElementById('proxySubEnabled').checked = !!sub.enabled;
+  updateProxySubscriptionSaveLabel();
   document.getElementById('proxySubUrl').focus();
 }
 
@@ -432,9 +558,45 @@ function resetProxySubscriptionForm() {
   document.getElementById('proxySubType').value = 'auto';
   document.getElementById('proxySubInterval').value = '60';
   document.getElementById('proxySubEnabled').checked = true;
+  updateProxySubscriptionSaveLabel();
 }
 
-async function refreshProxySubscription(id) {
+function updateProxySubscriptionSaveLabel() {
+  var button = document.getElementById('proxySubSaveBtn');
+  if (!button || button.disabled) return;
+  var editing = Number(document.getElementById('proxySubId').value) > 0;
+  var enabled = document.getElementById('proxySubEnabled').checked;
+  button.textContent = enabled
+    ? (editing ? '保存修改并刷新' : '保存并立即拉取')
+    : (editing ? '保存修改' : '保存订阅');
+}
+
+async function toggleProxySubscriptionEnabled(id, enabled, button) {
+  var sub = cachedProxySubscriptions.find(function (item) { return item.id === id; });
+  if (!sub || (button && button.disabled)) return;
+  setActionBusy(button, true, enabled ? '启用中...' : '停用中...');
+  try {
+    await API.subscriptions.save({
+      id: sub.id,
+      name: sub.name,
+      url: sub.url,
+      proxy_type: sub.proxy_type,
+      refresh_interval_minutes: sub.refresh_interval_minutes,
+      enabled: enabled,
+      refresh_now: false
+    });
+    await loadProxySubscriptions();
+    toast(enabled ? '已启用自动刷新' : '已停用自动刷新');
+  } catch (e) {
+    toast('操作失败: ' + e.message);
+  } finally {
+    setActionBusy(button, false);
+  }
+}
+
+async function refreshProxySubscription(id, button) {
+  if (button && button.disabled) return;
+  setActionBusy(button, true, '刷新中...');
   toast('正在拉取代理列表...');
   try {
     var result = await API.subscriptions.refresh(id);
@@ -443,11 +605,15 @@ async function refreshProxySubscription(id) {
   } catch (e) {
     await loadProxySubscriptions();
     toast('刷新失败: ' + e.message);
+  } finally {
+    setActionBusy(button, false);
   }
 }
 
-async function deleteProxySubscription(id) {
+async function deleteProxySubscription(id, button) {
   if (!confirm('删除该订阅及其导入的代理节点？')) return;
+  if (button && button.disabled) return;
+  setActionBusy(button, true, '删除中...');
   try {
     await API.subscriptions.del(id);
     resetProxySubscriptionForm();
@@ -455,6 +621,8 @@ async function deleteProxySubscription(id) {
     toast('订阅及其节点已删除');
   } catch (e) {
     toast('删除失败: ' + e.message);
+  } finally {
+    setActionBusy(button, false);
   }
 }
 
@@ -644,25 +812,24 @@ function getSelectedNodeURIs() {
   return Array.from(window.selectedNodeURIs);
 }
 
-function toggleSelectAllNodes() {
-  if (window.selectedNodeURIs.size === cachedNodesList.length && cachedNodesList.length > 0) {
+async function toggleSelectAllNodes() {
+  if (window.selectedNodeURIs.size >= filteredNodeCount && filteredNodeCount > 0) {
     window.selectedNodeURIs.clear();
+    document.querySelectorAll('.node-select-cb').forEach(function (cb) { cb.checked = false; });
+    updateSelectHeaderAndBanner();
+    toast('已取消选择');
   } else {
-    cachedNodesList.forEach(function (n) { window.selectedNodeURIs.add(n.raw_uri); });
+    await selectAllNodesAcrossPages();
   }
-  loadNodes();
 }
 
 function toggleSelectAllNodesCheckbox(mainCb) {
-  const startIdx = (curNodePage - 1) * nodePageSize;
-  const endIdx = Math.min(startIdx + nodePageSize, cachedNodesList.length);
-  const pageNodes = cachedNodesList.slice(startIdx, endIdx);
-
-  pageNodes.forEach(function (n) {
+  cachedNodesList.forEach(function (n) {
     if (mainCb.checked) window.selectedNodeURIs.add(n.raw_uri);
     else window.selectedNodeURIs.delete(n.raw_uri);
   });
-  loadNodes();
+  document.querySelectorAll('.node-select-cb').forEach(function (cb) { cb.checked = mainCb.checked; });
+  updateSelectHeaderAndBanner();
 }
 
 async function batchEnableSelectedNodes() {

@@ -1,6 +1,7 @@
 package nodes
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -33,31 +34,42 @@ func TestProxySubscriptionLifecycleAndNodeReplacement(t *testing.T) {
 		t.Fatal("subscription ID was not assigned")
 	}
 
-	added, removed := ReplaceSubscriptionNodes(item.ID, []Node{
+	first := SyncSubscriptionNodes(item.ID, []Node{
 		{Type: "socks5", Name: "one", RawURI: "socks5://127.0.0.1:1080"}, //nolint:exhaustruct
 		{Type: "socks5", Name: "two", RawURI: "socks5://127.0.0.2:1080"}, //nolint:exhaustruct
 	})
-	if added != 2 || removed != 0 {
-		t.Fatalf("first replacement added=%d removed=%d", added, removed)
+	if first.Count != 2 || first.Added != 2 || first.Removed != 0 {
+		t.Fatalf("first sync result: %#v", first)
 	}
 
-	added, removed = ReplaceSubscriptionNodes(item.ID, []Node{
+	preservedURI := "socks5://127.0.0.1:1080"
+	RecordTest(preservedURI, true, 12.5, "")
+	BatchUpdateNodesDisabled([]string{preservedURI}, true)
+
+	second := SyncSubscriptionNodes(item.ID, []Node{
+		{Type: "socks5", Name: "one renamed", RawURI: preservedURI},        //nolint:exhaustruct
 		{Type: "socks5", Name: "three", RawURI: "socks5://127.0.0.3:1080"}, //nolint:exhaustruct
 	})
-	if added != 1 || removed != 2 {
-		t.Fatalf("second replacement added=%d removed=%d", added, removed)
+	if second.Count != 2 || second.Added != 1 || second.Removed != 1 {
+		t.Fatalf("second sync result: %#v", second)
 	}
 	list := LoadNodes()
-	if len(list) != 2 {
-		t.Fatalf("manual node plus one subscription node expected, got %d", len(list))
+	if len(list) != 3 {
+		t.Fatalf("manual node plus two subscription nodes expected, got %d", len(list))
 	}
 	for _, node := range list {
 		if node.RawURI == manual.RawURI && node.SourceID != 0 {
 			t.Fatal("manual node source was modified")
 		}
+		if node.RawURI == preservedURI && (!node.Disabled || node.Name != "one renamed") {
+			t.Fatalf("unchanged node state/name not preserved correctly: %#v", node)
+		}
+	}
+	if health := LoadHealth()[preservedURI]; health == nil || health.SuccessCount != 1 || health.LastTestMs != 12.5 {
+		t.Fatalf("unchanged node health was lost: %#v", health)
 	}
 
-	if err := UpdateProxySubscriptionResult(item.ID, added, nil); err != nil {
+	if err := UpdateProxySubscriptionResult(item.ID, second.Count, nil); err != nil {
 		t.Fatal(err)
 	}
 	due, err := DueProxySubscriptions(time.Now())
@@ -66,6 +78,32 @@ func TestProxySubscriptionLifecycleAndNodeReplacement(t *testing.T) {
 	}
 	if len(due) != 0 {
 		t.Fatalf("freshly updated subscription should not be due: %#v", due)
+	}
+
+	if err := UpdateProxySubscriptionResult(item.ID, second.Count, errors.New("temporary failure")); err != nil {
+		t.Fatal(err)
+	}
+	failed, err := GetProxySubscription(item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failed.LastRefreshedAt == 0 || failed.LastAttemptAt == 0 ||
+		failed.ConsecutiveFailures != 1 || failed.NodeCount != second.Count {
+		t.Fatalf("unexpected failed refresh state: %#v", failed)
+	}
+	due, err = DueProxySubscriptions(time.Unix(failed.LastAttemptAt, 0).Add(30 * time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(due) != 0 {
+		t.Fatalf("failed subscription retried too early: %#v", due)
+	}
+	due, err = DueProxySubscriptions(time.Unix(failed.LastAttemptAt, 0).Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(due) != 1 || due[0].ID != item.ID {
+		t.Fatalf("failed subscription should retry after backoff: %#v", due)
 	}
 
 	if err := DeleteProxySubscription(item.ID); err != nil {

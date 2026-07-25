@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"net/url"
@@ -16,11 +17,18 @@ import (
 )
 
 const (
-	minProxyRefreshMinutes = 1
-	maxProxyRefreshMinutes = 7 * 24 * 60
+	minProxyRefreshMinutes    = 1
+	maxProxyRefreshMinutes    = 7 * 24 * 60
+	maxProxySubscriptionNodes = 50000
+	proxyRefreshConcurrency   = 4
 )
 
-var subscriptionRefreshMu sync.Mutex //nolint:gochecknoglobals
+var subscriptionRefreshLocks sync.Map //nolint:gochecknoglobals
+
+func proxySubscriptionLock(id int64) *sync.Mutex {
+	value, _ := subscriptionRefreshLocks.LoadOrStore(id, &sync.Mutex{})
+	return value.(*sync.Mutex)
+}
 
 func (adm *AdminHandler) adminAddStandardProxy(w http.ResponseWriter, r *http.Request) {
 	var body struct {
@@ -127,14 +135,20 @@ func (adm *AdminHandler) adminSaveProxySubscription(w http.ResponseWriter, r *ht
 
 	result := map[string]any{"ok": true, "subscription": item}
 	if body.RefreshNow {
-		added, refreshErr := adm.refreshProxySubscription(r.Context(), item)
+		count, refreshErr := adm.refreshProxySubscription(r.Context(), item)
+		if updated, getErr := nodes.GetProxySubscription(item.ID); getErr == nil {
+			item = updated
+		}
+		result["subscription"] = item
 		if refreshErr != nil {
-			writeJSON(w, http.StatusBadRequest, adminErr("订阅已保存，但首次刷新失败: "+refreshErr.Error()))
+			result["refresh_ok"] = false
+			result["refresh_error"] = refreshErr.Error()
+			result["count"] = item.NodeCount
+			writeJSON(w, http.StatusOK, result)
 			return
 		}
-		result["count"] = added
-		item, _ = nodes.GetProxySubscription(item.ID)
-		result["subscription"] = item
+		result["refresh_ok"] = true
+		result["count"] = count
 	}
 	writeJSON(w, http.StatusOK, result)
 }
@@ -170,17 +184,31 @@ func (adm *AdminHandler) adminDeleteProxySubscription(w http.ResponseWriter, r *
 		writeJSON(w, http.StatusNotFound, adminErr("订阅不存在"))
 		return
 	}
-	removed := nodes.DeleteSubscriptionNodes(body.ID)
+	lock := proxySubscriptionLock(body.ID)
+	lock.Lock()
+	defer lock.Unlock()
+	if _, err := nodes.GetProxySubscription(body.ID); err != nil {
+		writeJSON(w, http.StatusNotFound, adminErr("订阅不存在"))
+		return
+	}
 	if err := nodes.DeleteProxySubscription(body.ID); err != nil {
 		writeJSON(w, http.StatusInternalServerError, adminErr(err.Error()))
 		return
 	}
+	removed := nodes.DeleteSubscriptionNodes(body.ID)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed_count": removed})
 }
 
 func (adm *AdminHandler) refreshProxySubscription(ctx context.Context, item nodes.ProxySubscription) (int, error) {
-	subscriptionRefreshMu.Lock()
-	defer subscriptionRefreshMu.Unlock()
+	lock := proxySubscriptionLock(item.ID)
+	lock.Lock()
+	defer lock.Unlock()
+
+	current, err := nodes.GetProxySubscription(item.ID)
+	if err != nil {
+		return 0, errors.New("订阅不存在或已删除")
+	}
+	item = current
 
 	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
@@ -195,13 +223,18 @@ func (adm *AdminHandler) refreshProxySubscription(ctx context.Context, item node
 		_ = nodes.UpdateProxySubscriptionResult(item.ID, item.NodeCount, err)
 		return 0, err
 	}
-	added, removed := nodes.ReplaceSubscriptionNodes(item.ID, imported)
-	if err := nodes.UpdateProxySubscriptionResult(item.ID, added, nil); err != nil {
+	if len(imported) > maxProxySubscriptionNodes {
+		err = fmt.Errorf("订阅包含 %d 个代理，超过单订阅上限 %d", len(imported), maxProxySubscriptionNodes)
+		_ = nodes.UpdateProxySubscriptionResult(item.ID, item.NodeCount, err)
 		return 0, err
 	}
-	log.Printf("[ProxyPool] 订阅 %q 刷新完成：解析 %d，加入 %d，替换旧节点 %d",
-		item.Name, len(imported), added, removed)
-	return added, nil
+	syncResult := nodes.SyncSubscriptionNodes(item.ID, imported)
+	if err := nodes.UpdateProxySubscriptionResult(item.ID, syncResult.Count, nil); err != nil {
+		return 0, err
+	}
+	log.Printf("[ProxyPool] 订阅 %q 刷新完成：解析 %d，当前 %d，新增 %d，删除 %d",
+		item.Name, len(imported), syncResult.Count, syncResult.Added, syncResult.Removed)
+	return syncResult.Count, nil
 }
 
 // StartProxySubscriptionScheduler 启动持久化代理订阅的自动刷新器。
@@ -214,14 +247,27 @@ func StartProxySubscriptionScheduler(vc *vertex.VertexAIClient, cfg config.Confi
 			log.Printf("[ProxyPool] 读取定时订阅失败: %v", err)
 			return
 		}
+		var wg sync.WaitGroup
+		sem := make(chan struct{}, proxyRefreshConcurrency)
 		for _, item := range items {
 			if ctx.Err() != nil {
-				return
+				break
 			}
-			if _, err := adm.refreshProxySubscription(ctx, item); err != nil {
-				log.Printf("[ProxyPool] 自动刷新订阅 %q 失败: %v", item.Name, err)
-			}
+			wg.Add(1)
+			go func(subscription nodes.ProxySubscription) {
+				defer wg.Done()
+				select {
+				case sem <- struct{}{}:
+				case <-ctx.Done():
+					return
+				}
+				defer func() { <-sem }()
+				if _, err := adm.refreshProxySubscription(ctx, subscription); err != nil {
+					log.Printf("[ProxyPool] 自动刷新订阅 %q 失败: %v", subscription.Name, err)
+				}
+			}(item)
 		}
+		wg.Wait()
 	}
 	go func() {
 		refreshDue()

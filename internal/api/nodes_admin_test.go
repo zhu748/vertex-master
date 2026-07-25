@@ -3,11 +3,110 @@ package api
 import (
 	"encoding/base64"
 	"encoding/json"
+	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
+	"github.com/bsfdsagfadg/vertex/internal/config"
+	"github.com/bsfdsagfadg/vertex/internal/nodes"
 	"github.com/bsfdsagfadg/vertex/internal/transport"
 )
+
+func TestReadLimitedSubscriptionBody(t *testing.T) {
+	data, err := readLimitedSubscriptionBody(strings.NewReader("proxy-list"), -1)
+	if err != nil || string(data) != "proxy-list" {
+		t.Fatalf("small subscription body failed: data=%q err=%v", data, err)
+	}
+	if _, err := readLimitedSubscriptionBody(strings.NewReader("ignored"), maxSubscriptionResponseBytes+1); err == nil {
+		t.Fatal("known oversized subscription body should be rejected")
+	}
+	oversized := strings.NewReader(strings.Repeat("x", int(maxSubscriptionResponseBytes)+1))
+	if _, err := readLimitedSubscriptionBody(oversized, -1); err == nil {
+		t.Fatal("streamed oversized subscription body should be rejected")
+	}
+}
+
+func TestSubscriptionURLForLogRemovesCredentialsAndQuery(t *testing.T) {
+	got := subscriptionURLForLog("https://alice:secret@example.com/list.txt?token=sensitive#fragment")
+	if got != "https://example.com/list.txt" {
+		t.Fatalf("sensitive subscription URL parts leaked: %q", got)
+	}
+}
+
+func TestNodeMatchesAdminStatus(t *testing.T) {
+	enabled := nodes.Node{RawURI: "http://127.0.0.1:8080"}                  //nolint:exhaustruct
+	disabled := nodes.Node{RawURI: "http://127.0.0.1:8081", Disabled: true} //nolint:exhaustruct
+	healthy := &nodes.NodeHealth{LastSuccessAt: 1}                          //nolint:exhaustruct
+	unhealthy := &nodes.NodeHealth{LastFailAt: 1, ConsecutiveFailures: 1}   //nolint:exhaustruct
+
+	if !nodeMatchesAdminStatus(enabled, nil, "enabled") ||
+		nodeMatchesAdminStatus(disabled, nil, "enabled") {
+		t.Fatal("enabled status filter mismatch")
+	}
+	if !nodeMatchesAdminStatus(disabled, nil, "disabled") {
+		t.Fatal("disabled status filter mismatch")
+	}
+	if !nodeMatchesAdminStatus(enabled, healthy, "healthy") ||
+		nodeMatchesAdminStatus(enabled, unhealthy, "healthy") {
+		t.Fatal("healthy status filter mismatch")
+	}
+	if !nodeMatchesAdminStatus(enabled, unhealthy, "unhealthy") ||
+		!nodeMatchesAdminStatus(enabled, nil, "untested") {
+		t.Fatal("health failure/untested filter mismatch")
+	}
+}
+
+func TestAdminGetNodesPaginationAndFilters(t *testing.T) {
+	const prefix = "admin-pagination-filter-test"
+	firstURI := "http://127.0.0.1:49101#" + prefix + "-first"
+	secondURI := "socks5://127.0.0.1:49102#" + prefix + "-second"
+	nodes.MergeNodes([]nodes.Node{
+		{Type: "http", Name: prefix + "-first", RawURI: firstURI},                     //nolint:exhaustruct
+		{Type: "socks5", Name: prefix + "-second", RawURI: secondURI, Disabled: true}, //nolint:exhaustruct
+	})
+	t.Cleanup(func() {
+		nodes.DeleteNode(firstURI)
+		nodes.DeleteNode(secondURI)
+	})
+
+	cfg := config.StaticProvider(config.DefaultConfig())
+	adm := &AdminHandler{handler: handler{cfg: cfg}} //nolint:exhaustruct
+	req := httptest.NewRequest("GET",
+		"/api/admin/nodes?query="+prefix+"&page=2&page_size=1", nil)
+	rec := httptest.NewRecorder()
+	adm.adminGetNodes(rec, req)
+
+	var page struct {
+		Nodes      []nodes.Node `json:"nodes"`
+		Total      int          `json:"total"`
+		Page       int          `json:"page"`
+		PageSize   int          `json:"page_size"`
+		TotalPages int          `json:"total_pages"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 2 || page.Page != 2 || page.PageSize != 1 ||
+		page.TotalPages != 2 || len(page.Nodes) != 1 {
+		t.Fatalf("unexpected paginated response: %#v", page)
+	}
+
+	req = httptest.NewRequest("GET",
+		"/api/admin/nodes?query="+prefix+"&status=disabled&uris_only=true", nil)
+	rec = httptest.NewRecorder()
+	adm.adminGetNodes(rec, req)
+	var filtered struct {
+		URIs  []string `json:"uris"`
+		Total int      `json:"total"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &filtered); err != nil {
+		t.Fatal(err)
+	}
+	if filtered.Total != 1 || len(filtered.URIs) != 1 || filtered.URIs[0] != secondURI {
+		t.Fatalf("unexpected filtered URI response: %#v", filtered)
+	}
+}
 
 func TestParseInlineYamlAttrsKeepsNestedObjects(t *testing.T) {
 	attrs := parseInlineYamlAttrs("name: demo, type: vless, ws-opts: { path: /ws, headers: { Host: edge.example.com } }, reality-opts: { public-key: pubkey, short-id: abcd }")

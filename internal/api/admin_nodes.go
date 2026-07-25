@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,8 +20,11 @@ import (
 	"github.com/bsfdsagfadg/vertex/internal/transport"
 )
 
-func (adm *AdminHandler) adminGetNodes(w http.ResponseWriter, _ *http.Request) {
+const maxSubscriptionResponseBytes int64 = 10 << 20
+
+func (adm *AdminHandler) adminGetNodes(w http.ResponseWriter, r *http.Request) {
 	list := nodes.LoadNodes()
+	health := nodes.LoadHealth()
 	var enabledCount, disabledCount int
 	for _, n := range list {
 		if n.Disabled {
@@ -29,17 +33,106 @@ func (adm *AdminHandler) adminGetNodes(w http.ResponseWriter, _ *http.Request) {
 			enabledCount++
 		}
 	}
+
+	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("query")))
+	nodeType := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("type")))
+	status := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("status")))
+	source := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("source")))
+	filtered := make([]nodes.Node, 0, len(list))
+	for _, node := range list {
+		if query != "" && !strings.Contains(strings.ToLower(node.Name), query) &&
+			!strings.Contains(strings.ToLower(node.RawURI), query) &&
+			!strings.Contains(strings.ToLower(node.Type), query) {
+			continue
+		}
+		if nodeType != "" && nodeType != "all" && !strings.EqualFold(node.Type, nodeType) {
+			continue
+		}
+		if source == "manual" && node.SourceID != 0 {
+			continue
+		}
+		if source == "subscription" && node.SourceID == 0 {
+			continue
+		}
+		if !nodeMatchesAdminStatus(node, health[node.RawURI], status) {
+			continue
+		}
+		filtered = append(filtered, node)
+	}
+
+	if r.URL.Query().Get("uris_only") == "true" {
+		uris := make([]string, 0, len(filtered))
+		for _, node := range filtered {
+			uris = append(uris, node.RawURI)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"uris":  uris,
+			"total": len(filtered),
+		})
+		return
+	}
+
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 {
+		pageSize = len(filtered)
+		if pageSize == 0 {
+			pageSize = 1
+		}
+	} else if pageSize > 200 {
+		pageSize = 200
+	}
+	totalPages := max(1, (len(filtered)+pageSize-1)/pageSize)
+	if page > totalPages {
+		page = totalPages
+	}
+	start := min((page-1)*pageSize, len(filtered))
+	end := min(start+pageSize, len(filtered))
+	pageNodes := filtered[start:end]
+	pageHealth := make(map[string]*nodes.NodeHealth, len(pageNodes))
+	for _, node := range pageNodes {
+		if item := health[node.RawURI]; item != nil {
+			pageHealth[node.RawURI] = item
+		}
+	}
+
 	sp := nodes.GetStickyPool()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"nodes":                 list,
-		"health":                nodes.LoadHealth(),
-		"total":                 len(list),
+		"nodes":                 pageNodes,
+		"health":                pageHealth,
+		"total":                 len(filtered),
+		"overall_total":         len(list),
+		"page":                  page,
+		"page_size":             pageSize,
+		"total_pages":           totalPages,
 		"enabled_count":         enabledCount,
 		"disabled_count":        disabledCount,
 		"sticky_pool_available": sp.AvailableCount(),
 		"sticky_pool_in_use":    sp.StaleCount(),
 		"sticky_node_priority":  adm.cfg.StickyNodePriority(),
 	})
+}
+
+func nodeMatchesAdminStatus(node nodes.Node, health *nodes.NodeHealth, status string) bool {
+	switch status {
+	case "", "all":
+		return true
+	case "enabled":
+		return !node.Disabled
+	case "disabled":
+		return node.Disabled
+	case "healthy":
+		return health != nil && health.LastSuccessAt > 0 && health.ConsecutiveFailures == 0
+	case "unhealthy":
+		return health != nil && health.ConsecutiveFailures > 0
+	case "untested":
+		return health == nil || (health.LastSuccessAt == 0 && health.LastFailAt == 0)
+	default:
+		return true
+	}
 }
 
 func (adm *AdminHandler) adminGetTestProgress(w http.ResponseWriter, _ *http.Request) {
@@ -53,7 +146,7 @@ func (adm *AdminHandler) adminFetchSub(w http.ResponseWriter, r *http.Request) {
 	if !adm.decodeAdminBody(w, r, &body) {
 		return
 	}
-	log.Printf("[Admin] [FetchSub] 开始拉取订阅 URL: %s", body.URL)
+	log.Printf("[Admin] [FetchSub] 开始拉取订阅 URL: %s", subscriptionURLForLog(body.URL))
 	text, err := adm.fetchSubscriptionText(r.Context(), body.URL)
 	if err != nil {
 		log.Printf("[Admin] [FetchSub] 拉取失败: %v", err)
@@ -384,6 +477,11 @@ func (adm *AdminHandler) fetchSubscriptionText(ctx context.Context, rawURL strin
 	if rawURL == "" {
 		return "", errors.New("subscription url is empty")
 	}
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil || parsedURL.Host == "" ||
+		(parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
+		return "", errors.New("subscription url must be a valid HTTP/HTTPS URL")
+	}
 
 	data, err := fetchSubscriptionDataDirect(ctx, rawURL)
 	if err == nil {
@@ -405,6 +503,17 @@ func (adm *AdminHandler) fetchSubscriptionText(ctx context.Context, rawURL strin
 	return strings.TrimSpace(string(data)), nil
 }
 
+func subscriptionURLForLog(rawURL string) string {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || parsed.Host == "" {
+		return "<invalid subscription URL>"
+	}
+	parsed.User = nil
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String()
+}
+
 func fetchSubscriptionDataDirect(ctx context.Context, rawURL string) ([]byte, error) {
 	client := netx.NewHTTPClient(30 * time.Second)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
@@ -423,14 +532,10 @@ func fetchSubscriptionDataDirect(ctx context.Context, rawURL string) ([]byte, er
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("error: %w", err)
-	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("status code %d", resp.StatusCode)
 	}
-	return data, nil
+	return readLimitedSubscriptionBody(resp.Body, resp.ContentLength)
 }
 
 func fetchSubscriptionDataViaProxy(ctx context.Context, netClient *transport.NetworkClient, rawURL string, proxyURI string) ([]byte, error) {
@@ -448,12 +553,30 @@ func fetchSubscriptionDataViaProxy(ctx context.Context, netClient *transport.Net
 		"user-agent": {subscriptionFetchUserAgent},
 		"accept":     {"*/*"},
 	}
-	statusCode, data, err := sess.DoAndRead(ctx, http.MethodGet, rawURL, header, nil)
+	resp, err := sess.Do(ctx, http.MethodGet, rawURL, header, nil)
 	if err != nil {
 		return nil, fmt.Errorf("error: %w", err)
 	}
-	if statusCode != http.StatusOK {
-		return nil, fmt.Errorf("status code %d", statusCode)
+	if resp == nil {
+		return nil, errors.New("nil response received")
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("status code %d", resp.StatusCode)
+	}
+	return readLimitedSubscriptionBody(resp.Body, resp.ContentLength)
+}
+
+func readLimitedSubscriptionBody(body io.Reader, contentLength int64) ([]byte, error) {
+	if contentLength > maxSubscriptionResponseBytes {
+		return nil, fmt.Errorf("subscription response exceeds %d MiB limit", maxSubscriptionResponseBytes>>20)
+	}
+	data, err := io.ReadAll(io.LimitReader(body, maxSubscriptionResponseBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("error: %w", err)
+	}
+	if int64(len(data)) > maxSubscriptionResponseBytes {
+		return nil, fmt.Errorf("subscription response exceeds %d MiB limit", maxSubscriptionResponseBytes>>20)
 	}
 	return data, nil
 }

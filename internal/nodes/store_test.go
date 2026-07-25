@@ -66,6 +66,7 @@ func TestNodesLifecycle(t *testing.T) {
 	}
 
 	RecordTest("uri1", false, 0, "timeout")
+	health = LoadHealth()
 	hUri1 = health["uri1"]
 	if hUri1 == nil || hUri1.FailCount != 1 {
 		t.Errorf("Expected fail count 1, got %v", hUri1)

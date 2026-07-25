@@ -150,25 +150,25 @@ td code { background: rgba(0, 0, 0, .3); padding: 2px 9px; border-radius: 8px; f
 
 /* ── 【仅在电脑端桌面视图启用的布局锁定 (锁定列宽，防止撑开挤压)】 ── */
 @media (min-width: 769px) {
-  #page-nodes table {
+  #nodesTable {
     table-layout: fixed !important;
   }
 
-  #page-nodes table th:nth-child(1), #page-nodes table td:nth-child(1) {
+  #nodesTable th:nth-child(1), #nodesTable td:nth-child(1) {
     width: 50px !important;
     text-align: center;
   }
-  #page-nodes table th:nth-child(2), #page-nodes table td:nth-child(2) {
+  #nodesTable th:nth-child(2), #nodesTable td:nth-child(2) {
     width: auto !important;
     min-width: 180px !important;
   }
-  #page-nodes table th:nth-child(3), #page-nodes table td:nth-child(3) {
+  #nodesTable th:nth-child(3), #nodesTable td:nth-child(3) {
     width: 110px !important;
   }
-  #page-nodes table th:nth-child(4), #page-nodes table td:nth-child(4) {
+  #nodesTable th:nth-child(4), #nodesTable td:nth-child(4) {
     width: 240px !important;
   }
-  #page-nodes table th:nth-child(5), #page-nodes table td:nth-child(5) {
+  #nodesTable th:nth-child(5), #nodesTable td:nth-child(5) {
     width: 290px !important;
     text-align: right !important;
   }
@@ -180,10 +180,21 @@ td code { background: rgba(0, 0, 0, .3); padding: 2px 9px; border-radius: 8px; f
     line-height: 1.35 !important;
   }
 
-  #page-nodes table td:nth-child(2) div {
+  #nodesTable td:nth-child(2) div {
     word-break: break-all !important;
     white-space: normal !important;
     line-height: 1.35 !important;
+  }
+
+  #proxySubscriptionsTable th:last-child,
+  #proxySubscriptionsTable td:last-child {
+    width: 190px;
+    text-align: right;
+  }
+
+  #proxySubscriptionsTable td:nth-child(5) {
+    max-width: 280px;
+    word-break: break-word;
   }
 }
 
@@ -288,12 +299,18 @@ td code { background: rgba(0, 0, 0, .3); padding: 2px 9px; border-radius: 8px; f
 .grid-2 { grid-template-columns: 1fr 1fr; }
 .grid-1 { grid-template-columns: 1fr; }
 .m-0 { margin: 0; }
+.mt-8 { margin-top: 8px; }
+.mt-12 { margin-top: 12px; }
+.w-120 { width: 120px; flex: 0 0 120px !important; }
 .font-mono { font-family: ui-monospace, monospace; }
 .file-input { padding: 6px 12px; }
 .btn-blue { border-color: var(--blue); color: var(--blue); }
 .btn-green { border-color: var(--green); color: var(--green); }
 .btn-red { border-color: var(--red); color: var(--red); }
 .summary-text { margin-bottom: 12px; font-weight: 600; color: var(--gold); }
+.node-filter-toolbar { align-items: center; margin-bottom: 10px; }
+.node-filter-toolbar input { min-width: 220px; }
+.node-filter-toolbar select { flex: 0 1 160px; min-width: 120px; }
 .divider { border-top: 1px dashed var(--stroke); margin: 18px 0; }
 .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
 .flex-1 { flex: 1; }
@@ -308,6 +325,17 @@ td code { background: rgba(0, 0, 0, .3); padding: 2px 9px; border-radius: 8px; f
 .progress-track { height: 6px; background: rgba(0,0,0,0.3); border-radius: 99px; overflow: hidden; margin: 8px 0; }
 .progress-fill { height: 100%; width: 0%; background: linear-gradient(90deg, var(--gold), var(--gold-deep)); transition: width 0.2s ease; }
 .test-progress-detail { font-size: calc(var(--base-font-size) * 11 / 14); color: var(--text-dim-custom, var(--text-dim)); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.proxy-sub-error {
+  color: var(--red);
+  font-size: calc(var(--base-font-size) * 11 / 14);
+  line-height: 1.35;
+  margin-top: 5px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
 .key-input-wrap { display: flex; gap: 10px; align-items: stretch; flex: 1; min-width: 0; }
 .key-gen-btn {
   width: 40px; display: flex; align-items: center; justify-content: center;
@@ -378,18 +406,20 @@ td code { background: rgba(0, 0, 0, .3); padding: 2px 9px; border-radius: 8px; f
 
   /* ── 【移动端表格重构：Table 彻底转换成磨砂卡片】 ── */
   /* 【核心修改：作用域限定在各自页面上，绝不全局影响】 */
-  #page-nodes table, #page-nodes thead, #page-nodes tbody, #page-nodes th, #page-nodes td, #page-nodes tr,
+  #nodesTable, #nodesTable thead, #nodesTable tbody, #nodesTable th, #nodesTable td, #nodesTable tr,
+  #proxySubscriptionsTable, #proxySubscriptionsTable thead, #proxySubscriptionsTable tbody,
+  #proxySubscriptionsTable th, #proxySubscriptionsTable td, #proxySubscriptionsTable tr,
   #page-keys table, #page-keys thead, #page-keys tbody, #page-keys th, #page-keys td, #page-keys tr {
     display: block !important;
     width: 100% !important;
     table-layout: auto !important; /* 关键：移动端抛弃电脑端的锁死列宽算法 */
   }
-  #page-nodes thead tr, #page-keys thead tr {
+  #nodesTable thead tr, #proxySubscriptionsTable thead tr, #page-keys thead tr {
     position: absolute !important;
     top: -9999px;
     left: -9999px;
   }
-  #page-nodes tr, #page-keys tr {
+  #nodesTable tr, #proxySubscriptionsTable tr, #page-keys tr {
     border: 1px solid var(--stroke) !important;
     border-radius: 12px !important;
     margin-bottom: 16px !important;
@@ -397,7 +427,7 @@ td code { background: rgba(0, 0, 0, .3); padding: 2px 9px; border-radius: 8px; f
     background: rgba(255, 255, 255, 0.02) !important;
     box-shadow: 0 4px 12px rgba(0,0,0,0.1) !important;
   }
-  #page-nodes td, #page-keys td {
+  #nodesTable td, #proxySubscriptionsTable td, #page-keys td {
     border: none !important;
     border-bottom: 1px solid rgba(255, 255, 255, 0.05) !important;
     position: relative !important;
@@ -407,11 +437,11 @@ td code { background: rgba(0, 0, 0, .3); padding: 2px 9px; border-radius: 8px; f
     text-align: left !important;
     width: 100% !important; /* 核心：在移动端彻底洗掉 td-child 的强制宽度 */
   }
-  #page-nodes td:last-child, #page-keys td:last-child {
+  #nodesTable td:last-child, #proxySubscriptionsTable td:last-child, #page-keys td:last-child {
     border-bottom: none !important;
     padding-bottom: 0 !important;
   }
-  #page-nodes td:before, #page-keys td:before {
+  #nodesTable td:before, #proxySubscriptionsTable td:before, #page-keys td:before {
     position: absolute;
     top: 8px;
     left: 0;
@@ -423,15 +453,23 @@ td code { background: rgba(0, 0, 0, .3); padding: 2px 9px; border-radius: 8px; f
   }
 
   /* ── 1. 代理节点页面卡片伪类标签（精准限制） ── */
-  #page-nodes td:nth-of-type(1):not([colspan]) { padding-left: 0 !important; text-align: left !important; }
-  #page-nodes td:nth-of-type(1):not([colspan]):before { content: "选择节点"; }
-  #page-nodes td:nth-of-type(2):not([colspan]):before { content: "节点名称"; }
-  #page-nodes td:nth-of-type(3):not([colspan]):before { content: "协议类型"; }
-  #page-nodes td:nth-of-type(4):not([colspan]):before { content: "状态延迟"; }
-  #page-nodes td:nth-of-type(5):not([colspan]):before { content: "管理操作"; }
+  #nodesTable td:nth-of-type(1):not([colspan]) { padding-left: 0 !important; text-align: left !important; }
+  #nodesTable td:nth-of-type(1):not([colspan]):before { content: "选择节点"; }
+  #nodesTable td:nth-of-type(2):not([colspan]):before { content: "节点名称"; }
+  #nodesTable td:nth-of-type(3):not([colspan]):before { content: "协议类型"; }
+  #nodesTable td:nth-of-type(4):not([colspan]):before { content: "状态延迟"; }
+  #nodesTable td:nth-of-type(5):not([colspan]):before { content: "管理操作"; }
 
   /* 修复手机端无节点时暂无节点 td padding */
-  #page-nodes td[colspan="5"] { padding-left: 14px !important; text-align: center !important; }
+  #nodesTable td[colspan="5"],
+  #proxySubscriptionsTable td[colspan="6"] { padding-left: 14px !important; text-align: center !important; }
+
+  #proxySubscriptionsTable td:nth-of-type(1):not([colspan]):before { content: "订阅名称"; }
+  #proxySubscriptionsTable td:nth-of-type(2):not([colspan]):before { content: "类型/间隔"; }
+  #proxySubscriptionsTable td:nth-of-type(3):not([colspan]):before { content: "节点数量"; }
+  #proxySubscriptionsTable td:nth-of-type(4):not([colspan]):before { content: "最近刷新"; }
+  #proxySubscriptionsTable td:nth-of-type(5):not([colspan]):before { content: "状态"; }
+  #proxySubscriptionsTable td:nth-of-type(6):not([colspan]):before { content: "管理操作"; }
 
   /* ── 2. 密钥页面卡片伪类标签（新增专属标签，杜绝借用代理页面标签） ── */
   #page-keys td:nth-of-type(1):before { content: "密钥名称"; }
@@ -440,23 +478,25 @@ td code { background: rgba(0, 0, 0, .3); padding: 2px 9px; border-radius: 8px; f
   #page-keys td:nth-of-type(4):before { content: "管理操作"; }
 
   /* 代理页面 checkbox 样式精准限制 */
-  #page-nodes td:nth-of-type(1) input[type="checkbox"] {
+  #nodesTable td:nth-of-type(1) input[type="checkbox"] {
     margin-left: 32%;
     width: 18px;
     height: 18px;
   }
-  #page-nodes td:nth-of-type(1):before {
+  #nodesTable td:nth-of-type(1):before {
     top: 10px;
   }
   
   /* 移动端 4 按钮排列微调 */
-  #page-nodes td:nth-of-type(5) {
+  #nodesTable td:nth-of-type(5),
+  #proxySubscriptionsTable td:nth-of-type(6) {
     display: flex !important;
     flex-wrap: wrap !important;
     gap: 6px !important;
     padding-left: 32% !important;
   }
-  #page-nodes td:nth-of-type(5) .btn {
+  #nodesTable td:nth-of-type(5) .btn,
+  #proxySubscriptionsTable td:nth-of-type(6) .btn {
     margin: 0 !important;
     font-size: calc(var(--base-font-size) * 11 / 14) !important;
     padding: 5px 8px !important;
@@ -490,6 +530,16 @@ td code { background: rgba(0, 0, 0, .3); padding: 2px 9px; border-radius: 8px; f
   .field.bool { flex-direction: column; align-items: flex-start; }
   .toolbar { flex-wrap: wrap; }
   .toolbar input { min-width: 120px; }
+  #page-nodes .toolbar > input,
+  #page-nodes .toolbar > select {
+    flex: 1 1 100%;
+    width: 100%;
+    min-width: 0;
+  }
+  #page-nodes .toolbar > .w-120 {
+    flex: 0 0 90px !important;
+    width: 90px;
+  }
 
   /* ── 【核心修改：手机端对密钥页面输入框进行弹性垂直堆叠，根治重叠】 ── */
   /* 精准限定在 #page-keys 内，保留登录框的密码眼睛切换按钮在水平一排 */

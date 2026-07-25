@@ -54,12 +54,13 @@ func ensureLoaded() {
 	}
 	loaded = true
 
-	if db.GlobalDB == nil {
+	database := db.CurrentDB()
+	if database == nil {
 		return
 	}
 
 	// Load nodes
-	rows, err := db.GlobalDB.Query("SELECT raw_uri, type, name, disabled, source_id FROM nodes")
+	rows, err := database.Query("SELECT raw_uri, type, name, disabled, source_id FROM nodes")
 	if err == nil {
 		defer func() {
 			_ = rows.Close()
@@ -75,7 +76,7 @@ func ensureLoaded() {
 	}
 
 	// Load health
-	hRows, err := db.GlobalDB.Query("SELECT raw_uri, success_count, fail_count, consecutive_failures, last_test_ms, last_test_error, last_success_at, last_fail_at, cooldown_until FROM node_health")
+	hRows, err := database.Query("SELECT raw_uri, success_count, fail_count, consecutive_failures, last_test_ms, last_test_error, last_success_at, last_fail_at, cooldown_until FROM node_health")
 	if err == nil {
 		defer func() {
 			_ = hRows.Close()
@@ -97,23 +98,33 @@ func LoadNodes() []Node {
 	defer mu.Unlock()
 	ensureLoaded()
 	log.Printf("[Nodes] 获取所有节点 (数量: %d)", len(nodeList))
-	return nodeList
+	return append([]Node(nil), nodeList...)
 }
 
 func LoadHealth() map[string]*NodeHealth {
 	mu.Lock()
 	defer mu.Unlock()
 	ensureLoaded()
-	return healthMap
+	out := make(map[string]*NodeHealth, len(healthMap))
+	for uri, health := range healthMap {
+		if health == nil {
+			out[uri] = nil
+			continue
+		}
+		copied := *health
+		out[uri] = &copied
+	}
+	return out
 }
 
 // writeAtomicJSON has been removed because it is unused
 
 func saveNodesUnsafe() {
-	if db.GlobalDB == nil {
+	database := db.CurrentDB()
+	if database == nil {
 		return
 	}
-	tx, err := db.GlobalDB.Begin()
+	tx, err := database.Begin()
 	if err != nil {
 		return
 	}
@@ -151,10 +162,11 @@ func initHealthQueue() {
 		batch := make(map[string]NodeHealth)
 
 		flush := func() {
-			if len(batch) == 0 || db.GlobalDB == nil {
+			database := db.CurrentDB()
+			if len(batch) == 0 || database == nil {
 				return
 			}
-			tx, err := db.GlobalDB.Begin()
+			tx, err := database.Begin()
 			if err != nil {
 				log.Printf("[ERROR] Failed to begin health save transaction: %v", err)
 				if len(batch) > 1000 {
@@ -207,7 +219,7 @@ func initHealthQueue() {
 }
 
 func saveHealthUnsafe() {
-	if db.GlobalDB == nil {
+	if db.CurrentDB() == nil {
 		return
 	}
 	healthOnce.Do(initHealthQueue)
@@ -225,7 +237,7 @@ func saveHealthUnsafe() {
 }
 
 func updateSingleNodeHealthUnsafe(uri string, h *NodeHealth) {
-	if db.GlobalDB == nil || h == nil {
+	if db.CurrentDB() == nil || h == nil {
 		return
 	}
 	healthOnce.Do(initHealthQueue)
@@ -239,10 +251,11 @@ func updateSingleNodeHealthUnsafe(uri string, h *NodeHealth) {
 }
 
 func updateSingleNodeDisabledUnsafe(uri string, disabled bool) {
-	if db.GlobalDB == nil {
+	database := db.CurrentDB()
+	if database == nil {
 		return
 	}
-	_, _ = db.GlobalDB.Exec("UPDATE nodes SET disabled = ? WHERE raw_uri = ?", disabled, uri)
+	_, _ = database.Exec("UPDATE nodes SET disabled = ? WHERE raw_uri = ?", disabled, uri)
 }
 
 type TestProgress struct {
@@ -383,40 +396,84 @@ func MergeNodes(newNodes []Node) {
 	saveNodesUnsafe()
 }
 
-// ReplaceSubscriptionNodes 原子替换某个订阅产生的节点，不影响手工节点或其他订阅。
-func ReplaceSubscriptionNodes(sourceID int64, newNodes []Node) (added, removed int) {
+type SubscriptionNodeSyncResult struct {
+	Count   int
+	Added   int
+	Removed int
+}
+
+// SyncSubscriptionNodes 差异同步某个订阅产生的节点。
+// URI 未变化的节点会保留禁用状态、健康记录、冷却状态及现有连接。
+func SyncSubscriptionNodes(sourceID int64, newNodes []Node) SubscriptionNodeSyncResult {
 	if sourceID <= 0 {
-		return 0, 0
+		return SubscriptionNodeSyncResult{}
 	}
 
 	mu.Lock()
 	ensureLoaded()
-	kept := make([]Node, 0, len(nodeList)+len(newNodes))
-	existing := make(map[string]bool, len(nodeList)+len(newNodes))
-	var removedURIs []string
-	for _, n := range nodeList {
-		if n.SourceID == sourceID {
-			removed++
-			removedURIs = append(removedURIs, n.RawURI)
-			delete(healthMap, n.RawURI)
-			globalStickyPool.Evict(n.RawURI)
+	result := SubscriptionNodeSyncResult{}
+	desired := make(map[string]Node, len(newNodes))
+	desiredOrder := make([]string, 0, len(newNodes))
+	for _, n := range newNodes {
+		n.RawURI = strings.TrimSpace(n.RawURI)
+		if n.RawURI == "" {
 			continue
 		}
-		kept = append(kept, n)
-		existing[n.RawURI] = true
+		if _, exists := desired[n.RawURI]; !exists {
+			desiredOrder = append(desiredOrder, n.RawURI)
+		}
+		desired[n.RawURI] = n
 	}
-	for _, n := range newNodes {
-		if strings.TrimSpace(n.RawURI) == "" || existing[n.RawURI] {
+
+	occupied := make(map[string]bool, len(nodeList))
+	for _, n := range nodeList {
+		if n.SourceID != sourceID {
+			occupied[n.RawURI] = true
+		}
+	}
+
+	kept := make([]Node, 0, len(nodeList)+len(desired))
+	var removedURIs []string
+	for _, n := range nodeList {
+		if n.SourceID != sourceID {
+			kept = append(kept, n)
+			continue
+		}
+
+		next, wanted := desired[n.RawURI]
+		if wanted && !occupied[n.RawURI] {
+			next.SourceID = sourceID
+			next.Disabled = n.Disabled
+			if strings.TrimSpace(next.Name) == "" {
+				next.Name = n.Name
+			}
+			kept = append(kept, next)
+			delete(desired, n.RawURI)
+			result.Count++
+			continue
+		}
+
+		result.Removed++
+		removedURIs = append(removedURIs, n.RawURI)
+		delete(healthMap, n.RawURI)
+		globalStickyPool.Evict(n.RawURI)
+	}
+	for _, uri := range desiredOrder {
+		n, wanted := desired[uri]
+		if !wanted || occupied[uri] {
 			continue
 		}
 		n.SourceID = sourceID
 		kept = append(kept, n)
-		existing[n.RawURI] = true
-		added++
+		occupied[uri] = true
+		result.Added++
+		result.Count++
 	}
 	nodeList = kept
 	saveNodesUnsafe()
-	saveHealthUnsafe()
+	if result.Removed > 0 {
+		saveHealthUnsafe()
+	}
 	cb := DeleteNodeCallback
 	mu.Unlock()
 
@@ -425,12 +482,17 @@ func ReplaceSubscriptionNodes(sourceID int64, newNodes []Node) (added, removed i
 			cb(uri)
 		}
 	}
-	return added, removed
+	return result
+}
+
+// ReplaceSubscriptionNodes 保留旧调用约定，返回本次新增和删除数量。
+func ReplaceSubscriptionNodes(sourceID int64, newNodes []Node) (added, removed int) {
+	result := SyncSubscriptionNodes(sourceID, newNodes)
+	return result.Added, result.Removed
 }
 
 func DeleteSubscriptionNodes(sourceID int64) int {
-	_, removed := ReplaceSubscriptionNodes(sourceID, nil)
-	return removed
+	return SyncSubscriptionNodes(sourceID, nil).Removed
 }
 
 func DeleteNode(uri string) {
@@ -533,8 +595,9 @@ func BatchUpdateNodesDisabled(uris []string, disabled bool) {
 			nodeList[i].Disabled = disabled
 		}
 	}
-	if db.GlobalDB != nil && len(uris) > 0 {
-		tx, err := db.GlobalDB.Begin()
+	database := db.CurrentDB()
+	if database != nil && len(uris) > 0 {
+		tx, err := database.Begin()
 		if err == nil {
 			stmt, _ := tx.Prepare("UPDATE nodes SET disabled = ? WHERE raw_uri = ?")
 			if stmt != nil {

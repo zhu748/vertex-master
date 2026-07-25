@@ -27,7 +27,18 @@ const API = {
     put(models, alias_map) { return API.raw('/api/admin/models', { method: 'PUT', body: JSON.stringify({ models, alias_map }) }); },
   },
   nodes: {
-    list() { return API.raw('/api/admin/nodes'); },
+    list(opts) {
+      if (!opts) return API.raw('/api/admin/nodes');
+      const params = new URLSearchParams();
+      Object.keys(opts).forEach(function (key) {
+        const value = opts[key];
+        if (value !== undefined && value !== null && value !== '' && value !== 'all') {
+          params.set(key, String(value));
+        }
+      });
+      const query = params.toString();
+      return API.raw('/api/admin/nodes' + (query ? '?' + query : ''));
+    },
     addProxy(v) { return API.raw('/api/admin/nodes', { method: 'POST', body: JSON.stringify(v) }); },
     delete(uri) { return API.raw('/api/admin/nodes', { method: 'DELETE', body: JSON.stringify({ raw_uri: uri }) }); },
     test(uri, opts) { return API.raw('/api/admin/nodes/test', { method: 'POST', body: JSON.stringify(Object.assign({ raw_uri: uri, auto_disable: true, timeout_seconds: 25 }, opts || {})) }); },

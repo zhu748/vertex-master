@@ -69,6 +69,14 @@ func InitDB(dbPath string) error {
 	return nil
 }
 
+// CurrentDB returns a concurrency-safe snapshot of the active database handle.
+// sql.DB itself supports concurrent use; the lock only protects replacing the global pointer.
+func CurrentDB() *sql.DB {
+	mu.Lock()
+	defer mu.Unlock()
+	return GlobalDB
+}
+
 func createTables(db *sql.DB) error {
 	schema := `
 	CREATE TABLE IF NOT EXISTS nodes (
@@ -100,7 +108,9 @@ func createTables(db *sql.DB) error {
 		refresh_interval_minutes INTEGER NOT NULL DEFAULT 60,
 		enabled BOOLEAN NOT NULL DEFAULT 1,
 		last_refreshed_at INTEGER NOT NULL DEFAULT 0,
+		last_attempt_at INTEGER NOT NULL DEFAULT 0,
 		last_error TEXT NOT NULL DEFAULT '',
+		consecutive_failures INTEGER NOT NULL DEFAULT 0,
 		node_count INTEGER NOT NULL DEFAULT 0,
 		created_at INTEGER NOT NULL DEFAULT 0,
 		updated_at INTEGER NOT NULL DEFAULT 0
@@ -112,6 +122,8 @@ func createTables(db *sql.DB) error {
 	}
 	// 兼容旧数据库；新数据库已包含该列，重复添加错误可安全忽略。
 	_, _ = db.Exec("ALTER TABLE nodes ADD COLUMN source_id INTEGER NOT NULL DEFAULT 0")
+	_, _ = db.Exec("ALTER TABLE proxy_subscriptions ADD COLUMN last_attempt_at INTEGER NOT NULL DEFAULT 0")
+	_, _ = db.Exec("ALTER TABLE proxy_subscriptions ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0")
 	return nil
 
 }

@@ -16,18 +16,22 @@ type ProxySubscription struct {
 	RefreshIntervalMinutes int    `json:"refresh_interval_minutes"`
 	Enabled                bool   `json:"enabled"`
 	LastRefreshedAt        int64  `json:"last_refreshed_at"`
+	LastAttemptAt          int64  `json:"last_attempt_at"`
 	LastError              string `json:"last_error"`
+	ConsecutiveFailures    int    `json:"consecutive_failures"`
 	NodeCount              int    `json:"node_count"`
 	CreatedAt              int64  `json:"created_at"`
 	UpdatedAt              int64  `json:"updated_at"`
 }
 
 func ListProxySubscriptions() ([]ProxySubscription, error) {
-	if db.GlobalDB == nil {
+	database := db.CurrentDB()
+	if database == nil {
 		return nil, errors.New("database unavailable")
 	}
-	rows, err := db.GlobalDB.Query(`SELECT id, name, url, proxy_type, refresh_interval_minutes,
-		enabled, last_refreshed_at, last_error, node_count, created_at, updated_at
+	rows, err := database.Query(`SELECT id, name, url, proxy_type, refresh_interval_minutes,
+		enabled, last_refreshed_at, last_attempt_at, last_error, consecutive_failures,
+		node_count, created_at, updated_at
 		FROM proxy_subscriptions ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("list proxy subscriptions: %w", err)
@@ -39,7 +43,8 @@ func ListProxySubscriptions() ([]ProxySubscription, error) {
 		var item ProxySubscription
 		if err := rows.Scan(
 			&item.ID, &item.Name, &item.URL, &item.ProxyType, &item.RefreshIntervalMinutes,
-			&item.Enabled, &item.LastRefreshedAt, &item.LastError, &item.NodeCount,
+			&item.Enabled, &item.LastRefreshedAt, &item.LastAttemptAt, &item.LastError,
+			&item.ConsecutiveFailures, &item.NodeCount,
 			&item.CreatedAt, &item.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan proxy subscription: %w", err)
@@ -50,15 +55,18 @@ func ListProxySubscriptions() ([]ProxySubscription, error) {
 }
 
 func GetProxySubscription(id int64) (ProxySubscription, error) {
-	if db.GlobalDB == nil {
+	database := db.CurrentDB()
+	if database == nil {
 		return ProxySubscription{}, errors.New("database unavailable")
 	}
 	var item ProxySubscription
-	err := db.GlobalDB.QueryRow(`SELECT id, name, url, proxy_type, refresh_interval_minutes,
-		enabled, last_refreshed_at, last_error, node_count, created_at, updated_at
+	err := database.QueryRow(`SELECT id, name, url, proxy_type, refresh_interval_minutes,
+		enabled, last_refreshed_at, last_attempt_at, last_error, consecutive_failures,
+		node_count, created_at, updated_at
 		FROM proxy_subscriptions WHERE id = ?`, id).Scan(
 		&item.ID, &item.Name, &item.URL, &item.ProxyType, &item.RefreshIntervalMinutes,
-		&item.Enabled, &item.LastRefreshedAt, &item.LastError, &item.NodeCount,
+		&item.Enabled, &item.LastRefreshedAt, &item.LastAttemptAt, &item.LastError,
+		&item.ConsecutiveFailures, &item.NodeCount,
 		&item.CreatedAt, &item.UpdatedAt,
 	)
 	if err != nil {
@@ -68,12 +76,13 @@ func GetProxySubscription(id int64) (ProxySubscription, error) {
 }
 
 func SaveProxySubscription(item ProxySubscription) (ProxySubscription, error) {
-	if db.GlobalDB == nil {
+	database := db.CurrentDB()
+	if database == nil {
 		return ProxySubscription{}, errors.New("database unavailable")
 	}
 	now := time.Now().Unix()
 	if item.ID == 0 {
-		result, err := db.GlobalDB.Exec(`INSERT INTO proxy_subscriptions
+		result, err := database.Exec(`INSERT INTO proxy_subscriptions
 			(name, url, proxy_type, refresh_interval_minutes, enabled, created_at, updated_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?)`,
 			item.Name, item.URL, item.ProxyType, item.RefreshIntervalMinutes, item.Enabled, now, now)
@@ -82,7 +91,7 @@ func SaveProxySubscription(item ProxySubscription) (ProxySubscription, error) {
 		}
 		item.ID, _ = result.LastInsertId()
 	} else {
-		result, err := db.GlobalDB.Exec(`UPDATE proxy_subscriptions SET
+		result, err := database.Exec(`UPDATE proxy_subscriptions SET
 			name = ?, url = ?, proxy_type = ?, refresh_interval_minutes = ?, enabled = ?, updated_at = ?
 			WHERE id = ?`,
 			item.Name, item.URL, item.ProxyType, item.RefreshIntervalMinutes, item.Enabled, now, item.ID)
@@ -97,16 +106,25 @@ func SaveProxySubscription(item ProxySubscription) (ProxySubscription, error) {
 }
 
 func UpdateProxySubscriptionResult(id int64, nodeCount int, refreshErr error) error {
-	if db.GlobalDB == nil {
+	database := db.CurrentDB()
+	if database == nil {
 		return errors.New("database unavailable")
 	}
-	lastError := ""
+	now := time.Now().Unix()
 	if refreshErr != nil {
-		lastError = refreshErr.Error()
+		_, err := database.Exec(`UPDATE proxy_subscriptions SET
+			last_attempt_at = ?, last_error = ?, consecutive_failures = consecutive_failures + 1,
+			updated_at = ? WHERE id = ?`,
+			now, refreshErr.Error(), now, id)
+		if err != nil {
+			return fmt.Errorf("update failed proxy subscription result: %w", err)
+		}
+		return nil
 	}
-	_, err := db.GlobalDB.Exec(`UPDATE proxy_subscriptions SET
-		last_refreshed_at = ?, last_error = ?, node_count = ?, updated_at = ?
-		WHERE id = ?`, time.Now().Unix(), lastError, nodeCount, time.Now().Unix(), id)
+	_, err := database.Exec(`UPDATE proxy_subscriptions SET
+		last_refreshed_at = ?, last_attempt_at = ?, last_error = '',
+		consecutive_failures = 0, node_count = ?, updated_at = ?
+		WHERE id = ?`, now, now, nodeCount, now, id)
 	if err != nil {
 		return fmt.Errorf("update proxy subscription result: %w", err)
 	}
@@ -114,10 +132,11 @@ func UpdateProxySubscriptionResult(id int64, nodeCount int, refreshErr error) er
 }
 
 func DeleteProxySubscription(id int64) error {
-	if db.GlobalDB == nil {
+	database := db.CurrentDB()
+	if database == nil {
 		return errors.New("database unavailable")
 	}
-	result, err := db.GlobalDB.Exec("DELETE FROM proxy_subscriptions WHERE id = ?", id)
+	result, err := database.Exec("DELETE FROM proxy_subscriptions WHERE id = ?", id)
 	if err != nil {
 		return fmt.Errorf("delete proxy subscription: %w", err)
 	}
@@ -138,9 +157,31 @@ func DueProxySubscriptions(now time.Time) ([]ProxySubscription, error) {
 			continue
 		}
 		interval := time.Duration(item.RefreshIntervalMinutes) * time.Minute
+		if item.LastError != "" && item.LastAttemptAt > 0 {
+			retryDelay := proxySubscriptionRetryDelay(item.ConsecutiveFailures, interval)
+			if now.Sub(time.Unix(item.LastAttemptAt, 0)) >= retryDelay {
+				due = append(due, item)
+			}
+			continue
+		}
 		if item.LastRefreshedAt == 0 || now.Sub(time.Unix(item.LastRefreshedAt, 0)) >= interval {
 			due = append(due, item)
 		}
 	}
 	return due, nil
+}
+
+func proxySubscriptionRetryDelay(failures int, interval time.Duration) time.Duration {
+	if failures < 1 {
+		failures = 1
+	}
+	shift := min(failures-1, 4)
+	delay := time.Minute * time.Duration(1<<shift)
+	if delay > 15*time.Minute {
+		delay = 15 * time.Minute
+	}
+	if interval > 0 && delay > interval {
+		return interval
+	}
+	return delay
 }
