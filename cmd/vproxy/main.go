@@ -191,6 +191,10 @@ func main() {
 	api.EnsureAdminPassword()
 	api.StartAdminSessionCleanup(time.Hour)
 
+	if err := api.SyncEnvironmentProxySubscription(); err != nil {
+		log.Printf("[ProxyPool] 同步环境变量代理订阅失败: %v", err)
+	}
+
 	vc := vertex.NewVertexAIClient(cfg)
 	stopProxySubscriptionScheduler := api.StartProxySubscriptionScheduler(vc, cfg)
 

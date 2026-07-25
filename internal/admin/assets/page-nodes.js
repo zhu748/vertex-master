@@ -431,6 +431,14 @@ async function loadProxySubscriptions() {
       var nameDiv = document.createElement('div');
       nameDiv.style.cssText = 'font-weight:600;';
       nameDiv.textContent = sub.name;
+      if (sub.managed_key) {
+        var managedBadge = document.createElement('span');
+        managedBadge.className = 'pill on';
+        managedBadge.style.cssText = 'margin-left:6px;font-size:10px;vertical-align:1px;';
+        managedBadge.textContent = '环境托管';
+        managedBadge.title = '该订阅由 Render 环境变量管理';
+        nameDiv.appendChild(managedBadge);
+      }
       var urlDiv = document.createElement('div');
       urlDiv.style.cssText = 'font-size:11px;color:var(--text-dim);margin-top:3px;word-break:break-all;';
       urlDiv.textContent = maskedSubscriptionURL(sub.url);
@@ -472,12 +480,19 @@ async function loadProxySubscriptions() {
 
       var actionTd = document.createElement('td');
       actionTd.style.cssText = 'text-align:right;white-space:nowrap;';
-      [
-        ['编辑', 'ghost', function () { editProxySubscription(sub.id); }],
-        [sub.enabled ? '停用' : '启用', 'ghost', function (button) { toggleProxySubscriptionEnabled(sub.id, !sub.enabled, button); }],
-        ['刷新', 'ghost', function (button) { refreshProxySubscription(sub.id, button); }],
-        ['删除', 'danger', function (button) { deleteProxySubscription(sub.id, button); }]
-      ].forEach(function (spec) {
+      var actions = [
+        ['刷新', 'ghost', function (button) { refreshProxySubscription(sub.id, button); }]
+      ];
+      if (!sub.managed_key) {
+        actions.unshift(
+          ['编辑', 'ghost', function () { editProxySubscription(sub.id); }],
+          [sub.enabled ? '停用' : '启用', 'ghost', function (button) { toggleProxySubscriptionEnabled(sub.id, !sub.enabled, button); }]
+        );
+        actions.push(['删除', 'danger', function (button) { deleteProxySubscription(sub.id, button); }]);
+      } else {
+        actionTd.title = '请在 Render 环境变量中修改或移除该订阅';
+      }
+      actions.forEach(function (spec) {
         var btn = document.createElement('button');
         btn.className = 'btn ' + spec[1];
         btn.style.cssText = 'padding:4px 8px;font-size:12px;margin-left:4px;';

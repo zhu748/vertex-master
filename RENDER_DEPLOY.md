@@ -9,13 +9,21 @@
 - `VPROXY_ADMIN_PASSWORD`：管理后台密码，建议使用 16 位以上的随机字符。
 - `VPROXY_API_KEY`：客户端调用 API 时使用的非空密钥，无需以 `sk-` 开头。
 
-本版本的使用规则哈希为：
+`render.yaml` 已内置本版本的使用规则哈希：
 
 ```text
 36800adeec862126
 ```
 
-将该值填入 `VPROXY_RULES_HASH` 表示你已阅读并同意项目根目录 `cmd/vproxy/rules.txt` 中的使用规则。规则更新后哈希会变化，需要重新确认。
+该值表示你已阅读并同意项目根目录 `cmd/vproxy/rules.txt` 中的使用规则，不需要在创建 Blueprint 时再次填写。规则更新后哈希会变化，需要同步更新 `render.yaml`。
+
+代理池订阅为可选配置：
+
+- `VPROXY_PROXY_SUBSCRIPTION_URL`：纯文本代理列表 URL；留空即关闭环境变量托管代理池。
+- `VPROXY_PROXY_SUBSCRIPTION_TYPE`：无协议前缀代理行所使用的类型，默认 `http`；可设为 `https`、`socks4`、`socks4a`、`socks5`、`socks5h` 或 `auto`。
+- `VPROXY_PROXY_SUBSCRIPTION_INTERVAL_MINUTES`：自动拉取间隔，默认 `60` 分钟，范围为 1–10080。
+
+订阅中已经带有 `http://`、`socks5://` 等前缀的行会使用各自的协议，不受默认类型影响。
 
 ## 二、上传到 GitHub
 
@@ -37,12 +45,15 @@ git push -u origin main
 1. 登录 Render，选择 **New > Blueprint**。
 2. 连接刚刚上传的 GitHub 仓库。
 3. Render 会读取根目录的 `render.yaml`。
-4. 按提示填入以下三个环境变量：
+4. 按提示填写环境变量：
    - `VPROXY_ADMIN_PASSWORD`
    - `VPROXY_API_KEY`
-   - `VPROXY_RULES_HASH`，值为 `36800adeec862126`
-5. 创建 Blueprint 并等待构建完成。
-6. 打开 `https://<你的服务名>.onrender.com/healthz`，返回 `"status":"healthy"` 即表示部署成功。
+   - `VPROXY_PROXY_SUBSCRIPTION_URL`（可选，不使用代理池时留空）
+5. 代理类型和刷新间隔已有默认值；如需覆盖，可在 `render.yaml` 或服务的 **Environment** 页面修改。
+6. 创建 Blueprint 并等待构建完成。
+7. 打开 `https://<你的服务名>.onrender.com/healthz`，返回 `"status":"healthy"` 即表示部署成功。
+
+设置代理 URL 后，服务会在启动时创建“环境变量代理池”并立即拉取一次，此后默认每 60 分钟刷新。在管理面板中可以查看状态和手动刷新；修改、停用或移除请在 Render 环境变量中操作并重新部署。
 
 管理后台地址：
 
@@ -58,7 +69,7 @@ https://<你的服务名>.onrender.com/v1
 
 ## 四、免费方案与持久化
 
-`render.yaml` 默认使用 Render Free Web Service。免费实例的文件系统是临时的，实例休眠、重启或重新部署后，通过后台修改的配置、代理池订阅、节点、SQLite 数据和上传的背景图会丢失。但 Blueprint 中的管理密码和 API Key 来自 Render 环境变量，重启后仍然有效。
+`render.yaml` 默认使用 Render Free Web Service。免费实例的文件系统是临时的，实例休眠、重启或重新部署后，通过后台修改的配置、手动代理池订阅、节点、SQLite 数据和上传的背景图会丢失。但 Blueprint 中的管理密码、API Key 和可选代理订阅来自 Render 环境变量，重启后仍能自动恢复并重新拉取。
 
 如果需要保留所有后台修改：
 
@@ -73,7 +84,7 @@ https://<你的服务名>.onrender.com/v1
 - 日志显示规则未同意并且容器退出：检查 `VPROXY_RULES_HASH` 是否与上文完全一致。
 - Render 报告没有监听端口：不要删除 Render 自动注入的 `PORT`；程序会自动监听该端口。
 - API 返回 401：检查请求头是否为 `Authorization: Bearer <VPROXY_API_KEY>`，且密钥是否与 Render 环境变量完全一致。
-- 修改 Render 中的密码或密钥后，需要重新部署服务才能生效。
+- 修改 Render 中的密码、密钥或代理订阅配置后，需要重新部署服务才能生效。
 
 ## 六、Render 官方资料
 

@@ -2,11 +2,14 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,9 +24,87 @@ const (
 	maxProxyRefreshMinutes    = 7 * 24 * 60
 	maxProxySubscriptionNodes = 50000
 	proxyRefreshConcurrency   = 4
+
+	environmentProxySubscriptionKey            = "environment:proxy-subscription"
+	defaultEnvironmentProxyType                = "http"
+	defaultEnvironmentProxyRefreshIntervalMins = 60
 )
 
 var subscriptionRefreshLocks sync.Map //nolint:gochecknoglobals
+
+func proxySubscriptionFromEnvironment() (*nodes.ProxySubscription, error) {
+	rawURL := strings.TrimSpace(os.Getenv("VPROXY_PROXY_SUBSCRIPTION_URL"))
+	if rawURL == "" {
+		return nil, nil
+	}
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil || parsedURL.Host == "" ||
+		(parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
+		return nil, errors.New("VPROXY_PROXY_SUBSCRIPTION_URL 必须是有效的 HTTP/HTTPS URL")
+	}
+
+	proxyType := strings.ToLower(strings.TrimSpace(os.Getenv("VPROXY_PROXY_SUBSCRIPTION_TYPE")))
+	if proxyType == "" {
+		proxyType = defaultEnvironmentProxyType
+	}
+	if proxyType != "auto" && !isStandardProxyType(proxyType) {
+		return nil, errors.New("VPROXY_PROXY_SUBSCRIPTION_TYPE 不支持该代理类型")
+	}
+
+	refreshInterval := defaultEnvironmentProxyRefreshIntervalMins
+	if rawInterval := strings.TrimSpace(os.Getenv("VPROXY_PROXY_SUBSCRIPTION_INTERVAL_MINUTES")); rawInterval != "" {
+		refreshInterval, err = strconv.Atoi(rawInterval)
+		if err != nil ||
+			refreshInterval < minProxyRefreshMinutes ||
+			refreshInterval > maxProxyRefreshMinutes {
+			return nil, errors.New("VPROXY_PROXY_SUBSCRIPTION_INTERVAL_MINUTES 必须是 1 到 10080 的整数")
+		}
+	}
+
+	name := "环境变量代理池"
+	if hostname := parsedURL.Hostname(); hostname != "" {
+		name += " (" + hostname + ")"
+	}
+	return &nodes.ProxySubscription{
+		ManagedKey:             environmentProxySubscriptionKey,
+		Name:                   name,
+		URL:                    rawURL,
+		ProxyType:              proxyType,
+		RefreshIntervalMinutes: refreshInterval,
+		Enabled:                true,
+	}, nil
+}
+
+// SyncEnvironmentProxySubscription 将 Render 环境变量同步为一个受托管的代理池订阅。
+func SyncEnvironmentProxySubscription() error {
+	item, err := proxySubscriptionFromEnvironment()
+	if err != nil {
+		return err
+	}
+	if item == nil {
+		existing, getErr := nodes.GetManagedProxySubscription(environmentProxySubscriptionKey)
+		if errors.Is(getErr, sql.ErrNoRows) {
+			return nil
+		}
+		if getErr != nil {
+			return getErr
+		}
+		if err := nodes.DeleteProxySubscription(existing.ID); err != nil {
+			return err
+		}
+		removed := nodes.DeleteSubscriptionNodes(existing.ID)
+		log.Printf("[ProxyPool] 已移除环境变量托管订阅及 %d 个节点", removed)
+		return nil
+	}
+
+	saved, err := nodes.UpsertManagedProxySubscription(environmentProxySubscriptionKey, *item)
+	if err != nil {
+		return err
+	}
+	log.Printf("[ProxyPool] 已同步环境变量代理订阅 %q：%s，类型 %s，每 %d 分钟刷新",
+		saved.Name, subscriptionURLForLog(saved.URL), saved.ProxyType, saved.RefreshIntervalMinutes)
+	return nil
+}
 
 func proxySubscriptionLock(id int64) *sync.Mutex {
 	value, _ := subscriptionRefreshLocks.LoadOrStore(id, &sync.Mutex{})
@@ -92,6 +173,17 @@ func (adm *AdminHandler) adminSaveProxySubscription(w http.ResponseWriter, r *ht
 	}
 	if !adm.decodeAdminBody(w, r, &body) {
 		return
+	}
+	if body.ID > 0 {
+		current, err := nodes.GetProxySubscription(body.ID)
+		if err != nil {
+			writeJSON(w, http.StatusNotFound, adminErr("订阅不存在"))
+			return
+		}
+		if current.ManagedKey != "" {
+			writeJSON(w, http.StatusConflict, adminErr("该订阅由 Render 环境变量托管，请在 Render 中修改配置"))
+			return
+		}
 	}
 	rawURL := strings.TrimSpace(body.URL)
 	parsedURL, err := url.Parse(rawURL)
@@ -180,15 +272,25 @@ func (adm *AdminHandler) adminDeleteProxySubscription(w http.ResponseWriter, r *
 	if !adm.decodeAdminBody(w, r, &body) {
 		return
 	}
-	if _, err := nodes.GetProxySubscription(body.ID); err != nil {
+	item, err := nodes.GetProxySubscription(body.ID)
+	if err != nil {
 		writeJSON(w, http.StatusNotFound, adminErr("订阅不存在"))
+		return
+	}
+	if item.ManagedKey != "" {
+		writeJSON(w, http.StatusConflict, adminErr("该订阅由 Render 环境变量托管，请在 Render 中移除配置"))
 		return
 	}
 	lock := proxySubscriptionLock(body.ID)
 	lock.Lock()
 	defer lock.Unlock()
-	if _, err := nodes.GetProxySubscription(body.ID); err != nil {
+	item, err = nodes.GetProxySubscription(body.ID)
+	if err != nil {
 		writeJSON(w, http.StatusNotFound, adminErr("订阅不存在"))
+		return
+	}
+	if item.ManagedKey != "" {
+		writeJSON(w, http.StatusConflict, adminErr("该订阅由 Render 环境变量托管，请在 Render 中移除配置"))
 		return
 	}
 	if err := nodes.DeleteProxySubscription(body.ID); err != nil {

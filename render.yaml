@@ -17,4 +17,10 @@ services:
       - key: VPROXY_API_KEY
         sync: false
       - key: VPROXY_RULES_HASH
+        value: 36800adeec862126
+      - key: VPROXY_PROXY_SUBSCRIPTION_URL
         sync: false
+      - key: VPROXY_PROXY_SUBSCRIPTION_TYPE
+        value: http
+      - key: VPROXY_PROXY_SUBSCRIPTION_INTERVAL_MINUTES
+        value: "60"

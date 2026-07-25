@@ -102,6 +102,7 @@ func createTables(db *sql.DB) error {
 
 	CREATE TABLE IF NOT EXISTS proxy_subscriptions (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		managed_key TEXT NOT NULL DEFAULT '',
 		name TEXT NOT NULL,
 		url TEXT NOT NULL,
 		proxy_type TEXT NOT NULL DEFAULT 'auto',
@@ -124,6 +125,9 @@ func createTables(db *sql.DB) error {
 	_, _ = db.Exec("ALTER TABLE nodes ADD COLUMN source_id INTEGER NOT NULL DEFAULT 0")
 	_, _ = db.Exec("ALTER TABLE proxy_subscriptions ADD COLUMN last_attempt_at INTEGER NOT NULL DEFAULT 0")
 	_, _ = db.Exec("ALTER TABLE proxy_subscriptions ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0")
+	_, _ = db.Exec("ALTER TABLE proxy_subscriptions ADD COLUMN managed_key TEXT NOT NULL DEFAULT ''")
+	_, _ = db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_proxy_subscriptions_managed_key
+		ON proxy_subscriptions(managed_key) WHERE managed_key <> ''`)
 	return nil
 
 }

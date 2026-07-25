@@ -34,6 +34,35 @@ func TestProxySubscriptionLifecycleAndNodeReplacement(t *testing.T) {
 		t.Fatal("subscription ID was not assigned")
 	}
 
+	managed, err := UpsertManagedProxySubscription("environment:test", ProxySubscription{
+		Name:                   "managed",
+		URL:                    "https://example.com/first.txt",
+		ProxyType:              "http",
+		RefreshIntervalMinutes: 60,
+		Enabled:                true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	managedUpdated, err := UpsertManagedProxySubscription("environment:test", ProxySubscription{
+		Name:                   "managed updated",
+		URL:                    "https://example.com/second.txt",
+		ProxyType:              "socks5",
+		RefreshIntervalMinutes: 90,
+		Enabled:                true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if managedUpdated.ID != managed.ID || managedUpdated.ManagedKey != "environment:test" ||
+		managedUpdated.URL != "https://example.com/second.txt" ||
+		managedUpdated.RefreshIntervalMinutes != 90 {
+		t.Fatalf("managed subscription was not updated in place: %#v", managedUpdated)
+	}
+	if err := DeleteProxySubscription(managed.ID); err != nil {
+		t.Fatal(err)
+	}
+
 	first := SyncSubscriptionNodes(item.ID, []Node{
 		{Type: "socks5", Name: "one", RawURI: "socks5://127.0.0.1:1080"}, //nolint:exhaustruct
 		{Type: "socks5", Name: "two", RawURI: "socks5://127.0.0.2:1080"}, //nolint:exhaustruct

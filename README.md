@@ -64,4 +64,4 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ver
 
 ## ☁️ 部署到 Render
 
-仓库根目录已提供 `render.yaml`，可在上传 GitHub 后直接创建 Render Blueprint。详细的环境变量、规则确认、免费方案限制和持久磁盘配置见 [Render 部署指南](RENDER_DEPLOY.md)。
+仓库根目录已提供 `render.yaml`，可在上传 GitHub 后直接创建 Render Blueprint。部署时只需填写管理面板密码和 API Key；还可选填纯文本代理订阅 URL，服务启动后会立即拉取并默认每 60 分钟更新。详细配置、免费方案限制和持久磁盘说明见 [Render 部署指南](RENDER_DEPLOY.md)。

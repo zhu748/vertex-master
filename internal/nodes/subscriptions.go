@@ -1,8 +1,10 @@
 package nodes
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/bsfdsagfadg/vertex/internal/db"
@@ -10,6 +12,7 @@ import (
 
 type ProxySubscription struct {
 	ID                     int64  `json:"id"`
+	ManagedKey             string `json:"managed_key,omitempty"`
 	Name                   string `json:"name"`
 	URL                    string `json:"url"`
 	ProxyType              string `json:"proxy_type"`
@@ -29,7 +32,7 @@ func ListProxySubscriptions() ([]ProxySubscription, error) {
 	if database == nil {
 		return nil, errors.New("database unavailable")
 	}
-	rows, err := database.Query(`SELECT id, name, url, proxy_type, refresh_interval_minutes,
+	rows, err := database.Query(`SELECT id, managed_key, name, url, proxy_type, refresh_interval_minutes,
 		enabled, last_refreshed_at, last_attempt_at, last_error, consecutive_failures,
 		node_count, created_at, updated_at
 		FROM proxy_subscriptions ORDER BY id`)
@@ -42,7 +45,7 @@ func ListProxySubscriptions() ([]ProxySubscription, error) {
 	for rows.Next() {
 		var item ProxySubscription
 		if err := rows.Scan(
-			&item.ID, &item.Name, &item.URL, &item.ProxyType, &item.RefreshIntervalMinutes,
+			&item.ID, &item.ManagedKey, &item.Name, &item.URL, &item.ProxyType, &item.RefreshIntervalMinutes,
 			&item.Enabled, &item.LastRefreshedAt, &item.LastAttemptAt, &item.LastError,
 			&item.ConsecutiveFailures, &item.NodeCount,
 			&item.CreatedAt, &item.UpdatedAt,
@@ -60,11 +63,11 @@ func GetProxySubscription(id int64) (ProxySubscription, error) {
 		return ProxySubscription{}, errors.New("database unavailable")
 	}
 	var item ProxySubscription
-	err := database.QueryRow(`SELECT id, name, url, proxy_type, refresh_interval_minutes,
+	err := database.QueryRow(`SELECT id, managed_key, name, url, proxy_type, refresh_interval_minutes,
 		enabled, last_refreshed_at, last_attempt_at, last_error, consecutive_failures,
 		node_count, created_at, updated_at
 		FROM proxy_subscriptions WHERE id = ?`, id).Scan(
-		&item.ID, &item.Name, &item.URL, &item.ProxyType, &item.RefreshIntervalMinutes,
+		&item.ID, &item.ManagedKey, &item.Name, &item.URL, &item.ProxyType, &item.RefreshIntervalMinutes,
 		&item.Enabled, &item.LastRefreshedAt, &item.LastAttemptAt, &item.LastError,
 		&item.ConsecutiveFailures, &item.NodeCount,
 		&item.CreatedAt, &item.UpdatedAt,
@@ -83,9 +86,9 @@ func SaveProxySubscription(item ProxySubscription) (ProxySubscription, error) {
 	now := time.Now().Unix()
 	if item.ID == 0 {
 		result, err := database.Exec(`INSERT INTO proxy_subscriptions
-			(name, url, proxy_type, refresh_interval_minutes, enabled, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			item.Name, item.URL, item.ProxyType, item.RefreshIntervalMinutes, item.Enabled, now, now)
+			(managed_key, name, url, proxy_type, refresh_interval_minutes, enabled, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			item.ManagedKey, item.Name, item.URL, item.ProxyType, item.RefreshIntervalMinutes, item.Enabled, now, now)
 		if err != nil {
 			return ProxySubscription{}, fmt.Errorf("insert proxy subscription: %w", err)
 		}
@@ -103,6 +106,46 @@ func SaveProxySubscription(item ProxySubscription) (ProxySubscription, error) {
 		}
 	}
 	return GetProxySubscription(item.ID)
+}
+
+func GetManagedProxySubscription(managedKey string) (ProxySubscription, error) {
+	database := db.CurrentDB()
+	if database == nil {
+		return ProxySubscription{}, errors.New("database unavailable")
+	}
+	var item ProxySubscription
+	err := database.QueryRow(`SELECT id, managed_key, name, url, proxy_type, refresh_interval_minutes,
+		enabled, last_refreshed_at, last_attempt_at, last_error, consecutive_failures,
+		node_count, created_at, updated_at
+		FROM proxy_subscriptions WHERE managed_key = ?`, managedKey).Scan(
+		&item.ID, &item.ManagedKey, &item.Name, &item.URL, &item.ProxyType, &item.RefreshIntervalMinutes,
+		&item.Enabled, &item.LastRefreshedAt, &item.LastAttemptAt, &item.LastError,
+		&item.ConsecutiveFailures, &item.NodeCount,
+		&item.CreatedAt, &item.UpdatedAt,
+	)
+	if err != nil {
+		return ProxySubscription{}, fmt.Errorf("get managed proxy subscription: %w", err)
+	}
+	return item, nil
+}
+
+func UpsertManagedProxySubscription(managedKey string, item ProxySubscription) (ProxySubscription, error) {
+	managedKey = strings.TrimSpace(managedKey)
+	if managedKey == "" {
+		return ProxySubscription{}, errors.New("managed proxy subscription key is required")
+	}
+	current, err := GetManagedProxySubscription(managedKey)
+	if err == nil {
+		item.ID = current.ID
+		item.ManagedKey = managedKey
+		return SaveProxySubscription(item)
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return ProxySubscription{}, err
+	}
+	item.ID = 0
+	item.ManagedKey = managedKey
+	return SaveProxySubscription(item)
 }
 
 func UpdateProxySubscriptionResult(id int64, nodeCount int, refreshErr error) error {
