@@ -1,0 +1,19 @@
+[Unit]
+Description=Vertex AI Proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 按实际解压目录修改：
+WorkingDirectory=/opt/vertex-proxy
+ExecStart=/opt/vertex-proxy/vertex-proxy
+# 改完 config.json / api_keys.txt / models.json 后 systemctl reload 即热重载（无需重启）
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=3
+# 可选：用非 root 用户运行（先 useradd -r vproxy 并 chown 解压目录）
+# User=vproxy
+
+[Install]
+WantedBy=multi-user.target

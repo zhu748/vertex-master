@@ -1,0 +1,29 @@
+.git/
+.github/
+.kilo/
+.idea/
+.vscode/
+
+# 排除本地编译的二进制文件及测试产物
+vproxy
+vproxy-*
+*.exe
+*.test
+test-generated-*.png
+
+# 确保不把整个 config 下的用户私密数据和历史缓存打包进去
+config/config.json
+config/api_keys.txt
+config/nodes.json
+config/node_health.json
+config/data.db
+config/data.db-shm
+config/data.db-wal
+
+# 排除本地运行产生日志
+logs/
+storage/
+
+# 运行时状态（自动生成，不打包）
+config/state/
+config/migrated/

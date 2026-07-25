@@ -1,0 +1,44 @@
+# Runtime config (contains secrets)
+config/config.json
+config/api_keys.txt
+config/nodes.json
+config/node_health.json
+
+# SQLite database and WAL files
+config/data.db
+config/data.db-shm
+config/data.db-wal
+
+# Binaries
+vertex-proxy
+vertex-proxy-*
+*.exe
+*~
+
+# Release packaging output
+dist/
+
+# IDE / OS
+.vscode/
+.idea/
+.kilo/
+*.swp
+.DS_Store
+
+# Test artifacts
+test-generated-*.png
+*.code-workspace
+
+# Build output
+telemetry-server
+cmd/telemetry-server/
+
+# Runtime state (auto-generated, never commit)
+config/state/
+config/migrated/
+
+# Logs
+logs/
+
+# Render persistent-disk mount used for local testing
+storage/

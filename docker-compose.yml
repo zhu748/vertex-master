@@ -1,0 +1,15 @@
+services:
+  vproxy:
+    build: .
+    container_name: vproxy
+    ports:
+      - "2156:2156"
+    volumes:
+      # 将宿主机当前目录下的 config 文件夹挂载到容器内，用于持久化密码、密钥和模型配置
+      - ./config:/app/config
+      - ./logs:/app/logs
+      - ./assets:/app/assets
+    environment:
+      # 可选：如果需要配置全局代理，可以直接在这里传入环境变量
+      - PROXY_URL=
+    restart: unless-stopped

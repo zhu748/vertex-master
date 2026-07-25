@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: vertex-ai-proxy
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /healthz
+    envVars:
+      - key: VPROXY_CONFIG
+        value: /app/storage/config/config.json
+      - key: VPROXY_API_KEYS
+        value: /app/storage/config/api_keys.txt
+      - key: VPROXY_MODELS
+        value: /app/storage/config/models.json
+      - key: VPROXY_ADMIN_PASSWORD
+        sync: false
+      - key: VPROXY_API_KEY
+        sync: false
+      - key: VPROXY_RULES_HASH
+        sync: false

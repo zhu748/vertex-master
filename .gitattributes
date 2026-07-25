@@ -1,0 +1,13 @@
+# 默认按内容自动处理文本换行
+* text=auto
+
+# Shell 脚本与 unix 配置必须保持 LF（否则 Linux 上 shebang 带 \r 会报 bad interpreter）
+*.sh   text eol=lf
+*.service text eol=lf
+
+# Windows 批处理保持 CRLF
+*.bat  text eol=crlf
+
+# 二进制资源不做换行转换
+*.jpg  binary
+*.png  binary
