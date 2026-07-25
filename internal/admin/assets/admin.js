@@ -25,7 +25,10 @@ function go(page, instant) {
 
   document.querySelectorAll('nav button').forEach(b => b.classList.toggle('active', b.dataset.page === page));
   const next = $('#page-' + page), cur = curPage && $('#page-' + curPage);
-  if (curPage === 'nodes' && _testTimer) { clearInterval(_testTimer); _testTimer = null; }
+  if (curPage === 'nodes') {
+    if (_testTimer) { clearInterval(_testTimer); _testTimer = null; }
+    if (typeof stopRecentProxyPolling === 'function') stopRecentProxyPolling();
+  }
   curPage = page;
   const enter = () => {
     next.classList.add('entering');

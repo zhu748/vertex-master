@@ -3,6 +3,8 @@ package vertex
 import (
 	"context"
 	"sort"
+
+	"github.com/bsfdsagfadg/vertex/internal/nodes"
 )
 
 type candidateResult struct {
@@ -12,24 +14,28 @@ type candidateResult struct {
 }
 
 func (c *VertexAIClient) CompleteChat(ctx context.Context, model string, geminiPayload map[string]any) (map[string]any, error) {
-	return RunRacePreferred(
+	selected, err := RunRacePreferred(
 		ctx,
 		c.cfg,
-		func(candidateCtx context.Context, proxyURI string) (map[string]any, error) {
+		func(candidateCtx context.Context, proxyURI string) (candidateResult, error) {
 			copiedPayload := deepCopyAny(geminiPayload).(map[string]any)
-			return c.runSingleCandidate(candidateCtx, model, copiedPayload, proxyURI)
+			response, err := c.runSingleCandidate(candidateCtx, model, copiedPayload, proxyURI)
+			return candidateResult{proxyURI: proxyURI, resp: response, err: err}, err
 		},
-		func(response map[string]any) bool {
-			return candidateFinish(response) == "STOP"
+		func(result candidateResult) bool {
+			return candidateFinish(result.resp) == "STOP"
 		},
-		func(responses []map[string]any) (map[string]any, error) {
-			results := make([]candidateResult, 0, len(responses))
-			for _, response := range responses {
-				results = append(results, candidateResult{resp: response})
-			}
-			return pickBestResult(results)
-		},
+		pickBestResult,
 	)
+	if err != nil {
+		return nil, err
+	}
+	// Preferred STOP results are recorded by the race engine. If all candidates
+	// are soft fallbacks, record the exact fallback selected here.
+	if candidateFinish(selected.resp) != "STOP" {
+		nodes.RecordProxySuccess(selected.proxyURI)
+	}
+	return selected.resp, nil
 }
 
 func (c *VertexAIClient) runSingleCandidate(ctx context.Context, model string, geminiPayload map[string]any, proxyURI string) (map[string]any, error) {
@@ -71,7 +77,7 @@ func (c *VertexAIClient) runSingleCandidate(ctx context.Context, model string, g
 	return resp, nil
 }
 
-func pickBestResult(results []candidateResult) (map[string]any, error) {
+func pickBestResult(results []candidateResult) (candidateResult, error) {
 	sort.Slice(results, func(i, j int) bool {
 		fi := candidateFinish(results[i].resp)
 		fj := candidateFinish(results[j].resp)
@@ -83,7 +89,7 @@ func pickBestResult(results []candidateResult) (map[string]any, error) {
 		}
 		return responseContentLength(results[i].resp) > responseContentLength(results[j].resp)
 	})
-	return results[0].resp, nil
+	return results[0], nil
 }
 
 func responseContentLength(resp map[string]any) int {

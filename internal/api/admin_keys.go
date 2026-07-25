@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 
 	"github.com/bsfdsagfadg/vertex/internal/config"
@@ -16,8 +17,20 @@ func (adm *AdminHandler) adminGetKeys(w http.ResponseWriter, _ *http.Request) {
 	}
 	out := make([]any, 0, len(entries))
 	for _, e := range entries {
+		key := e.Key
+		copyable := !e.ReadOnly
+		if e.Source == "environment" {
+			key = ""
+			copyable = false
+		}
 		out = append(out, map[string]any{
-			"name": e.Name, "key": e.Key, "key_masked": maskKey(e.Key), "description": e.Description,
+			"name":        e.Name,
+			"key":         key,
+			"key_masked":  maskKey(e.Key),
+			"description": e.Description,
+			"source":      e.Source,
+			"read_only":   e.ReadOnly,
+			"copyable":    copyable,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"keys": out})
@@ -48,6 +61,10 @@ func (adm *AdminHandler) adminAddKey(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, adminErr("密钥不能包含冒号 (key must not contain ':')"))
 		return
 	}
+	if isPlaceholderAPIKey(key) {
+		writeJSON(w, http.StatusBadRequest, adminErr("公开示例密钥不能使用，请生成或填写新的密钥"))
+		return
+	}
 	if err := adm.keys.Add(name, key, body.Description); err != nil {
 		writeJSON(w, http.StatusInternalServerError, adminErr("写入密钥失败 (failed to write keys)"))
 		return
@@ -63,6 +80,10 @@ func (adm *AdminHandler) adminDeleteKey(w http.ResponseWriter, r *http.Request, 
 	name := rawName
 	if dec, err := url.PathUnescape(rawName); err == nil {
 		name = dec
+	}
+	if name == environmentAPIKeyName && strings.TrimSpace(os.Getenv("VPROXY_API_KEY")) != "" {
+		writeJSON(w, http.StatusConflict, adminErr("环境变量密钥请在 Render Environment 中修改"))
+		return
 	}
 	ok, err := adm.keys.Delete(name)
 	if err != nil {

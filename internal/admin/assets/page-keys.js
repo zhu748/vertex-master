@@ -29,24 +29,33 @@ async function loadKeys() {
     var nameTd = document.createElement('td');
     nameTd.className = 'mono-cell';
     nameTd.textContent = k.name;
+    if (k.source === 'environment') {
+      var envBadge = document.createElement('span');
+      envBadge.className = 'pill on';
+      envBadge.style.cssText = 'font-size:10px;padding:2px 7px;margin-left:7px;';
+      envBadge.textContent = '\u73AF\u5883\u6258\u7BA1';
+      nameTd.appendChild(envBadge);
+    }
     tr.appendChild(nameTd);
 
     var keyTd = document.createElement('td');
     keyTd.className = 'key-cell';
     var maskedSpan = document.createElement('span');
     maskedSpan.className = 'masked';
-    maskedSpan.textContent = maskKey(k.key);
+    maskedSpan.textContent = k.key_masked || maskKey(k.key);
     keyTd.appendChild(maskedSpan);
-    var copyBtn = document.createElement('button');
-    copyBtn.className = 'action-copy-btn';
-    copyBtn.dataset.key = k.key;
-    copyBtn.title = '\u590D\u5236\u5BC6\u94A5';
-    copyBtn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
-    copyBtn.onclick = function(e) {
-      e.stopPropagation();
-      navigator.clipboard.writeText(copyBtn.dataset.key).then(function() { toast('\u5DF2\u590D\u5236'); }).catch(function() {});
-    };
-    keyTd.appendChild(copyBtn);
+    if (k.copyable !== false && k.key) {
+      var copyBtn = document.createElement('button');
+      copyBtn.className = 'action-copy-btn';
+      copyBtn.dataset.key = k.key;
+      copyBtn.title = '\u590D\u5236\u5BC6\u94A5';
+      copyBtn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+      copyBtn.onclick = function(e) {
+        e.stopPropagation();
+        navigator.clipboard.writeText(copyBtn.dataset.key).then(function() { toast('\u5DF2\u590D\u5236'); }).catch(function() {});
+      };
+      keyTd.appendChild(copyBtn);
+    }
     tr.appendChild(keyTd);
 
     var descTd = document.createElement('td');
@@ -56,11 +65,18 @@ async function loadKeys() {
 
     var actionTd = document.createElement('td');
     actionTd.style.cssText = 'text-align:right;';
-    var delBtn = document.createElement('button');
-    delBtn.className = 'btn danger';
-    delBtn.textContent = '\u5220\u9664';
-    delBtn.onclick = function() { delKey(k.name); };
-    actionTd.appendChild(delBtn);
+    if (k.read_only) {
+      var managedHint = document.createElement('span');
+      managedHint.className = 'managed-key-hint';
+      managedHint.textContent = '\u8BF7\u5728 Render Environment \u4E2D\u4FEE\u6539';
+      actionTd.appendChild(managedHint);
+    } else {
+      var delBtn = document.createElement('button');
+      delBtn.className = 'btn danger';
+      delBtn.textContent = '\u5220\u9664';
+      delBtn.onclick = function() { delKey(k.name); };
+      actionTd.appendChild(delBtn);
+    }
     tr.appendChild(actionTd);
 
     tbody.appendChild(tr);

@@ -2,8 +2,10 @@ package api
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -140,6 +142,50 @@ func TestAdminAddKeyAcceptsKeyWithoutSKPrefix(t *testing.T) {
 	}
 	if !keys.ValidateKey("plain-custom-key") {
 		t.Fatal("自定义密钥未写入并加载")
+	}
+}
+
+func TestAdminGetKeysShowsMaskedEnvironmentKeyAndHidesPlaceholder(t *testing.T) {
+	keysFile := filepath.Join(t.TempDir(), "api_keys.txt")
+	if err := os.WriteFile(
+		keysFile,
+		[]byte("example:sk-your-key-here:public placeholder\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("VPROXY_API_KEYS", keysFile)
+	t.Setenv("VPROXY_API_KEY", "render-secret-without-prefix")
+	keys := NewAPIKeyManager()
+	keys.LoadKeys()
+	adm := &AdminHandler{handler: handler{keys: keys}} //nolint:exhaustruct
+	rec := httptest.NewRecorder()
+
+	adm.adminGetKeys(rec, httptest.NewRequest(http.MethodGet, "/api/admin/keys", nil))
+
+	var response struct {
+		Keys []struct {
+			Name      string `json:"name"`
+			Key       string `json:"key"`
+			KeyMasked string `json:"key_masked"`
+			Source    string `json:"source"`
+			ReadOnly  bool   `json:"read_only"`
+			Copyable  bool   `json:"copyable"`
+		} `json:"keys"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Keys) != 1 {
+		t.Fatalf("expected only environment key, got %#v", response.Keys)
+	}
+	got := response.Keys[0]
+	if got.Name != environmentAPIKeyName || got.Source != "environment" ||
+		!got.ReadOnly || got.Copyable || got.Key != "" {
+		t.Fatalf("unexpected environment key response: %#v", got)
+	}
+	if got.KeyMasked != "····efix" {
+		t.Fatalf("unexpected environment key mask: %q", got.KeyMasked)
 	}
 }
 

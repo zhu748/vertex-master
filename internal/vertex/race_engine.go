@@ -105,7 +105,11 @@ func runRacePreferred[T any](
 			proxy = cfg.ProxyURL()
 		}
 		log.Printf("[Vertex] [RunParallel] 降级为单节点运行: %s", nodes.GetNodeName(proxy))
-		return run(ctx, proxy)
+		value, err := run(ctx, proxy)
+		if err == nil {
+			nodes.RecordProxySuccess(proxy)
+		}
+		return value, err
 	}
 
 	if cfg.DebugMode() {
@@ -246,6 +250,7 @@ func runRacePreferred[T any](
 					}
 					continue
 				}
+				nodes.RecordProxySuccess(res.uri)
 				log.Printf("[Racing] 竞速胜出节点: %s", name)
 				cli.UpdateReqWinner(RequestIDFromContext(ctx), name)
 				cli.UpdateReqState(RequestIDFromContext(ctx), "🟢 数据传输", "\033[32m", "已建立连接")

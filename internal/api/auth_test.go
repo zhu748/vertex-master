@@ -181,6 +181,7 @@ func TestAPIKeyManagerAddListDelete(t *testing.T) {
 	dir := t.TempDir()
 	keysFile := filepath.Join(dir, "api_keys.txt")
 	t.Setenv("VPROXY_API_KEYS", keysFile)
+	t.Setenv("VPROXY_API_KEY", "")
 
 	m := NewAPIKeyManager()
 
@@ -266,6 +267,15 @@ func TestLoadKeysIncludesEnvironmentKey(t *testing.T) {
 	if !m.ValidateKey("render-secret-without-prefix") {
 		t.Fatal("未加载 VPROXY_API_KEY 环境变量")
 	}
+	entries, err := m.List()
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("环境变量密钥未出现在管理列表: entries=%#v err=%v", entries, err)
+	}
+	if entries[0].Name != environmentAPIKeyName ||
+		entries[0].Source != "environment" ||
+		!entries[0].ReadOnly {
+		t.Fatalf("环境变量密钥元数据不正确: %#v", entries[0])
+	}
 }
 
 func TestLoadKeysFromEnvironmentWithoutFile(t *testing.T) {
@@ -275,5 +285,33 @@ func TestLoadKeysFromEnvironmentWithoutFile(t *testing.T) {
 	m := NewAPIKeyManager()
 	if !m.LoadKeys() || !m.ValidateKey("plain-render-key") {
 		t.Fatal("配置文件不存在时也应加载环境变量密钥")
+	}
+}
+
+func TestExamplePlaceholderKeyIsRejectedAndHidden(t *testing.T) {
+	keysFile := filepath.Join(t.TempDir(), "api_keys.txt")
+	if err := os.WriteFile(
+		keysFile,
+		[]byte("example:sk-your-key-here:public placeholder\nreal:real-key:valid\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("VPROXY_API_KEYS", keysFile)
+	t.Setenv("VPROXY_API_KEY", "")
+
+	m := NewAPIKeyManager()
+	if !m.LoadKeys() {
+		t.Fatal("real key should load")
+	}
+	if m.ValidateKey(examplePlaceholderKey) {
+		t.Fatal("public example placeholder must never authenticate")
+	}
+	if !m.ValidateKey("real-key") || m.Count() != 1 {
+		t.Fatalf("expected only the real key, count=%d", m.Count())
+	}
+	entries, err := m.List()
+	if err != nil || len(entries) != 1 || entries[0].Name != "real" {
+		t.Fatalf("placeholder should be hidden from admin list: entries=%#v err=%v", entries, err)
 	}
 }

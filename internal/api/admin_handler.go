@@ -107,6 +107,12 @@ func (adm *AdminHandler) handleAdminAPI(w http.ResponseWriter, r *http.Request) 
 		}
 		adm.adminTestNode(w, r)
 		return
+	case "/nodes/current":
+		if !requireMethod(http.MethodGet) {
+			return
+		}
+		adm.adminGetRecentProxy(w, r)
+		return
 	case "/nodes/enable":
 		if !requireMethod(http.MethodPost) {
 			return

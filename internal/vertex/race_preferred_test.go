@@ -42,4 +42,7 @@ func TestRunRacePreferredDoesNotLetFastFallbackCancelPreferredResult(t *testing.
 	if result != "complete" {
 		t.Fatalf("fast fallback won over preferred result: %q", result)
 	}
+	if recent := nodes.GetRecentProxyStatus(); recent.RawURI != preferredURI {
+		t.Fatalf("recent proxy=%q, want preferred winner %q", recent.RawURI, preferredURI)
+	}
 }

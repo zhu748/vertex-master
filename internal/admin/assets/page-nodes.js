@@ -21,6 +21,81 @@ var testProgressTimer = null;
 var cachedProxySubscriptions = [];
 var nodesLoadSequence = 0;
 var proxySubscriptionsLoadSequence = 0;
+var recentProxyTimer = null;
+var recentProxyURI = '';
+
+function recentProxyAge(timestamp) {
+  var seconds = Math.max(0, Math.floor(Date.now() / 1000) - Number(timestamp || 0));
+  if (seconds < 5) return '\u521A\u521A\u66F4\u65B0';
+  if (seconds < 60) return seconds + ' \u79D2\u524D';
+  if (seconds < 3600) return Math.floor(seconds / 60) + ' \u5206\u949F\u524D';
+  if (seconds < 86400) return Math.floor(seconds / 3600) + ' \u5C0F\u65F6\u524D';
+  return new Date(Number(timestamp) * 1000).toLocaleString();
+}
+
+function addRecentProxyBadge(container) {
+  var badge = document.createElement('span');
+  badge.className = 'pill on recent-proxy-badge';
+  badge.style.cssText = 'font-size:10px;padding:2px 8px;margin-left:5px;background:rgba(240,189,92,.16);color:var(--gold);';
+  badge.textContent = '\u6700\u8FD1\u80DC\u51FA';
+  container.appendChild(badge);
+}
+
+function updateRecentProxyRowBadges() {
+  document.querySelectorAll('#nodesBody .recent-proxy-badge').forEach(function (badge) {
+    badge.remove();
+  });
+  if (!recentProxyURI) return;
+  document.querySelectorAll('#nodesBody tr[data-node-uri]').forEach(function (row) {
+    if (row.dataset.nodeUri !== recentProxyURI) return;
+    var name = row.querySelector('.node-name-cell');
+    if (name) addRecentProxyBadge(name);
+  });
+}
+
+function renderRecentProxy(status) {
+  status = status || {};
+  var name = document.getElementById('recentProxyName');
+  var address = document.getElementById('recentProxyAddress');
+  var type = document.getElementById('recentProxyType');
+  var updated = document.getElementById('recentProxyUpdated');
+  if (!name || !address || !type || !updated) return;
+
+  recentProxyURI = status.available && !status.direct ? (status.raw_uri || '') : '';
+  if (!status.available) {
+    name.textContent = '\u5C1A\u65E0\u6210\u529F\u8BF7\u6C42';
+    address.textContent = '\u53D1\u8D77\u4E00\u6B21 API \u8BF7\u6C42\u540E\u5C06\u5728\u8FD9\u91CC\u663E\u793A';
+    type.textContent = '\u7B49\u5F85\u4E2D';
+    type.className = 'pill off';
+    updated.textContent = '\u2014';
+  } else {
+    name.textContent = status.name || (status.direct ? '\u76F4\u8FDE' : '\u4EE3\u7406\u8282\u70B9');
+    address.textContent = status.address || '\u2014';
+    var typeName = String(status.type || 'proxy');
+    type.textContent = status.direct ? '\u76F4\u8FDE' : (_tmap[typeName.toLowerCase()] || typeName.toUpperCase());
+    type.className = 'pill on';
+    updated.textContent = recentProxyAge(status.last_used_at);
+  }
+  updateRecentProxyRowBadges();
+}
+
+async function loadRecentProxyStatus() {
+  try {
+    var data = await API.nodes.current();
+    renderRecentProxy(data.recent_proxy);
+  } catch (e) { }
+}
+
+function startRecentProxyPolling() {
+  if (recentProxyTimer) return;
+  recentProxyTimer = setInterval(loadRecentProxyStatus, 2000);
+}
+
+function stopRecentProxyPolling() {
+  if (!recentProxyTimer) return;
+  clearInterval(recentProxyTimer);
+  recentProxyTimer = null;
+}
 
 function setActionBusy(button, busy, busyText) {
   if (!button) return;
@@ -175,6 +250,8 @@ async function loadNodes() {
   }
   if (loadSequence !== nodesLoadSequence) return;
   const nodes = d.nodes || [];
+  renderRecentProxy(d.recent_proxy);
+  startRecentProxyPolling();
   cachedNodesList = nodes;
   totalNodeCount = Number(d.overall_total !== undefined ? d.overall_total : d.total) || 0;
   filteredNodeCount = Number(d.total) || 0;
@@ -234,6 +311,7 @@ async function loadNodes() {
     for (var i = 0; i < pageNodes.length; i++) {
       var n = pageNodes[i];
       var tr = document.createElement('tr');
+      tr.dataset.nodeUri = n.raw_uri;
 
       var cbTd = document.createElement('td');
       cbTd.style.cssText = 'text-align:center;vertical-align:middle;';
@@ -253,6 +331,7 @@ async function loadNodes() {
 
       var nameTd = document.createElement('td');
       var nameDiv = document.createElement('div');
+      nameDiv.className = 'node-name-cell';
       nameDiv.style.cssText = 'font-weight:600;font-size:13.5px;color:var(--text);';
       nameDiv.textContent = n.name;
       var isLocked = n.raw_uri === curSettings.active_node_uri;
@@ -274,6 +353,9 @@ async function loadNodes() {
         badge.style.cssText = 'font-size:10px;padding:2px 8px;margin-left:5px;background:rgba(143,208,232,0.15);color:var(--blue);';
         badge.textContent = '\u5019\u9009';
         nameDiv.appendChild(badge);
+      }
+      if (n.raw_uri === recentProxyURI) {
+        addRecentProxyBadge(nameDiv);
       }
       nameTd.appendChild(nameDiv);
 

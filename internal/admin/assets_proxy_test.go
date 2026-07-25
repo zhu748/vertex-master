@@ -61,3 +61,46 @@ func TestProxySettingsFieldsAreEmbedded(t *testing.T) {
 		}
 	}
 }
+
+func TestRecentProxyAndEnvironmentKeyUIAreEmbedded(t *testing.T) {
+	htmlBytes, err := Assets.ReadFile("assets/admin.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(htmlBytes)
+	for _, id := range []string{
+		"recentProxyCard",
+		"recentProxyName",
+		"recentProxyAddress",
+		"recentProxyType",
+		"recentProxyUpdated",
+	} {
+		if !strings.Contains(html, `id="`+id+`"`) {
+			t.Errorf("recent proxy field %q is missing", id)
+		}
+	}
+
+	nodesScript, err := Assets.ReadFile("assets/page-nodes.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, token := range []string{
+		"loadRecentProxyStatus",
+		"startRecentProxyPolling",
+		"recent-proxy-badge",
+	} {
+		if !strings.Contains(string(nodesScript), token) {
+			t.Errorf("recent proxy UI token %q is missing", token)
+		}
+	}
+
+	keysScript, err := Assets.ReadFile("assets/page-keys.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, token := range []string{"key_masked", "read_only", "environment"} {
+		if !strings.Contains(string(keysScript), token) {
+			t.Errorf("environment key UI token %q is missing", token)
+		}
+	}
+}

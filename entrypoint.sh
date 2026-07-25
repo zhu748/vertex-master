@@ -13,7 +13,7 @@ if [ ! -f "$VPROXY_CONFIG" ]; then
 fi
 
 if [ ! -f "$VPROXY_API_KEYS" ]; then
-    echo "[Entrypoint] 未检测到 api_keys.txt，正在初始化默认密钥..."
+    echo "[Entrypoint] 未检测到 api_keys.txt，正在初始化密钥文件..."
     cp /app/api_keys.example.txt "$VPROXY_API_KEYS"
 fi
 

@@ -123,6 +123,13 @@ func (adm *AdminHandler) adminGetNodes(w http.ResponseWriter, r *http.Request) {
 		"sticky_node_priority":  adm.cfg.StickyNodePriority(),
 		"pool_stats":            poolStats,
 		"health_scheduler":      GetProxyHealthSchedulerStatus(),
+		"recent_proxy":          nodes.GetRecentProxyStatus(),
+	})
+}
+
+func (adm *AdminHandler) adminGetRecentProxy(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"recent_proxy": nodes.GetRecentProxyStatus(),
 	})
 }
 

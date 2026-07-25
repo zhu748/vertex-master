@@ -17,6 +17,11 @@ type APIKeyManager struct { //nolint:govet
 	keysFile string
 }
 
+const (
+	environmentAPIKeyName = "environment"
+	examplePlaceholderKey = "sk-your-key-here"
+)
+
 // NewAPIKeyManager 构造管理器（密钥文件路径同 config 的解析策略）。
 func NewAPIKeyManager() *APIKeyManager {
 	return &APIKeyManager{keys: map[string]string{}, keysFile: keysFilePath()} //nolint:exhaustruct
@@ -61,7 +66,7 @@ func (m *APIKeyManager) LoadKeys() bool {
 			}
 			name := strings.TrimSpace(parts[0])
 			key := strings.TrimSpace(parts[1])
-			if key == "" {
+			if key == "" || isPlaceholderAPIKey(key) {
 				continue
 			}
 			m.keys[key] = name
@@ -131,6 +136,12 @@ type apiKeyEntry struct {
 	Name        string
 	Key         string
 	Description string
+	Source      string
+	ReadOnly    bool
+}
+
+func isPlaceholderAPIKey(key string) bool {
+	return strings.EqualFold(strings.TrimSpace(key), examplePlaceholderKey)
 }
 
 // readEntries 解析 api_keys.txt 为有序条目列表（跳过空行/注释/字段不足的行）。
@@ -156,7 +167,14 @@ func (m *APIKeyManager) readEntries() ([]apiKeyEntry, error) {
 		if len(parts) < 2 {
 			continue
 		}
-		e := apiKeyEntry{Name: strings.TrimSpace(parts[0]), Key: strings.TrimSpace(parts[1])} //nolint:exhaustruct
+		e := apiKeyEntry{
+			Name:   strings.TrimSpace(parts[0]),
+			Key:    strings.TrimSpace(parts[1]),
+			Source: "file",
+		} //nolint:exhaustruct
+		if e.Key == "" || isPlaceholderAPIKey(e.Key) {
+			continue
+		}
 		if len(parts) >= 3 {
 			e.Description = strings.TrimSpace(parts[2])
 		}
@@ -176,7 +194,8 @@ func (m *APIKeyManager) writeEntries(entries []apiKeyEntry) error {
 	var b strings.Builder
 	b.WriteString("# 格式: name:key:description （由管理面板维护）\n")
 	for _, e := range entries {
-		if e.Name == "" || e.Key == "" {
+		if e.Name == "" || e.Key == "" || e.ReadOnly || e.Source == "environment" ||
+			isPlaceholderAPIKey(e.Key) {
 			continue
 		}
 		b.WriteString(e.Name)
@@ -196,14 +215,39 @@ func (m *APIKeyManager) writeEntries(entries []apiKeyEntry) error {
 	return os.Rename(tmp, m.keysFile) //nolint:wrapcheck
 }
 
-// List 返回当前所有密钥条目（供 admin 列表展示；调用方负责脱敏，勿直接回明文 key）。
+// List 返回文件密钥与环境变量托管密钥。环境变量密钥只用于生成服务端脱敏值，
+// 管理 API 不应将其明文返回给浏览器。
 func (m *APIKeyManager) List() ([]apiKeyEntry, error) {
-	return m.readEntries()
+	entries, err := m.readEntries()
+	if err != nil {
+		return nil, err
+	}
+	envKey := strings.TrimSpace(os.Getenv("VPROXY_API_KEY"))
+	if envKey == "" {
+		return entries, nil
+	}
+	kept := make([]apiKeyEntry, 0, len(entries)+1)
+	for _, entry := range entries {
+		if entry.Key != envKey {
+			kept = append(kept, entry)
+		}
+	}
+	kept = append(kept, apiKeyEntry{
+		Name:        environmentAPIKeyName,
+		Key:         envKey,
+		Description: "由 VPROXY_API_KEY 环境变量托管",
+		Source:      "environment",
+		ReadOnly:    true,
+	})
+	return kept, nil
 }
 
 // Add 新增（或按 name 覆盖）一个密钥，写回文件并重载内存。
 // 先剔除同名旧条目，再追加，最后 load_keys。
 func (m *APIKeyManager) Add(name, key, description string) error {
+	if isPlaceholderAPIKey(key) {
+		return fmt.Errorf("示例密钥不能作为有效 API Key")
+	}
 	entries, err := m.readEntries()
 	if err != nil {
 		return err

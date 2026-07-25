@@ -130,6 +130,34 @@ func TestNodeMatchesAdminStatus(t *testing.T) {
 	}
 }
 
+func TestAdminGetRecentProxy(t *testing.T) {
+	rawURI := "http://user:secret@8.8.4.4:3128"
+	nodes.RecordProxySuccess(rawURI)
+	adm := &AdminHandler{} //nolint:exhaustruct
+	rec := httptest.NewRecorder()
+
+	adm.adminGetRecentProxy(rec, httptest.NewRequest(
+		http.MethodGet,
+		"/api/admin/nodes/current",
+		nil,
+	))
+
+	var response struct {
+		Recent nodes.RecentProxyStatus `json:"recent_proxy"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if !response.Recent.Available ||
+		response.Recent.Address != "8.8.4.4:3128" ||
+		response.Recent.Type != "http" {
+		t.Fatalf("unexpected recent proxy response: %#v", response.Recent)
+	}
+	if strings.Contains(response.Recent.Address, "secret") {
+		t.Fatalf("proxy credentials leaked: %q", response.Recent.Address)
+	}
+}
+
 func TestAdminGetNodesPaginationAndFilters(t *testing.T) {
 	const prefix = "admin-pagination-filter-test"
 	firstURI := "http://127.0.0.1:49101#" + prefix + "-first"

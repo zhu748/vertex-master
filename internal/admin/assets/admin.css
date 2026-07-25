@@ -354,7 +354,47 @@ td code { background: rgba(0, 0, 0, .3); padding: 2px 9px; border-radius: 8px; f
   transition: opacity .2s var(--ease);
 }
 .action-copy-btn:hover { opacity: 1; color: var(--gold); }
+.managed-key-hint { color: var(--text-dim-custom, var(--text-dim)); font-size: calc(var(--base-font-size) * 11 / 14); }
 .th-center { width: 40px; text-align: center; }
+
+.recent-proxy-card {
+  border-color: rgba(var(--gold-rgb), .3);
+  background:
+    linear-gradient(135deg, rgba(var(--gold-rgb), .09), transparent 55%),
+    var(--glass-solid);
+}
+.recent-proxy-head,
+.recent-proxy-body,
+.recent-proxy-meta {
+  display: flex;
+  align-items: center;
+}
+.recent-proxy-head,
+.recent-proxy-body { justify-content: space-between; gap: 18px; }
+.recent-proxy-live {
+  display: inline-flex; align-items: center; gap: 7px; flex: none;
+  color: var(--green); font-size: calc(var(--base-font-size) * 11 / 14);
+}
+.recent-proxy-dot {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--green);
+  box-shadow: 0 0 0 4px rgba(132,214,160,.13), 0 0 14px rgba(132,214,160,.65);
+  animation: recent-proxy-pulse 1.8s ease-in-out infinite;
+}
+@keyframes recent-proxy-pulse {
+  50% { opacity: .5; transform: scale(.8); }
+}
+.recent-proxy-body {
+  margin-top: 15px; padding-top: 15px; border-top: 1px solid var(--stroke);
+}
+.recent-proxy-name {
+  color: var(--text-custom); font-size: calc(var(--base-font-size) * 17 / 14);
+  font-weight: 700; overflow-wrap: anywhere;
+}
+.recent-proxy-address {
+  color: var(--blue); font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: calc(var(--base-font-size) * 12 / 14); margin-top: 4px; overflow-wrap: anywhere;
+}
+.recent-proxy-meta { justify-content: flex-end; gap: 10px; color: var(--text-dim-custom, var(--text-dim)); font-size: calc(var(--base-font-size) * 11 / 14); }
 
 /* ── mobile responsive ── */
 
@@ -400,6 +440,9 @@ td code { background: rgba(0, 0, 0, .3); padding: 2px 9px; border-radius: 8px; f
   main { border-radius: 0; }
   .page-head h2 { font-size: calc(var(--base-font-size) * 20 / 14); }
   .card { padding: 16px; }
+  .recent-proxy-head, .recent-proxy-body { align-items: flex-start; }
+  .recent-proxy-body { flex-direction: column; }
+  .recent-proxy-meta { justify-content: flex-start; flex-wrap: wrap; }
   .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
   .actions .flex-1 { display: none; }
   .actions .btn { font-size: calc(var(--base-font-size) * 11 / 14); padding: 8px 6px; text-align: center; min-width: 0; }
