@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // TestWriteSettingsMergesAndPreservesUnknown 验证 WriteSettings：
@@ -87,6 +88,9 @@ func TestWriteModelsRoundTrip(t *testing.T) {
 func TestApplyEnvironmentOverrides(t *testing.T) {
 	t.Setenv("PORT", "10000")
 	t.Setenv("VPROXY_ADMIN_PASSWORD", "render-admin-password")
+	t.Setenv("VPROXY_ALLOW_PRIVATE_SUBSCRIPTION_URLS", "true")
+	t.Setenv("VPROXY_ALLOW_DOMAIN_SUBSCRIPTION_PROXIES", "true")
+	t.Setenv("VPROXY_PROXY_SUBSCRIPTION_ALLOW_PROXY_FALLBACK", "true")
 
 	cfg := DefaultConfig()
 	applyEnvironmentOverrides(&cfg)
@@ -96,6 +100,15 @@ func TestApplyEnvironmentOverrides(t *testing.T) {
 	}
 	if cfg.AdminPassword != "render-admin-password" {
 		t.Fatalf("VPROXY_ADMIN_PASSWORD 环境变量未生效")
+	}
+	if !cfg.AllowPrivateSubscriptionURLs {
+		t.Fatalf("VPROXY_ALLOW_PRIVATE_SUBSCRIPTION_URLS 环境变量未生效")
+	}
+	if !cfg.AllowDomainSubscriptionProxies {
+		t.Fatalf("VPROXY_ALLOW_DOMAIN_SUBSCRIPTION_PROXIES 环境变量未生效")
+	}
+	if !cfg.ProxySubscriptionAllowProxyFallback {
+		t.Fatalf("VPROXY_PROXY_SUBSCRIPTION_ALLOW_PROXY_FALLBACK 环境变量未生效")
 	}
 }
 
@@ -107,5 +120,186 @@ func TestApplyEnvironmentOverridesIgnoresInvalidPort(t *testing.T) {
 
 	if cfg.PortAPI != 2156 {
 		t.Fatalf("无效 PORT 不应覆盖默认端口，got %d", cfg.PortAPI)
+	}
+}
+
+func TestApplyEnvironmentOverridesProxyHealthAndFailover(t *testing.T) {
+	t.Setenv("VPROXY_PROXY_HEALTH_CHECK_ENABLED", "false")
+	t.Setenv("VPROXY_PROXY_HEALTH_CHECK_INTERVAL_MINUTES", "45")
+	t.Setenv("VPROXY_PROXY_HEALTH_CHECK_BATCH_SIZE", "120")
+	t.Setenv("VPROXY_PROXY_HEALTH_CHECK_CONCURRENCY", "9")
+	t.Setenv("VPROXY_PROXY_HEALTH_CHECK_TIMEOUT_SECONDS", "17")
+	t.Setenv("VPROXY_PROXY_FAILOVER_MAX_ATTEMPTS", "37")
+
+	cfg := DefaultConfig()
+	applyEnvironmentOverrides(&cfg)
+
+	if cfg.ProxyHealthCheckEnabled {
+		t.Fatal("VPROXY_PROXY_HEALTH_CHECK_ENABLED=false 未生效")
+	}
+	if cfg.ProxyHealthCheckIntervalMinutes != 45 {
+		t.Fatalf("健康巡检间隔应为 45，got %d", cfg.ProxyHealthCheckIntervalMinutes)
+	}
+	if cfg.ProxyHealthCheckBatchSize != 120 {
+		t.Fatalf("健康巡检批量应为 120，got %d", cfg.ProxyHealthCheckBatchSize)
+	}
+	if cfg.ProxyHealthCheckConcurrency != 9 {
+		t.Fatalf("健康巡检并发应为 9，got %d", cfg.ProxyHealthCheckConcurrency)
+	}
+	if cfg.ProxyHealthCheckTimeoutSeconds != 17 {
+		t.Fatalf("健康巡检超时应为 17，got %d", cfg.ProxyHealthCheckTimeoutSeconds)
+	}
+	if cfg.ProxyFailoverMaxAttempts != 37 {
+		t.Fatalf("代理接力尝试数应为 37，got %d", cfg.ProxyFailoverMaxAttempts)
+	}
+}
+
+func TestApplyEnvironmentOverridesIgnoresInvalidProxyValues(t *testing.T) {
+	t.Setenv("VPROXY_PROXY_HEALTH_CHECK_ENABLED", "sometimes")
+	t.Setenv("VPROXY_PROXY_HEALTH_CHECK_INTERVAL_MINUTES", "0")
+	t.Setenv("VPROXY_PROXY_HEALTH_CHECK_BATCH_SIZE", "501")
+	t.Setenv("VPROXY_PROXY_HEALTH_CHECK_CONCURRENCY", "not-a-number")
+	t.Setenv("VPROXY_PROXY_HEALTH_CHECK_TIMEOUT_SECONDS", "1")
+	t.Setenv("VPROXY_PROXY_FAILOVER_MAX_ATTEMPTS", "101")
+
+	cfg := DefaultConfig()
+	cfg.ProxyHealthCheckEnabled = false
+	cfg.ProxyHealthCheckIntervalMinutes = 33
+	cfg.ProxyHealthCheckBatchSize = 77
+	cfg.ProxyHealthCheckConcurrency = 6
+	cfg.ProxyHealthCheckTimeoutSeconds = 12
+	cfg.ProxyFailoverMaxAttempts = 19
+	applyEnvironmentOverrides(&cfg)
+
+	if cfg.ProxyHealthCheckEnabled {
+		t.Fatal("非法布尔环境变量不应覆盖原值")
+	}
+	if cfg.ProxyHealthCheckIntervalMinutes != 33 ||
+		cfg.ProxyHealthCheckBatchSize != 77 ||
+		cfg.ProxyHealthCheckConcurrency != 6 ||
+		cfg.ProxyHealthCheckTimeoutSeconds != 12 ||
+		cfg.ProxyFailoverMaxAttempts != 19 {
+		t.Fatalf("非法代理环境变量不应覆盖原配置，got %+v", cfg)
+	}
+}
+
+func TestLoadLegacyConfigGetsNewProxyDefaults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("VPROXY_CONFIG", path)
+	clearProxyEnvironment(t)
+	if err := os.WriteFile(path, []byte(`{"parallel_pool_enabled":true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	InvalidateCache()
+	t.Cleanup(InvalidateCache)
+
+	cfg := Load()
+	defaults := DefaultConfig()
+	if cfg.ProxyFailoverMaxAttempts != defaults.ProxyFailoverMaxAttempts ||
+		cfg.ProxyHealthCheckEnabled != defaults.ProxyHealthCheckEnabled ||
+		cfg.ProxyHealthCheckIntervalMinutes != defaults.ProxyHealthCheckIntervalMinutes ||
+		cfg.ProxyHealthCheckBatchSize != defaults.ProxyHealthCheckBatchSize ||
+		cfg.ProxyHealthCheckConcurrency != defaults.ProxyHealthCheckConcurrency ||
+		cfg.ProxyHealthCheckTimeoutSeconds != defaults.ProxyHealthCheckTimeoutSeconds {
+		t.Fatalf("旧配置应获得新增代理默认值，got %+v", cfg)
+	}
+}
+
+func TestLoadNormalizesOutOfRangeProxySettings(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("VPROXY_CONFIG", path)
+	clearProxyEnvironment(t)
+	initial := `{
+		"parallel_pool_size": 0,
+		"parallel_pool_delay_ms": 999999,
+		"proxy_failover_max_attempts": 1,
+		"proxy_health_check_interval_minutes": 0,
+		"proxy_health_check_batch_size": 999,
+		"proxy_health_check_concurrency": -3,
+		"proxy_health_check_timeout_seconds": 1
+	}`
+	if err := os.WriteFile(path, []byte(initial), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	InvalidateCache()
+	t.Cleanup(InvalidateCache)
+
+	cfg := Load()
+	if cfg.ParallelPoolSize != 5 {
+		t.Fatalf("parallel_pool_size=0 应回退为 5，got %d", cfg.ParallelPoolSize)
+	}
+	if cfg.ParallelPoolDelayMs != 10000 {
+		t.Fatalf("过大的接力延迟应限制为 10000，got %d", cfg.ParallelPoolDelayMs)
+	}
+	if cfg.ProxyFailoverMaxAttempts != 5 {
+		t.Fatalf("尝试数应至少等于并发数 5，got %d", cfg.ProxyFailoverMaxAttempts)
+	}
+	if cfg.ProxyHealthCheckIntervalMinutes != 15 {
+		t.Fatalf("巡检间隔 0 应回退为 15，got %d", cfg.ProxyHealthCheckIntervalMinutes)
+	}
+	if cfg.ProxyHealthCheckBatchSize != 450 {
+		t.Fatalf("巡检批量应受单轮周期预算限制为 450，got %d", cfg.ProxyHealthCheckBatchSize)
+	}
+	if cfg.ProxyHealthCheckConcurrency != 1 {
+		t.Fatalf("巡检并发下限应为 1，got %d", cfg.ProxyHealthCheckConcurrency)
+	}
+	if cfg.ProxyHealthCheckTimeoutSeconds != 2 {
+		t.Fatalf("巡检超时下限应为 2，got %d", cfg.ProxyHealthCheckTimeoutSeconds)
+	}
+
+	waitForNormalizedConfig(t, path, map[string]int{
+		"parallel_pool_size":                  5,
+		"parallel_pool_delay_ms":              10000,
+		"proxy_failover_max_attempts":         5,
+		"proxy_health_check_interval_minutes": 15,
+		"proxy_health_check_batch_size":       450,
+		"proxy_health_check_concurrency":      1,
+		"proxy_health_check_timeout_seconds":  2,
+	})
+}
+
+func clearProxyEnvironment(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{
+		"PORT",
+		"VPROXY_ADMIN_PASSWORD",
+		"VPROXY_ALLOW_PRIVATE_SUBSCRIPTION_URLS",
+		"VPROXY_ALLOW_DOMAIN_SUBSCRIPTION_PROXIES",
+		"VPROXY_PROXY_SUBSCRIPTION_ALLOW_PROXY_FALLBACK",
+		"VPROXY_PROXY_HEALTH_CHECK_ENABLED",
+		"VPROXY_PROXY_HEALTH_CHECK_INTERVAL_MINUTES",
+		"VPROXY_PROXY_HEALTH_CHECK_BATCH_SIZE",
+		"VPROXY_PROXY_HEALTH_CHECK_CONCURRENCY",
+		"VPROXY_PROXY_HEALTH_CHECK_TIMEOUT_SECONDS",
+		"VPROXY_PROXY_FAILOVER_MAX_ATTEMPTS",
+	} {
+		t.Setenv(key, "")
+	}
+}
+
+func waitForNormalizedConfig(t *testing.T, path string, expected map[string]int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			raw := map[string]any{}
+			if json.Unmarshal(data, &raw) == nil {
+				matches := true
+				for key, value := range expected {
+					if raw[key] != float64(value) {
+						matches = false
+						break
+					}
+				}
+				if matches {
+					return
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("等待归一化配置回写超时，path=%s", path)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

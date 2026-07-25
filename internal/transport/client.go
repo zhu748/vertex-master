@@ -79,6 +79,14 @@ func (s *Session) Close() {
 	}
 }
 
+// SetFollowRedirect controls automatic redirects for callers that must
+// validate every redirect target before sending the next request.
+func (s *Session) SetFollowRedirect(follow bool) {
+	if s.client != nil {
+		s.client.SetFollowRedirect(follow)
+	}
+}
+
 type NetworkClient struct {
 	debugMode bool
 }

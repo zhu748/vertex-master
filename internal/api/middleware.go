@@ -59,9 +59,20 @@ func (m *middleware) withRecover(next http.Handler) http.Handler {
 
 func (m *middleware) withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isAdminPath(r.URL.Path) {
+			if r.Method == http.MethodOptions {
+				writeJSON(w, http.StatusForbidden, adminErr("管理接口不允许跨域访问"))
+				return
+			}
+			next.ServeHTTP(w, r)
+			return
+		}
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "*")
-		w.Header().Set("Access-Control-Allow-Headers", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set(
+			"Access-Control-Allow-Headers",
+			"Authorization, Content-Type, X-API-Key, X-Goog-Api-Key",
+		)
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -71,11 +82,21 @@ func (m *middleware) withCORS(next http.Handler) http.Handler {
 }
 
 func (m *middleware) withBodyLimit(next http.Handler) http.Handler {
-	limit := int64(m.cfg.MaxRequestMB()) << 20
-	if limit <= 0 {
-		return next
-	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		limit := int64(m.cfg.MaxRequestMB()) << 20
+		if limit <= 0 {
+			limit = 64 << 20
+		}
+		if r.ContentLength > limit {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
+				"error": map[string]any{
+					"code":    http.StatusRequestEntityTooLarge,
+					"message": "请求体过大 (request body too large)",
+					"status":  "RESOURCE_EXHAUSTED",
+				},
+			})
+			return
+		}
 		if r.Body != nil {
 			r.Body = http.MaxBytesReader(w, r.Body, limit)
 		}

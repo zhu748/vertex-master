@@ -2,11 +2,7 @@ package vertex
 
 import (
 	"context"
-	"errors"
-	"log"
 	"sort"
-
-	"github.com/bsfdsagfadg/vertex/internal/nodes"
 )
 
 type candidateResult struct {
@@ -16,90 +12,24 @@ type candidateResult struct {
 }
 
 func (c *VertexAIClient) CompleteChat(ctx context.Context, model string, geminiPayload map[string]any) (map[string]any, error) {
-	cands := nodes.SelectForParallel(c.cfg.ParallelPoolSize(), c.cfg.ParallelNodeTopK(), c.cfg.DebugMode(), c.cfg.StickyNodePriority())
-
-	if !c.cfg.ParallelPoolEnabled() || len(cands) == 0 {
-		proxy := c.cfg.ActiveNodeURI()
-		if proxy == "" {
-			proxy = c.cfg.ProxyURL()
-		}
-		log.Printf("[Vertex] [CompleteChat] 降级为单节点运行: %s", nodes.GetNodeName(proxy))
-		return c.runSingleCandidate(ctx, model, geminiPayload, proxy)
-	}
-
-	if c.cfg.DebugMode() {
-		log.Printf("[Vertex] [CompleteChat] 启动所有候选, %d 个节点参与", len(cands))
-		for _, cand := range cands {
-			log.Printf("[Vertex] [CompleteChat] 参与节点: %s", cand.Name)
-		}
-	}
-
-	ctxRace, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	resCh := make(chan candidateResult, len(cands))
-	for _, cand := range cands {
-		uri := cand.RawURI
-		go func() {
+	return RunRacePreferred(
+		ctx,
+		c.cfg,
+		func(candidateCtx context.Context, proxyURI string) (map[string]any, error) {
 			copiedPayload := deepCopyAny(geminiPayload).(map[string]any)
-			resp, err := c.runSingleCandidate(ctxRace, model, copiedPayload, uri)
-			select {
-			case resCh <- candidateResult{proxyURI: uri, resp: resp, err: err}:
-			case <-ctxRace.Done():
+			return c.runSingleCandidate(candidateCtx, model, copiedPayload, proxyURI)
+		},
+		func(response map[string]any) bool {
+			return candidateFinish(response) == "STOP"
+		},
+		func(responses []map[string]any) (map[string]any, error) {
+			results := make([]candidateResult, 0, len(responses))
+			for _, response := range responses {
+				results = append(results, candidateResult{resp: response})
 			}
-		}()
-	}
-
-	remaining := len(cands)
-	var successes []candidateResult
-
-	for remaining > 0 {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case res := <-resCh:
-			remaining--
-			if res.err != nil {
-				if res.err != context.Canceled && !errors.Is(res.err, context.Canceled) {
-					ve := asVertexError(res.err)
-					if ve != nil && !ve.IsRetryable() {
-						if c.cfg.DebugMode() {
-							log.Printf("[Vertex] [CompleteChat] 节点 %s 触发不可重试的硬性错误: %s", nodes.GetNodeName(res.proxyURI), res.err.Error())
-						}
-						cancel()
-						return nil, res.err
-					}
-					if ve != nil && ve.Kind == "ratelimit" {
-						if c.cfg.DebugMode() {
-							log.Printf("[Vertex] [CompleteChat] 节点 %s 触发 429 API 限制，进入 30 秒短时歇息", nodes.GetNodeName(res.proxyURI))
-						}
-						nodes.RecordRateLimit(res.proxyURI, 30)
-						nodes.GetStickyPool().Evict(res.proxyURI)
-					} else {
-						if c.cfg.DebugMode() {
-							log.Printf("[Vertex] [CompleteChat] 节点 %s 失败: %s", nodes.GetNodeName(res.proxyURI), res.err.Error())
-						}
-						nodes.RecordTest(res.proxyURI, false, 0, res.err.Error())
-						nodes.GetStickyPool().Evict(res.proxyURI)
-					}
-				}
-				continue
-			}
-			nodes.RecordTest(res.proxyURI, true, 50, "")
-			nodes.GetStickyPool().Add(res.proxyURI)
-			if candidateFinish(res.resp) == "STOP" {
-				cancel()
-				return res.resp, nil
-			}
-			successes = append(successes, res)
-		}
-	}
-
-	if len(successes) == 0 {
-		return nil, NewEmptyResponseError("所有候选节点均失败")
-	}
-
-	return pickBestResult(successes)
+			return pickBestResult(results)
+		},
+	)
 }
 
 func (c *VertexAIClient) runSingleCandidate(ctx context.Context, model string, geminiPayload map[string]any, proxyURI string) (map[string]any, error) {

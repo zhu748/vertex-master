@@ -1,9 +1,12 @@
 package nodes
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/bsfdsagfadg/vertex/internal/config"
 )
@@ -13,6 +16,7 @@ func resetState() {
 	defer mu.Unlock()
 	nodeList = nil
 	healthMap = make(map[string]*NodeHealth)
+	subscriptionSources = make(map[string]map[int64]bool)
 	loaded = false
 	// 彻底清除物理磁盘缓存，防止测试间的数据污染
 	_ = os.Remove(filepath.Join(config.ConfigDir(), "nodes.json"))
@@ -287,9 +291,80 @@ func TestSelectForParallelCooldownFallback(t *testing.T) {
 	RecordTest("uri1", false, 0, "timeout")
 	RecordTest("uri2", false, 0, "timeout")
 
-	// Request 3 nodes, should get n3 + fallback from cooldown
+	// 冷却中的失败节点不应为了凑满并发数而重新进入候选。
 	selected := SelectForParallel(3, 80, false, false)
-	if len(selected) != 3 {
-		t.Errorf("Expected 3 selected (1 normal + 2 cooldown), got %d", len(selected))
+	if len(selected) != 1 || selected[0].RawURI != "uri3" {
+		t.Errorf("Expected only the available node, got %#v", selected)
+	}
+}
+
+func TestSelectForParallelLimitsUntestedExploration(t *testing.T) {
+	resetState()
+	defer resetState()
+
+	var list []Node
+	for i := 0; i < 10; i++ {
+		uri := fmt.Sprintf("healthy-%d", i)
+		list = append(list, Node{RawURI: uri, Name: uri})
+	}
+	for i := 0; i < 10; i++ {
+		uri := fmt.Sprintf("untested-%d", i)
+		list = append(list, Node{RawURI: uri, Name: uri})
+	}
+	MergeNodes(list)
+	for i := 0; i < 10; i++ {
+		RecordTest(fmt.Sprintf("healthy-%d", i), true, 20, "")
+	}
+
+	selected := SelectForParallel(10, 80, false, false)
+	untestedCount := 0
+	for _, node := range selected {
+		if strings.HasPrefix(node.RawURI, "untested-") {
+			untestedCount++
+		}
+	}
+	if untestedCount != 2 {
+		t.Fatalf("expected 20%% exploration, got %d untested nodes in %#v", untestedCount, selected)
+	}
+}
+
+func TestSelectNodesForHealthCheckPriority(t *testing.T) {
+	resetState()
+	defer resetState()
+
+	MergeNodes([]Node{
+		{RawURI: "untested", Name: "untested"},
+		{RawURI: "failed", Name: "failed"},
+		{RawURI: "healthy", Name: "healthy"},
+		{RawURI: "disabled", Name: "disabled", Disabled: true},
+	})
+	RecordTest("failed", false, 0, "timeout")
+	RecordTest("healthy", true, 10, "")
+
+	mu.Lock()
+	healthMap["failed"].CooldownUntil = time.Now().Add(-time.Second).Unix()
+	healthMap["healthy"].LastSuccessAt = time.Now().Add(-time.Hour).Unix()
+	mu.Unlock()
+
+	selected := SelectNodesForHealthCheck(3, 30*time.Minute, time.Now())
+	if len(selected) != 3 ||
+		selected[0].RawURI != "untested" ||
+		selected[1].RawURI != "failed" ||
+		selected[2].RawURI != "healthy" {
+		t.Fatalf("unexpected health check priority: %#v", selected)
+	}
+}
+
+func TestSafeNodeLabelIsSingleLineAndBounded(t *testing.T) {
+	raw := "  safe\r\n\u001b[31mname\u202e" + strings.Repeat("长", 200)
+	got := SafeNodeLabel(raw)
+	if strings.ContainsAny(got, "\r\n\u001b") || strings.ContainsRune(got, '\u202e') {
+		t.Fatalf("unsafe control characters remained in %q", got)
+	}
+	if len([]rune(got)) > 128 {
+		t.Fatalf("safe node label exceeds 128 runes: %d", len([]rune(got)))
+	}
+	if got == "" {
+		t.Fatal("safe node label must not be empty")
 	}
 }

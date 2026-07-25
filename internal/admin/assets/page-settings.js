@@ -2,15 +2,22 @@ const SETTINGS_FIELDS = [
   // 🚀 Group: pool (并发与 Token 池管理)
   { k: 'parallel_pool_enabled', label: '并发请求池', type: 'bool', group: 'pool', desc: '同时请求多个健康节点，首包到达即采纳，降低延迟' },
   { k: 'parallel_pool_retry_enabled', label: '并发池单点重试', type: 'bool', group: 'pool', desc: '开启后允许并发池内节点429后依然等待并重试（适用于少节点场景）' },
-  { k: 'sticky_node_priority', label: '粘性节点优先轮询', type: 'bool', group: 'pool', desc: '启用后优先从粘性池中逐个尝试成功节点，失败即换下一个。粘性池本身始终在工作，此开关只影响优先级的分配。' },
-  { k: 'parallel_pool_size', label: '并发数', type: 'number', max: 20, min: 1, group: 'pool', desc: '并发抢跑的节点数 (默认 15，最大 20)' },
+  { k: 'sticky_node_priority', label: '优先复用成功节点', type: 'bool', group: 'pool', desc: '优先选择近期请求成功的节点，同时保留少量未测试节点用于探索。' },
+  { k: 'parallel_pool_size', label: '最大同时并发', type: 'number', max: 20, min: 1, group: 'pool', desc: '同一请求最多同时运行的代理数量（默认 5，最大 20）' },
+  { k: 'proxy_failover_max_attempts', label: '单请求最多尝试代理', type: 'number', max: 100, min: 1, group: 'pool', desc: '失败或超时后可继续接力的候选总数（默认 30）' },
   { k: 'parallel_pool_delay_dynamic', label: '动态对冲延迟', type: 'bool', group: 'pool', desc: '根据节点平均响应时间动态调整并发启动间隔，平衡延迟与流量消耗' },
-  { k: 'parallel_pool_delay_ms', label: '固定对冲延迟时间 (毫秒)', type: 'number', group: 'pool', desc: '当禁用动态延迟时，以此固定间隔对冲触发后续备份通道 (默认 500ms)' },
+  { k: 'parallel_pool_delay_ms', label: '固定对冲延迟时间 (毫秒)', type: 'number', max: 10000, min: 100, group: 'pool', desc: '当前代理尚未响应时，启动下一个后备代理的间隔（默认 1000ms）' },
+  { k: 'proxy_health_check_enabled', label: '自动健康巡检', type: 'bool', group: 'health', desc: '后台限量检查代理连通性；失败仅进入冷却，不会永久禁用。' },
+  { k: 'proxy_health_check_interval_minutes', label: '巡检间隔（分钟）', type: 'number', max: 1440, min: 1, group: 'health', desc: '每轮巡检之间的间隔（默认 15）' },
+  { k: 'proxy_health_check_batch_size', label: '每轮巡检数量', type: 'number', max: 500, min: 1, group: 'health', desc: '优先检查未测试和冷却到期节点（默认 50）' },
+  { k: 'proxy_health_check_concurrency', label: '巡检并发数', type: 'number', max: 20, min: 1, group: 'health', desc: 'Render Free 建议 5～10（默认 5）' },
+  { k: 'proxy_health_check_timeout_seconds', label: '单节点巡检超时（秒）', type: 'number', max: 60, min: 2, group: 'health', desc: '超过该时间即记录失败并进入冷却（默认 8）' },
 
   // 🛠 Group: core (核心控制与基础参数)
   { k: 'max_retries', label: '上游重试次数', type: 'number', group: 'core', desc: '上游请求失败时的重试次数；总尝试 = 此值 + 1' },
   { k: 'max_n', label: '最大候选数 (max_n)', type: 'number', group: 'core', desc: '限制客户端一次生成回答的条数上限，防滥用刷量 (默认 8)' },
   { k: 'max_spill_mb', label: '最大内存缓冲 (MB)', type: 'number', group: 'core', desc: '上传大文件时，超过此大小将写入磁盘，防爆内存 (默认 2048)' },
+  { k: 'max_request_mb', label: '最大请求体 (MB)', type: 'number', min: 1, max: 1024, group: 'core', desc: '限制客户端请求体大小（默认 64 MB）' },
   { k: 'request_timeout', label: '请求超时', type: 'number', max: 1800, min: 1, group: 'core', desc: '单次请求的最大连接时间 (默认 180 秒，最大 1800 秒)' },
   { k: 'aggregate_stream', label: '聚合流式', type: 'bool', group: 'core', desc: '拦截流式请求，改为一次性返回完整结果的单块流（解决部分客户端单字流式卡顿问题）' },
   { k: 'debug_mode', label: 'Debug 日志', type: 'bool', group: 'core', desc: '开启更详细的错误与负载调试日志' },
@@ -21,7 +28,14 @@ const SETTINGS_FIELDS = [
 
 let curSettings = {};
 async function loadSettings() {
-  const d = await API.settings.get(); curSettings = d.settings || d;
+  let d;
+  try {
+    d = await API.settings.get();
+  } catch (e) {
+    toast('设置加载失败: ' + e.message);
+    return;
+  }
+  curSettings = d.settings || d;
 
   const gpEl = $('#globalProxy');
   if (gpEl && curSettings.proxy_url !== undefined) {
@@ -40,6 +54,7 @@ async function loadSettings() {
   // 【核心修改：定义视觉功能分组】
   const groups = {
     pool: { title: '🚀 并发与 Token 池管理', fields: [] },
+    health: { title: '🩺 代理健康巡检', fields: [] },
     core: { title: '🛠 核心控制与基础参数', fields: [] },
     security: { title: '🛡 安全增强与模型策略', fields: [] }
   };
@@ -109,7 +124,7 @@ async function loadSettings() {
         container.style.pointerEvents = disabled ? 'none' : '';
         const desc = container.querySelector('.desc');
         if (desc) {
-          desc.textContent = disabled ? '需先启用并发请求池' : '启用后优先从粘性池中逐个尝试成功节点，失败即换下一个。粘性池本身始终在工作，此开关只影响优先级的分配。';
+          desc.textContent = disabled ? '需先启用并发请求池' : '优先选择近期请求成功的节点，同时保留少量未测试节点用于探索。';
         }
       }
 
@@ -136,8 +151,31 @@ async function saveSettings() {
     const el = $('#set_' + f.k);
     if (!el) continue;
     if (f.type === 'bool') out[f.k] = el.checked;
-    else if (f.type === 'number') out[f.k] = parseInt(el.value || '0', 10);
+    else if (f.type === 'number') {
+      const value = Number(el.value);
+      if (!Number.isInteger(value)) {
+        toast(f.label + '必须是有效整数');
+        el.focus();
+        return;
+      }
+      if (f.min !== undefined && value < f.min) {
+        toast(f.label + '不能小于 ' + f.min);
+        el.focus();
+        return;
+      }
+      if (f.max !== undefined && value > f.max) {
+        toast(f.label + '不能大于 ' + f.max);
+        el.focus();
+        return;
+      }
+      out[f.k] = Math.trunc(value);
+    }
     else out[f.k] = el.value;
+  }
+  if (out.proxy_failover_max_attempts < out.parallel_pool_size) {
+    toast('单请求最多尝试代理不能小于最大同时并发');
+    $('#set_proxy_failover_max_attempts').focus();
+    return;
   }
   // Keep sending whatever telemetry_enabled is in curSettings to prevent config loss/errors
   if (curSettings.telemetry_enabled !== undefined) {
@@ -147,7 +185,13 @@ async function saveSettings() {
     out['sticky_node_priority'] = false;
     out['parallel_pool_retry_enabled'] = false;
   }
-  await API.settings.put(out); toast('设置已保存');
+  try {
+    await API.settings.put(out);
+  } catch (e) {
+    toast('设置保存失败: ' + e.message);
+    return;
+  }
+  toast('设置已保存');
   window.hasUnsavedSettings = false;
   await loadSettings();
 }

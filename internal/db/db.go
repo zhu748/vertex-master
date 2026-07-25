@@ -39,24 +39,33 @@ func InitDB(dbPath string) error {
 	}
 
 	// Use WAL mode for better concurrency
-	dsn := dbPath + "?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
+	dsn := dbPath +
+		"?_pragma=journal_mode(WAL)" +
+		"&_pragma=synchronous(NORMAL)" +
+		"&_pragma=foreign_keys(1)" +
+		"&_pragma=busy_timeout(5000)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return fmt.Errorf("error: %w", err)
 
 	}
+	// SQLite permits many readers but only one writer. Keeping one pooled
+	// connection serializes background health writes with admin mutations and
+	// avoids SQLITE_BUSY errors from competing connections in this process.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 
 	// Ensure DB is reachable
 	if errPing := db.Ping(); errPing != nil { //nolint:govet
+		_ = db.Close()
 		return fmt.Errorf("error: %w", errPing)
 
 	}
 
-	GlobalDB = db
-
 	// Create tables
 	err = createTables(db)
 	if err != nil {
+		_ = db.Close()
 		return err
 	}
 
@@ -66,6 +75,7 @@ func InitDB(dbPath string) error {
 		migrateFromFiles(db, dir)
 	}
 
+	GlobalDB = db
 	return nil
 }
 
@@ -84,7 +94,8 @@ func createTables(db *sql.DB) error {
 		type TEXT NOT NULL,
 		name TEXT NOT NULL,
 		disabled BOOLEAN NOT NULL DEFAULT 0,
-		source_id INTEGER NOT NULL DEFAULT 0
+		source_id INTEGER NOT NULL DEFAULT 0,
+		sort_order INTEGER NOT NULL DEFAULT 0
 	);
 
 	CREATE TABLE IF NOT EXISTS node_health (
@@ -97,6 +108,10 @@ func createTables(db *sql.DB) error {
 		last_success_at INTEGER NOT NULL DEFAULT 0,
 		last_fail_at INTEGER NOT NULL DEFAULT 0,
 		cooldown_until INTEGER NOT NULL DEFAULT 0,
+		last_429_at INTEGER NOT NULL DEFAULT 0,
+		rate_limit_count INTEGER NOT NULL DEFAULT 0,
+		recent_use_count INTEGER NOT NULL DEFAULT 0,
+		last_selected_at INTEGER NOT NULL DEFAULT 0,
 		FOREIGN KEY(raw_uri) REFERENCES nodes(raw_uri) ON DELETE CASCADE
 	);
 
@@ -116,22 +131,159 @@ func createTables(db *sql.DB) error {
 		created_at INTEGER NOT NULL DEFAULT 0,
 		updated_at INTEGER NOT NULL DEFAULT 0
 	);
+
+	CREATE TABLE IF NOT EXISTS proxy_subscription_nodes (
+		subscription_id INTEGER NOT NULL,
+		raw_uri TEXT NOT NULL,
+		PRIMARY KEY(subscription_id, raw_uri),
+		FOREIGN KEY(subscription_id) REFERENCES proxy_subscriptions(id) ON DELETE CASCADE,
+		FOREIGN KEY(raw_uri) REFERENCES nodes(raw_uri) ON DELETE CASCADE
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_proxy_subscription_nodes_raw_uri
+		ON proxy_subscription_nodes(raw_uri);
 	`
 	_, err := db.Exec(schema)
 	if err != nil {
 		return fmt.Errorf("error: %w", err)
 	}
-	// 兼容旧数据库；新数据库已包含该列，重复添加错误可安全忽略。
-	_, _ = db.Exec("ALTER TABLE nodes ADD COLUMN source_id INTEGER NOT NULL DEFAULT 0")
-	_, _ = db.Exec("ALTER TABLE proxy_subscriptions ADD COLUMN last_attempt_at INTEGER NOT NULL DEFAULT 0")
-	_, _ = db.Exec("ALTER TABLE proxy_subscriptions ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0")
-	_, _ = db.Exec("ALTER TABLE proxy_subscriptions ADD COLUMN managed_key TEXT NOT NULL DEFAULT ''")
-	_, _ = db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_proxy_subscriptions_managed_key
-		ON proxy_subscriptions(managed_key) WHERE managed_key <> ''`)
-	return nil
 
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin database migration: %w", err)
+	}
+	rollback := func(migrationErr error) error {
+		_ = tx.Rollback()
+		return migrationErr
+	}
+
+	columns := []struct {
+		table      string
+		name       string
+		definition string
+	}{
+		{"nodes", "source_id", "INTEGER NOT NULL DEFAULT 0"},
+		{"nodes", "sort_order", "INTEGER NOT NULL DEFAULT 0"},
+		{"proxy_subscriptions", "last_attempt_at", "INTEGER NOT NULL DEFAULT 0"},
+		{"proxy_subscriptions", "consecutive_failures", "INTEGER NOT NULL DEFAULT 0"},
+		{"proxy_subscriptions", "managed_key", "TEXT NOT NULL DEFAULT ''"},
+		{"node_health", "last_429_at", "INTEGER NOT NULL DEFAULT 0"},
+		{"node_health", "rate_limit_count", "INTEGER NOT NULL DEFAULT 0"},
+		{"node_health", "recent_use_count", "INTEGER NOT NULL DEFAULT 0"},
+		{"node_health", "last_selected_at", "INTEGER NOT NULL DEFAULT 0"},
+	}
+	for _, column := range columns {
+		if err := ensureColumn(tx, column.table, column.name, column.definition); err != nil {
+			return rollback(err)
+		}
+	}
+	if _, err := tx.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_proxy_subscriptions_managed_key
+		ON proxy_subscriptions(managed_key) WHERE managed_key <> ''`); err != nil {
+		return rollback(fmt.Errorf("create managed subscription index: %w", err))
+	}
+	if _, err := tx.Exec(`INSERT OR IGNORE INTO proxy_subscription_nodes(subscription_id, raw_uri)
+		SELECT n.source_id, n.raw_uri
+		FROM nodes n
+		JOIN proxy_subscriptions s ON s.id = n.source_id
+		WHERE n.source_id > 0`); err != nil {
+		return rollback(fmt.Errorf("backfill proxy subscription nodes: %w", err))
+	}
+	if _, err := tx.Exec(`DELETE FROM proxy_subscription_nodes
+		WHERE NOT EXISTS (
+			SELECT 1 FROM proxy_subscriptions s
+			WHERE s.id = proxy_subscription_nodes.subscription_id
+		)
+		OR NOT EXISTS (
+			SELECT 1 FROM nodes n
+			WHERE n.raw_uri = proxy_subscription_nodes.raw_uri
+		)`); err != nil {
+		return rollback(fmt.Errorf("remove orphan proxy subscription relations: %w", err))
+	}
+	if _, err := tx.Exec(`DELETE FROM nodes
+		WHERE source_id > 0
+		AND NOT EXISTS (
+			SELECT 1 FROM proxy_subscription_nodes psn WHERE psn.raw_uri = nodes.raw_uri
+		)`); err != nil {
+		return rollback(fmt.Errorf("remove orphan subscription nodes: %w", err))
+	}
+	if _, err := tx.Exec(`DELETE FROM node_health
+		WHERE NOT EXISTS (
+			SELECT 1 FROM nodes n WHERE n.raw_uri = node_health.raw_uri
+		)`); err != nil {
+		return rollback(fmt.Errorf("remove orphan node health: %w", err))
+	}
+	if err := validateForeignKeys(tx); err != nil {
+		return rollback(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit database migration: %w", err)
+	}
+	return nil
 }
 
+func ensureColumn(tx *sql.Tx, table, column, definition string) error {
+	rows, err := tx.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return fmt.Errorf("inspect %s columns: %w", table, err)
+	}
+	found := false
+	for rows.Next() {
+		var (
+			cid       int
+			name      string
+			columnTyp string
+			notNull   int
+			defaultV  any
+			primary   int
+		)
+		if err := rows.Scan(&cid, &name, &columnTyp, &notNull, &defaultV, &primary); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan %s columns: %w", table, err)
+		}
+		if name == column {
+			found = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("iterate %s columns: %w", table, err)
+	}
+	_ = rows.Close()
+	if found {
+		return nil
+	}
+	if _, err := tx.Exec(
+		"ALTER TABLE " + table + " ADD COLUMN " + column + " " + definition,
+	); err != nil {
+		return fmt.Errorf("add %s.%s: %w", table, column, err)
+	}
+	return nil
+}
+
+func validateForeignKeys(tx *sql.Tx) error {
+	rows, err := tx.Query("PRAGMA foreign_key_check")
+	if err != nil {
+		return fmt.Errorf("check foreign keys: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	if rows.Next() {
+		var table string
+		var rowID int64
+		var parent string
+		var foreignKeyID int
+		if err := rows.Scan(&table, &rowID, &parent, &foreignKeyID); err != nil {
+			return fmt.Errorf("scan foreign key violation: %w", err)
+		}
+		return fmt.Errorf(
+			"foreign key violation in table %s row %d referencing %s (constraint %d)",
+			table,
+			rowID,
+			parent,
+			foreignKeyID,
+		)
+	}
+	return rows.Err() //nolint:wrapcheck
+}
 func migrateFromFiles(db *sql.DB, configDir string) {
 	migratedFolder := filepath.Join(configDir, "migrated")
 

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/bsfdsagfadg/vertex/internal/config"
+	"github.com/bsfdsagfadg/vertex/internal/netx"
 	"github.com/bsfdsagfadg/vertex/internal/nodes"
 	"github.com/bsfdsagfadg/vertex/internal/vertex"
 )
@@ -89,10 +90,10 @@ func SyncEnvironmentProxySubscription() error {
 		if getErr != nil {
 			return getErr
 		}
-		if err := nodes.DeleteProxySubscription(existing.ID); err != nil {
+		removed, err := nodes.DeleteProxySubscriptionAndNodes(existing.ID)
+		if err != nil {
 			return err
 		}
-		removed := nodes.DeleteSubscriptionNodes(existing.ID)
 		log.Printf("[ProxyPool] 已移除环境变量托管订阅及 %d 个节点", removed)
 		return nil
 	}
@@ -148,7 +149,10 @@ func (adm *AdminHandler) adminAddStandardProxy(w http.ResponseWriter, r *http.Re
 		writeJSON(w, http.StatusBadRequest, adminErr("无法解析代理地址"))
 		return
 	}
-	nodes.MergeNodes([]nodes.Node{node})
+	if err := nodes.MergeNodes([]nodes.Node{node}); err != nil {
+		writeJSON(w, http.StatusInternalServerError, adminErr("保存代理失败: "+err.Error()))
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "node": node})
 }
 
@@ -189,6 +193,14 @@ func (adm *AdminHandler) adminSaveProxySubscription(w http.ResponseWriter, r *ht
 	parsedURL, err := url.Parse(rawURL)
 	if err != nil || parsedURL.Host == "" || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
 		writeJSON(w, http.StatusBadRequest, adminErr("订阅地址必须是有效的 HTTP/HTTPS URL"))
+		return
+	}
+	if _, err = netx.ValidateHTTPURL(
+		r.Context(),
+		rawURL,
+		adm.cfg.AllowPrivateSubscriptionURLs(),
+	); err != nil {
+		writeJSON(w, http.StatusBadRequest, adminErr("订阅地址被安全策略拒绝: "+err.Error()))
 		return
 	}
 	proxyType := strings.ToLower(strings.TrimSpace(body.ProxyType))
@@ -293,11 +305,11 @@ func (adm *AdminHandler) adminDeleteProxySubscription(w http.ResponseWriter, r *
 		writeJSON(w, http.StatusConflict, adminErr("该订阅由 Render 环境变量托管，请在 Render 中移除配置"))
 		return
 	}
-	if err := nodes.DeleteProxySubscription(body.ID); err != nil {
+	removed, err := nodes.DeleteProxySubscriptionAndNodes(body.ID)
+	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, adminErr(err.Error()))
 		return
 	}
-	removed := nodes.DeleteSubscriptionNodes(body.ID)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed_count": removed})
 }
 
@@ -320,8 +332,21 @@ func (adm *AdminHandler) refreshProxySubscription(ctx context.Context, item node
 		return 0, err
 	}
 	imported := parseProxyListNodes(text, item.ProxyType)
+	imported, rejected, err := filterRemoteSubscriptionNodes(
+		ctx,
+		imported,
+		adm.cfg.AllowPrivateSubscriptionURLs(),
+		adm.cfg.AllowDomainSubscriptionProxies(),
+	)
+	if err != nil {
+		_ = nodes.UpdateProxySubscriptionResult(item.ID, item.NodeCount, err)
+		return 0, err
+	}
+	if rejected > 0 {
+		log.Printf("[ProxyPool] 订阅 %q 已过滤 %d 个非公网或无法解析的代理端点", item.Name, rejected)
+	}
 	if len(imported) == 0 {
-		err = errors.New("订阅内容中没有解析到有效代理")
+		err = errors.New("订阅内容中没有解析到安全且有效的公网代理")
 		_ = nodes.UpdateProxySubscriptionResult(item.ID, item.NodeCount, err)
 		return 0, err
 	}
@@ -330,8 +355,9 @@ func (adm *AdminHandler) refreshProxySubscription(ctx context.Context, item node
 		_ = nodes.UpdateProxySubscriptionResult(item.ID, item.NodeCount, err)
 		return 0, err
 	}
-	syncResult := nodes.SyncSubscriptionNodes(item.ID, imported)
-	if err := nodes.UpdateProxySubscriptionResult(item.ID, syncResult.Count, nil); err != nil {
+	syncResult, err := nodes.SyncSubscriptionNodesAndMarkRefreshed(item.ID, imported)
+	if err != nil {
+		_ = nodes.UpdateProxySubscriptionResult(item.ID, item.NodeCount, err)
 		return 0, err
 	}
 	log.Printf("[ProxyPool] 订阅 %q 刷新完成：解析 %d，当前 %d，新增 %d，删除 %d",

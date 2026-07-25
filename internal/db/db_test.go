@@ -44,6 +44,9 @@ func TestInitDBAndMigrate(t *testing.T) {
 		t.Fatalf("Failed to InitDB: %v", errInit)
 	}
 	defer CloseDB()
+	if got := GlobalDB.Stats().MaxOpenConnections; got != 1 {
+		t.Fatalf("MaxOpenConnections = %d, want 1 to serialize SQLite writes", got)
+	}
 
 	// Verify nodes table
 	var count int

@@ -69,6 +69,10 @@ func (g *GeminiHandler) requirePost(w http.ResponseWriter, r *http.Request, fn f
 func (g *GeminiHandler) readGeminiBody(w http.ResponseWriter, r *http.Request) (map[string]any, bool) {
 	var body map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if isRequestBodyTooLarge(err) {
+			g.geminiError(w, http.StatusRequestEntityTooLarge, "请求体过大 (request body too large)", "RESOURCE_EXHAUSTED")
+			return nil, false
+		}
 		if _, ok := err.(*json.SyntaxError); ok && strings.Contains(err.Error(), "invalid UTF-8") {
 			g.geminiError(w, http.StatusBadRequest, "请求体编码错误，需为 UTF-8 (request body must be UTF-8 encoded)", "INVALID_ARGUMENT")
 			return nil, false

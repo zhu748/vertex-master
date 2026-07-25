@@ -27,8 +27,17 @@ type ConfigProvider interface {
 	ParallelPoolSize() int
 	ParallelPoolDelayDynamic() bool
 	ParallelPoolDelayMs() int
+	ProxyFailoverMaxAttempts() int
 	ActiveNodeURI() string
 	ParallelNodeTopK() int
+	ProxyHealthCheckEnabled() bool
+	ProxyHealthCheckIntervalMinutes() int
+	ProxyHealthCheckBatchSize() int
+	ProxyHealthCheckConcurrency() int
+	ProxyHealthCheckTimeoutSeconds() int
+	AllowPrivateSubscriptionURLs() bool
+	AllowDomainSubscriptionProxies() bool
+	ProxySubscriptionAllowProxyFallback() bool
 
 	BackgroundImage() string
 	FontSize() string
@@ -65,7 +74,7 @@ func (d dynamicConfig) ProxyURL() string                  { return Load().ProxyU
 func (d dynamicConfig) DebugPprof() bool                  { return Load().DebugPprof }
 func (d dynamicConfig) DebugMode() bool                   { return Load().DebugMode }
 func (d dynamicConfig) DropMaxTokens() bool               { return Load().DropMaxTokens }
-func (d dynamicConfig) AggregateStream() bool               { return Load().AggregateStream }
+func (d dynamicConfig) AggregateStream() bool             { return Load().AggregateStream }
 func (d dynamicConfig) MaxN() int                         { return Load().MaxN }
 func (d dynamicConfig) MaxRequestMB() int                 { return Load().MaxRequestMB }
 func (d dynamicConfig) MaxSpillMB() int                   { return Load().MaxSpillMB }
@@ -86,12 +95,35 @@ func (d dynamicConfig) ParallelPoolRetryEnabled() bool { return Load().ParallelP
 func (d dynamicConfig) ParallelPoolSize() int          { return Load().ParallelPoolSize }
 func (d dynamicConfig) ParallelPoolDelayDynamic() bool { return Load().ParallelPoolDelayDynamic }
 func (d dynamicConfig) ParallelPoolDelayMs() int       { return Load().ParallelPoolDelayMs }
+func (d dynamicConfig) ProxyFailoverMaxAttempts() int  { return Load().ProxyFailoverMaxAttempts }
 func (d dynamicConfig) ActiveNodeURI() string          { return Load().ActiveNodeURI }
 func (d dynamicConfig) ParallelNodeTopK() int          { return Load().ParallelNodeTopK }
-func (d dynamicConfig) BackgroundImage() string        { return Load().BackgroundImage }
-func (d dynamicConfig) FontSize() string               { return Load().FontSize }
-func (d dynamicConfig) FontColorType() string          { return Load().FontColorType }
-func (d dynamicConfig) FontColor() string              { return Load().FontColor }
+func (d dynamicConfig) ProxyHealthCheckEnabled() bool  { return Load().ProxyHealthCheckEnabled }
+func (d dynamicConfig) ProxyHealthCheckIntervalMinutes() int {
+	return Load().ProxyHealthCheckIntervalMinutes
+}
+func (d dynamicConfig) ProxyHealthCheckBatchSize() int {
+	return Load().ProxyHealthCheckBatchSize
+}
+func (d dynamicConfig) ProxyHealthCheckConcurrency() int {
+	return Load().ProxyHealthCheckConcurrency
+}
+func (d dynamicConfig) ProxyHealthCheckTimeoutSeconds() int {
+	return Load().ProxyHealthCheckTimeoutSeconds
+}
+func (d dynamicConfig) AllowPrivateSubscriptionURLs() bool {
+	return Load().AllowPrivateSubscriptionURLs
+}
+func (d dynamicConfig) AllowDomainSubscriptionProxies() bool {
+	return Load().AllowDomainSubscriptionProxies
+}
+func (d dynamicConfig) ProxySubscriptionAllowProxyFallback() bool {
+	return Load().ProxySubscriptionAllowProxyFallback
+}
+func (d dynamicConfig) BackgroundImage() string { return Load().BackgroundImage }
+func (d dynamicConfig) FontSize() string        { return Load().FontSize }
+func (d dynamicConfig) FontColorType() string   { return Load().FontColorType }
+func (d dynamicConfig) FontColor() string       { return Load().FontColor }
 func (d dynamicConfig) CustomBgPresets() []string {
 	c := Load()
 	out := make([]string, len(c.CustomBgPresets))

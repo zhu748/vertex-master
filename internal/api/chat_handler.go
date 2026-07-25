@@ -28,6 +28,10 @@ func (c *ChatHandler) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 
 	var body map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if isRequestBodyTooLarge(err) {
+			oaiError(w, http.StatusRequestEntityTooLarge, "请求体过大 (request body too large)", "invalid_request_error")
+			return
+		}
 		if _, ok := err.(*json.SyntaxError); ok && strings.Contains(err.Error(), "invalid UTF-8") {
 			oaiError(w, http.StatusBadRequest, "请求体编码错误，需为 UTF-8 (request body must be UTF-8 encoded)", "invalid_request_error")
 			return
@@ -94,7 +98,6 @@ func (c *ChatHandler) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 			ic["imageSize"] = "1K"
 		}
 	}
-
 
 	if aggregateStream {
 		c.oaiAggregateStream(r.Context(), w, model, geminiPayload)
@@ -286,22 +289,22 @@ func (c *ChatHandler) oaiAggregateStream(ctx context.Context, w http.ResponseWri
 	createdTS := time.Now().Unix()
 	base := streamChunkBase(model, requestID)
 	base["created"] = createdTS
-	
+
 	choice := map[string]any{
-		"index": 0, 
+		"index": 0,
 		"delta": map[string]any{"role": "assistant", "content": contentText},
 	}
 	base["choices"] = []any{choice}
 	if !sw.write(sseEvent(base)) {
 		return
 	}
-	
+
 	// Stream end
 	baseEnd := streamChunkBase(model, requestID)
 	baseEnd["created"] = createdTS
 	choiceEnd := map[string]any{
-		"index": 0, 
-		"delta": map[string]any{},
+		"index":         0,
+		"delta":         map[string]any{},
 		"finish_reason": "stop",
 	}
 	baseEnd["choices"] = []any{choiceEnd}

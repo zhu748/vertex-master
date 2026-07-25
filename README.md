@@ -9,7 +9,7 @@
 - **完整兼容 OpenAI 接口**：支持聊天（流式/非流式）、工具调用（Function Calling）、多模态输入（图片/文件）。
 - **丰富的多媒体支持**：支持文生图、图片编辑、语音合成（TTS）。
 - **内置反爬突破**：内置 TLS 指纹伪装及 reCAPTCHA token 自动获取，轻松通过 Google 匿名端点校验。
-- **内置代理节点池**：支持 HTTP、HTTPS、SOCKS4、SOCKS4A、SOCKS5、SOCKS5H 以及 mihomo 节点；可订阅纯文本代理列表、定时差异更新、失败退避重试，并通过分页筛选管理大规模代理池。
+- **内置代理节点池**：支持 HTTP、HTTPS、SOCKS4、SOCKS4A、SOCKS5、SOCKS5H 以及 mihomo 节点；可订阅纯文本代理列表、定时差异更新、自动健康巡检、失败冷却与请求接力，并通过分页筛选管理大规模代理池。
 - **可视化管理面板**：提供精美的 Web 后台，无需修改 JSON 文件，在浏览器中即可轻松管理 API 密钥、模型别名、代理节点和系统设置。
 - **高级功能**：支持 Token 计数、Gemini 原生端点透传、假流式输出等。
 
@@ -54,9 +54,18 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ver
 |------|------|------|
 | `port_api` | 2156 | 服务监听端口 |
 | `admin_password` | 自动生成 | 管理面板登录密码 |
-| `max_retries` | 10 | 请求失败重试次数 |
+| `max_retries` | 1 | 请求失败重试次数 |
+| `max_request_mb` | 64 | 单次 HTTP 请求体上限（MiB，面板修改即时生效） |
 | `proxy_url` | 空 | 出站代理地址 (如 `http://127.0.0.1:7890`) |
 | `parallel_pool_enabled` | true | 是否开启并发竞速节点池 |
+| `parallel_pool_size` | 5 | 同时运行的候选代理上限 |
+| `proxy_failover_max_attempts` | 30 | 单次请求最多尝试的代理数 |
+| `parallel_pool_delay_ms` | 1000 | 后备代理启动间隔（毫秒） |
+| `proxy_health_check_enabled` | true | 是否启用后台代理健康巡检 |
+| `proxy_health_check_interval_minutes` | 15 | 健康巡检间隔（分钟） |
+| `proxy_health_check_batch_size` | 50 | 每轮健康巡检最多测试的代理数 |
+| `proxy_health_check_concurrency` | 5 | 健康巡检并发数 |
+| `proxy_health_check_timeout_seconds` | 8 | 单个代理巡检超时（秒） |
 
 > **提示**：在模型名（如 `gemini-3.5-flash`）前加上 `fake-` 或 `假流式-` 前缀，可将非流式模型伪装成流式输出。
 
@@ -64,4 +73,4 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ver
 
 ## ☁️ 部署到 Render
 
-仓库根目录已提供 `render.yaml`，可在上传 GitHub 后直接创建 Render Blueprint。部署时只需填写管理面板密码和 API Key；还可选填纯文本代理订阅 URL，服务启动后会立即拉取并默认每 60 分钟更新。详细配置、免费方案限制和持久磁盘说明见 [Render 部署指南](RENDER_DEPLOY.md)。
+仓库根目录已提供 `render.yaml`，可在上传 GitHub 后直接创建 Render Blueprint。部署时只需填写管理面板密码和 API Key；还可选填纯文本代理订阅 URL，服务启动后会立即拉取并默认每 60 分钟更新。远程订阅 URL 默认只能指向公网，订阅代理默认只接受公网 IP 字面量，避免误访问 Render 内部网络和 DNS 重绑定。Blueprint 默认同时运行最多 5 个候选代理、单次请求最多接力尝试 30 个节点、每 1000 毫秒启动一个后备节点，并每 15 分钟分批巡检代理健康。详细配置、免费方案限制和持久化说明见 [Render 部署指南](RENDER_DEPLOY.md)。

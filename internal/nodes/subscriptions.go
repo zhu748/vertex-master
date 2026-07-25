@@ -179,6 +179,16 @@ func DeleteProxySubscription(id int64) error {
 	if database == nil {
 		return errors.New("database unavailable")
 	}
+	var hasNodes bool
+	if err := database.QueryRow(
+		"SELECT EXISTS(SELECT 1 FROM proxy_subscription_nodes WHERE subscription_id = ?)",
+		id,
+	).Scan(&hasNodes); err != nil {
+		return fmt.Errorf("check proxy subscription nodes: %w", err)
+	}
+	if hasNodes {
+		return errors.New("proxy subscription still owns nodes")
+	}
 	result, err := database.Exec("DELETE FROM proxy_subscriptions WHERE id = ?", id)
 	if err != nil {
 		return fmt.Errorf("delete proxy subscription: %w", err)

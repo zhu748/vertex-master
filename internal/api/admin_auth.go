@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"log"
 	"net/http"
+	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -77,17 +79,57 @@ func cleanupAdminSessions() int {
 }
 
 func adminTokenFromRequest(r *http.Request) string {
-	if c, err := r.Cookie(adminCookieName); err == nil && c.Value != "" {
-		return c.Value
-	}
 	if auth := r.Header.Get("Authorization"); strings.HasPrefix(strings.ToLower(auth), "bearer ") {
 		return strings.TrimSpace(auth[7:])
+	}
+	if c, err := r.Cookie(adminCookieName); err == nil && c.Value != "" {
+		return c.Value
 	}
 	return ""
 }
 
 func requireAdmin(r *http.Request) bool {
 	return checkAdminToken(adminTokenFromRequest(r))
+}
+
+func requestIsHTTPS(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	forwardedProto := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0])
+	return strings.EqualFold(forwardedProto, "https")
+}
+
+func adminRequestOriginAllowed(r *http.Request) bool {
+	if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
+		return true
+	}
+	if auth := strings.TrimSpace(r.Header.Get("Authorization")); strings.HasPrefix(
+		strings.ToLower(auth),
+		"bearer ",
+	) {
+		return true
+	}
+	if _, err := r.Cookie(adminCookieName); err != nil {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")), "cross-site") {
+		return false
+	}
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		// Non-browser clients and older same-origin browsers may omit Origin.
+		return true
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Host == "" || parsed.User != nil {
+		return false
+	}
+	scheme := "http"
+	if requestIsHTTPS(r) {
+		scheme = "https"
+	}
+	return strings.EqualFold(parsed.Scheme, scheme) && strings.EqualFold(parsed.Host, r.Host)
 }
 
 func StartAdminSessionCleanup(interval time.Duration) {
@@ -158,7 +200,7 @@ func (adm *AdminHandler) adminLogin(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https",
+		Secure:   requestIsHTTPS(r),
 		MaxAge:   int(adminSessionTTL / time.Second),
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -172,7 +214,7 @@ func (adm *AdminHandler) adminLogout(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https",
+		Secure:   requestIsHTTPS(r),
 		MaxAge:   -1,
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -191,6 +233,14 @@ func (adm *AdminHandler) adminCheckAuth(w http.ResponseWriter, r *http.Request) 
 }
 
 func (adm *AdminHandler) adminChangePassword(w http.ResponseWriter, r *http.Request) {
+	if strings.TrimSpace(os.Getenv("VPROXY_ADMIN_PASSWORD")) != "" {
+		writeJSON(
+			w,
+			http.StatusConflict,
+			adminErr("管理员密码由环境变量托管，请在 Render 环境设置中修改"),
+		)
+		return
+	}
 	var body struct {
 		OldPassword string `json:"old_password"`
 		NewPassword string `json:"new_password"`
@@ -226,7 +276,7 @@ func (adm *AdminHandler) adminChangePassword(w http.ResponseWriter, r *http.Requ
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https",
+		Secure:   requestIsHTTPS(r),
 		MaxAge:   -1,
 	})
 	log.Printf("[Security] 后台管理员密码已修改，所有在线会话已重置。来源 IP: %s", r.RemoteAddr)

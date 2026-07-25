@@ -94,11 +94,11 @@ func TestCleanupAdminSessions(t *testing.T) {
 
 func TestMaskKey(t *testing.T) {
 	cases := []struct{ in, want string }{
-		{"sk-abcdef123456", "sk-····3456"},
-		{"sk-12345", "sk-····2345"},
-		{"sk-1", "sk-····"}, // 短于等于 4 位整段打码
-		{"abcd", "sk-····"},
-		{"", "sk-····"},
+		{"sk-abcdef123456", "····3456"},
+		{"sk-12345", "····2345"},
+		{"sk-1", "····"}, // 短于等于 4 位整段打码
+		{"abcd", "····"},
+		{"", "····"},
 	}
 	for _, c := range cases {
 		if got := maskKey(c.in); got != c.want {

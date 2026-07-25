@@ -197,6 +197,7 @@ func main() {
 
 	vc := vertex.NewVertexAIClient(cfg)
 	stopProxySubscriptionScheduler := api.StartProxySubscriptionScheduler(vc, cfg)
+	stopProxyHealthScheduler := api.StartProxyHealthScheduler(vc, cfg)
 
 	telemetryEnabled := true
 	if cfg.TelemetryEnabled() != nil {
@@ -210,6 +211,7 @@ func main() {
 		Addr:              "0.0.0.0:" + strconv.Itoa(cfg.PortAPI()),
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: 15 * time.Second,
+		ReadTimeout:       180 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
 
@@ -230,6 +232,7 @@ func main() {
 				log.Printf("[vproxy] 关闭超时/出错：%v(强制结束)", err)
 			}
 			cancel()
+			stopProxyHealthScheduler()
 			stopProxySubscriptionScheduler()
 			transport.StopAllProxies()
 			telemetry.Stop()

@@ -3,11 +3,11 @@ document.getElementById('nodesBody').addEventListener('click', function (e) {
   if (!btn) return;
   var uri = btn.dataset.uri;
   var action = btn.dataset.action;
-  if (action === 'use-node') useNode(uri);
-  else if (action === 'unuse-node') unuseNode(uri);
-  else if (action === 'delete-node') delNode(uri);
-  else if (action === 'test-node') testSingleNode(uri);
-  else if (action === 'enable-node') enableNode(uri);
+  if (action === 'use-node') useNode(uri, btn);
+  else if (action === 'unuse-node') unuseNode(uri, btn);
+  else if (action === 'delete-node') delNode(uri, btn);
+  else if (action === 'test-node') testSingleNode(uri, btn);
+  else if (action === 'enable-node') enableNode(uri, btn);
 });
 
 var curNodePage = 1;
@@ -38,9 +38,7 @@ function setActionBusy(button, busy, busyText) {
 function maskedSubscriptionURL(rawURL) {
   try {
     var parsed = new URL(rawURL);
-    var path = parsed.pathname === '/' ? '' : parsed.pathname;
-    var value = parsed.origin + path;
-    return value.length > 72 ? value.slice(0, 69) + '...' : value;
+    return parsed.origin;
   } catch (e) {
     return '地址格式异常';
   }
@@ -49,6 +47,16 @@ function maskedSubscriptionURL(rawURL) {
 var proxySubEnabledInput = document.getElementById('proxySubEnabled');
 if (proxySubEnabledInput) {
   proxySubEnabledInput.addEventListener('change', updateProxySubscriptionSaveLabel);
+}
+var batchTestIncludeDisabledInput = document.getElementById('batchTestIncludeDisabled');
+var batchTestRecoverDisabledInput = document.getElementById('batchTestRecoverDisabled');
+if (batchTestIncludeDisabledInput && batchTestRecoverDisabledInput) {
+  var updateBatchRecoveryState = function () {
+    batchTestRecoverDisabledInput.disabled = !batchTestIncludeDisabledInput.checked;
+    if (batchTestRecoverDisabledInput.disabled) batchTestRecoverDisabledInput.checked = false;
+  };
+  batchTestIncludeDisabledInput.addEventListener('change', updateBatchRecoveryState);
+  updateBatchRecoveryState();
 }
 
 function currentNodeListOptions(extra) {
@@ -153,10 +161,18 @@ async function loadNodes() {
     }
   } catch (e) { }
 
-  const d = await API.nodes.list(currentNodeListOptions({
-    page: curNodePage,
-    page_size: nodePageSize
-  }));
+  let d;
+  try {
+    d = await API.nodes.list(currentNodeListOptions({
+      page: curNodePage,
+      page_size: nodePageSize
+    }));
+  } catch (e) {
+    if (loadSequence === nodesLoadSequence) {
+      toast('节点列表加载失败: ' + e.message);
+    }
+    return;
+  }
   if (loadSequence !== nodesLoadSequence) return;
   const nodes = d.nodes || [];
   cachedNodesList = nodes;
@@ -173,6 +189,8 @@ async function loadNodes() {
     } else if (!testProgressTimer) {
       const progressEl = document.getElementById('testProgress');
       if (progressEl) progressEl.style.display = 'none';
+      setActionBusy(document.getElementById('batchTestStartBtn'), false);
+      currentTestPaused = false;
     }
   } catch (e) { }
   if (loadSequence !== nodesLoadSequence) return;
@@ -180,6 +198,20 @@ async function loadNodes() {
   const enabledCount = Number(d.enabled_count) || 0;
   const disabledCount = Number(d.disabled_count) || 0;
   var summary = '\u5F53\u524D\u5171 ' + totalNodeCount + ' \u4E2A\u8282\u70B9\uFF08\u542F\u7528 ' + enabledCount + ' / \u7981\u7528 ' + disabledCount + '\uFF09';
+  var poolStats = d.pool_stats || {};
+  summary += ' · 可用 ' + (poolStats.healthy || 0) +
+    ' · 冷却 ' + (poolStats.cooling || 0) +
+    ' · 待恢复 ' + (poolStats.unhealthy || 0) +
+    ' · 未测试 ' + (poolStats.untested || 0);
+  var scheduler = d.health_scheduler || {};
+  if (scheduler.enabled) {
+    summary += scheduler.running
+      ? ' · 自动巡检中'
+      : (scheduler.last_run_at
+        ? ' · 上轮巡检 ' + (scheduler.checked || 0) + ' 个（可用 ' +
+          (scheduler.succeeded || 0) + ' / 失败 ' + (scheduler.failed || 0) + '）'
+        : ' · 等待首次自动巡检');
+  }
   if (filteredNodeCount !== totalNodeCount) summary += '，筛选结果 ' + filteredNodeCount + ' 个';
   document.getElementById('nodesSummary').textContent = summary;
 
@@ -299,7 +331,8 @@ async function loadNodes() {
         var pill = document.createElement('span');
         pill.className = 'pill off';
         pill.style.cssText = 'background:rgba(236,138,124,0.16);color:var(--red);margin-right:5px;';
-        pill.textContent = '\u6D4B\u8BD5\u5931\u8D25';
+        var cooling = Number(health.cooldown_until) > Math.floor(Date.now() / 1000);
+        pill.textContent = cooling ? '\u51B7\u5374\u4E2D' : '\u5F85\u6062\u590D';
         statusTd.appendChild(pill);
 
         if (health.last_test_error) {
@@ -307,6 +340,12 @@ async function loadNodes() {
           errSpan.className = 'node-err-msg';
           errSpan.textContent = health.last_test_error;
           statusTd.appendChild(errSpan);
+        }
+        if (cooling) {
+          var cooldownSpan = document.createElement('div');
+          cooldownSpan.className = 'node-err-msg';
+          cooldownSpan.textContent = '冷却至 ' + new Date(Number(health.cooldown_until) * 1000).toLocaleTimeString();
+          statusTd.appendChild(cooldownSpan);
         }
       }
       tr.appendChild(statusTd);
@@ -656,16 +695,39 @@ async function addAndFetchSub() {
 }
 
 async function testAllNodes() {
-  const d = await API.nodes.list();
-  const nodes = d.nodes || [];
-  if (!nodes.length) return toast('无可测试节点');
+  var button = document.getElementById('batchTestStartBtn');
+  if (button && button.disabled) return;
+  var includeDisabled = document.getElementById('batchTestIncludeDisabled').checked;
+  var recoverDisabled = document.getElementById('batchTestRecoverDisabled').checked;
+  var maxNodes = Number(document.getElementById('batchTestMaxNodes').value);
+  var concurrency = Number(document.getElementById('batchTestConcurrency').value);
+  var timeoutSeconds = Number(document.getElementById('batchTestTimeoutSeconds').value);
+  if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 20) {
+    return toast('测速并发数必须是 1 到 20 的整数');
+  }
+  if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 3 || timeoutSeconds > 60) {
+    return toast('单节点超时必须是 3 到 60 秒的整数');
+  }
+  var taskCapacity = Math.min(1000, Math.floor(3540 / timeoutSeconds) * concurrency);
+  if (!Number.isInteger(maxNodes) || maxNodes < 1 || maxNodes > taskCapacity) {
+    return toast('当前并发和超时下，本轮节点数必须是 1 到 ' + taskCapacity + ' 的整数');
+  }
 
-  const enabled = nodes.filter(function (n) { return !n.disabled; });
-  if (!enabled.length) return toast('没有已启用的节点可测试');
-
-  toast('后台全量测速任务已提交启动...');
-  await API.nodes.testAll();
-  startTestProgressPolling();
+  setActionBusy(button, true, '测速进行中...');
+  try {
+    var result = await API.nodes.testAll({
+      include_disabled: includeDisabled,
+      recover_disabled: includeDisabled && recoverDisabled,
+      max_nodes: maxNodes,
+      concurrency: concurrency,
+      timeout_seconds: timeoutSeconds
+    });
+    toast('后台测速任务已启动，本轮 ' + (result.count || 0) + ' 个节点');
+    startTestProgressPolling();
+  } catch (e) {
+    setActionBusy(button, false);
+    toast('启动批量测速失败: ' + e.message);
+  }
 }
 
 let currentTestPaused = false;
@@ -678,21 +740,19 @@ function showTestProgressUI(prog) {
   const btnPause = document.getElementById('btnTestPauseResume');
   if (!progressEl) return;
   progressEl.style.display = 'block';
+  setActionBusy(document.getElementById('batchTestStartBtn'), true, '测速进行中...');
   currentTestPaused = !!prog.paused;
   if (btnPause) {
     btnPause.textContent = currentTestPaused ? '恢复' : '暂停';
     btnPause.className = 'btn ghost';
-  }
-  if (currentTestPaused && testProgressTimer) {
-    clearInterval(testProgressTimer);
-    testProgressTimer = null;
+    btnPause.disabled = !!prog.terminated;
   }
   const done = prog.done || 0;
   const total = prog.total || 1;
   const ok = prog.ok_count || 0;
   const failed = prog.fail_count || 0;
-  progressFill.style.width = Math.round(done / total * 100) + '%';
-  const statusStr = currentTestPaused ? '已暂停' : '测试中';
+  progressFill.style.width = Math.min(100, Math.round(done / total * 100)) + '%';
+  const statusStr = prog.terminated ? '正在终止' : (currentTestPaused ? '已暂停' : '测试中');
   progressText.textContent = statusStr + ' ' + done + '/' + total + ' \u00B7 \u901A\u8FC7 ' + ok + ' \u00B7 \u5931\u8D25 ' + failed;
   progressDetail.textContent = '当前状态: ' + (prog.current_node || '');
 }
@@ -716,10 +776,6 @@ async function toggleTestPauseResume() {
     } else {
       await API.nodes.testPause();
       currentTestPaused = true;
-      if (testProgressTimer) {
-        clearInterval(testProgressTimer);
-        testProgressTimer = null;
-      }
       const btnPause = document.getElementById('btnTestPauseResume');
       if (btnPause) {
         btnPause.textContent = '恢复';
@@ -739,37 +795,50 @@ async function toggleTestPauseResume() {
 async function terminateTestAll() {
   try {
     await API.nodes.testTerminate();
-    if (testProgressTimer) {
-      clearInterval(testProgressTimer);
-      testProgressTimer = null;
-    }
     currentTestPaused = false;
-    const progressEl = document.getElementById('testProgress');
-    if (progressEl) progressEl.style.display = 'none';
-    loadNodes();
+    const progressText = document.getElementById('testProgressText');
+    if (progressText) progressText.textContent = '正在终止批量测速...';
+    startTestProgressPolling();
     toast('正在终止批量测速...');
   } catch (e) {
     toast(e.message || '操作失败');
   }
 }
 
+async function pollTestProgress() {
+  const nodesPage = document.getElementById('page-nodes');
+  if (nodesPage && nodesPage.classList.contains('hidden')) {
+    if (testProgressTimer) {
+      clearInterval(testProgressTimer);
+      testProgressTimer = null;
+    }
+    return;
+  }
+  try {
+    const prog = await API.nodes.testProgress();
+    if (prog && prog.running) {
+      showTestProgressUI(prog);
+      return;
+    }
+    if (testProgressTimer) {
+      clearInterval(testProgressTimer);
+      testProgressTimer = null;
+    }
+    const progressEl = document.getElementById('testProgress');
+    if (progressEl) progressEl.style.display = 'none';
+    setActionBusy(document.getElementById('batchTestStartBtn'), false);
+    var incomplete = Number(prog && prog.incomplete) || 0;
+    toast(incomplete
+      ? '批量测速结束，已测试 ' + (prog.done || 0) + '，未完成 ' + incomplete
+      : '批量测速完成，共测试 ' + (prog.done || 0) + ' 个节点');
+    loadNodes();
+  } catch (e) { }
+}
+
 function startTestProgressPolling() {
   if (testProgressTimer) return;
-  testProgressTimer = setInterval(async function () {
-    try {
-      const prog = await API.nodes.testProgress();
-      if (prog && prog.running) {
-        showTestProgressUI(prog);
-      } else {
-        clearInterval(testProgressTimer);
-        testProgressTimer = null;
-        const progressEl = document.getElementById('testProgress');
-        if (progressEl) progressEl.style.display = 'none';
-        toast('全局批量测速结束！');
-        loadNodes();
-      }
-    } catch (e) { }
-  }, 1000);
+  testProgressTimer = setInterval(pollTestProgress, 1000);
+  pollTestProgress();
 }
 
 async function dedupNodes() { await API.nodes.dedup(); loadNodes(); toast('去重完成'); }
@@ -779,13 +848,13 @@ async function sortNodesByLatencyDesc() { await API.nodes.sort(true); await load
 
 async function exportNodes() {
   try {
-    const d = await API.nodes.list();
-    const nodes = d.nodes || [];
-    if (nodes.length === 0) {
+    const d = await API.nodes.list({ uris_only: true });
+    const uris = d.uris || [];
+    if (uris.length === 0) {
       toast('没有可导出的节点');
       return;
     }
-    const text = nodes.map(n => n.raw_uri).join('\n');
+    const text = uris.join('\n');
     const blob = new Blob([text], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -793,16 +862,17 @@ async function exportNodes() {
     a.download = 'nodes.txt';
     a.click();
     URL.revokeObjectURL(url);
-    toast('已导出 ' + nodes.length + ' 个节点');
+    toast('已导出 ' + uris.length + ' 个节点');
   } catch (e) {
     toast('导出失败: ' + e.message);
   }
 }
 
-async function testSingleNode(uri) {
-  toast('正在测试节点...');
+async function testSingleNode(uri, button) {
+  if (button && button.disabled) return;
+  setActionBusy(button, true, '测试中...');
   try {
-    const result = await API.nodes.test(uri, { auto_disable: true });
+    const result = await API.nodes.test(uri, { auto_disable: false });
     const msg = result.ok
       ? '测试通过 ' + Math.round(result.elapsed_ms) + 'ms'
       : '测试失败 ' + (result.error || '');
@@ -810,18 +880,68 @@ async function testSingleNode(uri) {
     await loadNodes();
   } catch (e) {
     toast('测试出错: ' + e.message);
+  } finally {
+    setActionBusy(button, false);
   }
 }
 
-async function enableNode(uri) {
-  await API.nodes.enable(uri);
-  await loadNodes();
-  toast('已启用该节点');
+async function enableNode(uri, button) {
+  if (button && button.disabled) return;
+  setActionBusy(button, true, '启用中...');
+  try {
+    await API.nodes.enable(uri);
+    await loadNodes();
+    toast('已启用该节点');
+  } catch (e) {
+    toast('启用失败: ' + e.message);
+  } finally {
+    setActionBusy(button, false);
+  }
 }
 
-async function useNode(uri) { await API.useNode(uri); loadSettings(); loadNodes(); toast('已锁定使用该节点，并关闭并发池'); }
-async function unuseNode(uri) { await API.useNode(''); loadSettings(); loadNodes(); toast('已取消锁定，并恢复并发池'); }
-async function delNode(uri) { if (!confirm('删除该节点？')) return; await API.nodes.delete(uri); loadNodes(); toast('已删除'); }
+async function useNode(uri, button) {
+  if (button && button.disabled) return;
+  setActionBusy(button, true, '锁定中...');
+  try {
+    await API.useNode(uri);
+    await loadSettings();
+    await loadNodes();
+    toast('已锁定使用该节点，并关闭并发池');
+  } catch (e) {
+    toast('锁定失败: ' + e.message);
+  } finally {
+    setActionBusy(button, false);
+  }
+}
+
+async function unuseNode(uri, button) {
+  if (button && button.disabled) return;
+  setActionBusy(button, true, '取消中...');
+  try {
+    await API.useNode('');
+    await loadSettings();
+    await loadNodes();
+    toast('已取消锁定，并恢复并发池');
+  } catch (e) {
+    toast('取消锁定失败: ' + e.message);
+  } finally {
+    setActionBusy(button, false);
+  }
+}
+
+async function delNode(uri, button) {
+  if (!confirm('删除该节点？') || (button && button.disabled)) return;
+  setActionBusy(button, true, '删除中...');
+  try {
+    await API.nodes.delete(uri);
+    await loadNodes();
+    toast('已删除');
+  } catch (e) {
+    toast('删除失败: ' + e.message);
+  } finally {
+    setActionBusy(button, false);
+  }
+}
 
 function getSelectedNodeURIs() {
   return Array.from(window.selectedNodeURIs);
@@ -887,6 +1007,7 @@ async function batchDeleteSelectedNodes() {
 function importFileNodes(replace) {
   const fileInput = document.getElementById('nodeImportFile');
   if (!fileInput.files.length) return toast('请先选择一个节点配置文件');
+  if (replace && !confirm('替换模式会原子替换所有手动节点（订阅节点会保留），是否继续？')) return;
   const file = fileInput.files[0];
   const reader = new FileReader();
   toast('正在读取配置文件并解析...');
@@ -907,6 +1028,7 @@ function importFileNodes(replace) {
 function importJsonNodes(replace) {
   const fileInput = document.getElementById('nodeJsonImportFile');
   if (!fileInput.files.length) return toast('请先选择一个 nodes.json 配置文件');
+  if (replace && !confirm('替换模式会原子替换所有手动节点（订阅节点会保留），是否继续？')) return;
   const file = fileInput.files[0];
   const reader = new FileReader();
   toast('正在读取配置文件并解析...');

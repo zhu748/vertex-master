@@ -51,12 +51,38 @@ type raceResult[T any] struct {
 //   - fallback to single node when pool is disabled or no candidates
 //   - hedge timer with static/dynamic delay
 //   - result collection: first success wins immediately
-//   - background collection of remaining results (30s timeout)
+//   - cancellation of losing candidates as soon as a winner is selected
 //   - error classification: 429 → RecordRateLimit, others → RecordTest(ok=false)
 //   - hard error (non-retryable) terminates the race early
 //   - context.Canceled errors are not counted as failures
 func RunRace[T any](ctx context.Context, cfg config.ConfigProvider,
 	run func(ctx context.Context, proxyURI string) (T, error),
+	opts ...RaceOption,
+) (T, error) {
+	return runRacePreferred(ctx, cfg, run, nil, nil, opts...)
+}
+
+// RunRacePreferred waits for a preferred successful result while retaining
+// other successful results as fallbacks. This is used by non-streaming calls,
+// where a fast truncated response must not cancel a slightly slower complete
+// response.
+func RunRacePreferred[T any](
+	ctx context.Context,
+	cfg config.ConfigProvider,
+	run func(ctx context.Context, proxyURI string) (T, error),
+	preferred func(T) bool,
+	chooseFallback func([]T) (T, error),
+	opts ...RaceOption,
+) (T, error) {
+	return runRacePreferred(ctx, cfg, run, preferred, chooseFallback, opts...)
+}
+
+func runRacePreferred[T any](
+	ctx context.Context,
+	cfg config.ConfigProvider,
+	run func(ctx context.Context, proxyURI string) (T, error),
+	preferred func(T) bool,
+	chooseFallback func([]T) (T, error),
 	opts ...RaceOption,
 ) (T, error) {
 	var rc raceConfig
@@ -66,7 +92,12 @@ func RunRace[T any](ctx context.Context, cfg config.ConfigProvider,
 
 	stickyPool := nodes.GetStickyPool()
 
-	cands := nodes.SelectForParallel(cfg.ParallelPoolSize(), cfg.ParallelNodeTopK(), cfg.DebugMode(), cfg.StickyNodePriority())
+	cands := nodes.SelectForParallel(
+		cfg.ProxyFailoverMaxAttempts(),
+		cfg.ParallelNodeTopK(),
+		cfg.DebugMode(),
+		cfg.StickyNodePriority(),
+	)
 
 	if !cfg.ParallelPoolEnabled() || len(cands) == 0 {
 		proxy := cfg.ActiveNodeURI()
@@ -80,7 +111,7 @@ func RunRace[T any](ctx context.Context, cfg config.ConfigProvider,
 	if cfg.DebugMode() {
 		log.Printf("[Vertex] [RunParallel] 开启对冲延迟竞速, %d 个节点参与", len(cands))
 		for _, c := range cands {
-			log.Printf("[Vertex] [RunParallel] 参与节点: %s", c.Name)
+			log.Printf("[Vertex] [RunParallel] 参与节点: %s", nodes.SafeNodeLabel(c.Name))
 		}
 	}
 
@@ -97,6 +128,7 @@ func RunRace[T any](ctx context.Context, cfg config.ConfigProvider,
 	resCh := make(chan raceResult[T], min(len(cands)+20, 30))
 	var active int32
 	activeKeys := make(map[string]bool)
+	activeCancels := make(map[string]context.CancelFunc)
 	var mu sync.Mutex
 
 	launchNode := func(uri string) {
@@ -106,16 +138,40 @@ func RunRace[T any](ctx context.Context, cfg config.ConfigProvider,
 			return
 		}
 		activeKeys[uri] = true
+		nodeCtx, nodeCancel := context.WithCancel(ctxRace)
+		activeCancels[uri] = nodeCancel
 		mu.Unlock()
 
+		nodes.RecordSelection(uri)
 		atomic.AddInt32(&active, 1)
 		go func(u string) {
-			v, err := run(ctxRace, u)
+			v, err := run(nodeCtx, u)
 			select {
 			case resCh <- raceResult[T]{u, v, err}:
 			case <-ctxRace.Done():
 			}
 		}(uri)
+	}
+
+	cancelCandidate := func(uri string) {
+		mu.Lock()
+		if candidateCancel := activeCancels[uri]; candidateCancel != nil {
+			candidateCancel()
+			delete(activeCancels, uri)
+		}
+		mu.Unlock()
+	}
+
+	cancelOtherCandidates := func(winner string) {
+		mu.Lock()
+		for uri, candidateCancel := range activeCancels {
+			if uri == winner {
+				continue
+			}
+			candidateCancel()
+			delete(activeCancels, uri)
+		}
+		mu.Unlock()
 	}
 
 	launchNode(cands[0].RawURI)
@@ -124,12 +180,36 @@ func RunRace[T any](ctx context.Context, cfg config.ConfigProvider,
 	if cfg.ParallelPoolDelayDynamic() {
 		delay = time.Duration(nodes.GetAverageLatency()) * time.Millisecond
 	}
+	if delay < 100*time.Millisecond {
+		delay = 100 * time.Millisecond
+	} else if delay > 10*time.Second {
+		delay = 10 * time.Second
+	}
+	maxConcurrent := max(1, cfg.ParallelPoolSize())
 
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
 
 	nextIdx := 1
 	var zero T
+	var fallbackResults []T
+	finishWithFallback := func(lastErr error) (T, error) {
+		if len(fallbackResults) > 0 && chooseFallback != nil {
+			return chooseFallback(fallbackResults)
+		}
+		if lastErr != nil {
+			return zero, lastErr
+		}
+		return zero, fmt.Errorf("all nodes failed")
+	}
+	launchNext := func() bool {
+		if nextIdx >= len(cands) || int(atomic.LoadInt32(&active)) >= maxConcurrent {
+			return false
+		}
+		launchNode(cands[nextIdx].RawURI)
+		nextIdx++
+		return true
+	}
 
 	for {
 		select {
@@ -138,12 +218,12 @@ func RunRace[T any](ctx context.Context, cfg config.ConfigProvider,
 			return zero, ctx.Err()
 
 		case <-timer.C:
-			if nextIdx < len(cands) {
+			if launchNext() {
 				if cfg.DebugMode() {
-					log.Printf("[Racing] 对冲延迟唤醒，启动备份节点: %s", cands[nextIdx].Name)
+					log.Printf("[Racing] 对冲延迟唤醒，已启动第 %d 个候选节点", nextIdx)
 				}
-				launchNode(cands[nextIdx].RawURI)
-				nextIdx++
+			}
+			if nextIdx < len(cands) {
 				timer.Reset(delay)
 			}
 
@@ -152,38 +232,33 @@ func RunRace[T any](ctx context.Context, cfg config.ConfigProvider,
 			name := nodes.GetNodeName(res.uri)
 
 			if res.err == nil {
+				nodes.RecordTest(res.uri, true, 50, "")
+				stickyPool.Add(res.uri)
+				if preferred != nil && !preferred(res.val) {
+					fallbackResults = append(fallbackResults, res.val)
+					cancelCandidate(res.uri)
+					if launchNext() {
+						safeResetTimer(timer, delay)
+					}
+					if atomic.LoadInt32(&active) == 0 && nextIdx >= len(cands) {
+						cancel()
+						return finishWithFallback(nil)
+					}
+					continue
+				}
 				log.Printf("[Racing] 竞速胜出节点: %s", name)
 				cli.UpdateReqWinner(RequestIDFromContext(ctx), name)
 				cli.UpdateReqState(RequestIDFromContext(ctx), "🟢 数据传输", "\033[32m", "已建立连接")
-				nodes.RecordTest(res.uri, true, 50, "")
-				stickyPool.Add(res.uri)
 
 				returnedOnWinPath = true
-
-				collectTimeout := time.Duration(min(30, 5+cfg.ParallelPoolSize())) * time.Second
-				go func() {
-					collectCtx, collectCancel := context.WithTimeout(context.Background(), collectTimeout)
-					defer collectCancel()
-					for {
-						select {
-						case bgRes := <-resCh:
-							atomic.AddInt32(&active, -1)
-							if bgRes.err == nil {
-								stickyPool.Add(bgRes.uri)
-							} else {
-								stickyPool.Evict(bgRes.uri)
-							}
-						case <-collectCtx.Done():
-							if !rc.noCancelOnSuccess {
-								cancel()
-							}
-							return
-						}
-					}
-				}()
-
+				if rc.noCancelOnSuccess {
+					cancelOtherCandidates(res.uri)
+				} else {
+					cancel()
+				}
 				return res.val, nil
 			}
+			cancelCandidate(res.uri)
 
 			if res.err != context.Canceled && !errors.Is(res.err, context.Canceled) {
 				if cfg.DebugMode() {
@@ -207,29 +282,30 @@ func RunRace[T any](ctx context.Context, cfg config.ConfigProvider,
 						log.Printf("[Racing] 节点 %s 触发不可重试的硬性错误，终止竞速", name)
 					}
 					cancel()
-					return zero, res.err
+					return finishWithFallback(res.err)
 				}
 
-				if nextIdx < len(cands) {
+				if launchNext() {
 					if cfg.DebugMode() {
 						log.Printf("[Racing] 竞速失败触发极速对冲接力...")
 					}
-					launchNode(cands[nextIdx].RawURI)
-					nextIdx++
 					safeResetTimer(timer, delay)
 				}
 			} else {
 				if cfg.DebugMode() {
 					log.Printf("[Racing] 节点 %s 拨号取消", name)
 				}
+				if ctxRace.Err() == nil && launchNext() {
+					safeResetTimer(timer, delay)
+				}
 			}
 
+			if atomic.LoadInt32(&active) == 0 && nextIdx < len(cands) && launchNext() {
+				safeResetTimer(timer, delay)
+			}
 			if atomic.LoadInt32(&active) == 0 && nextIdx >= len(cands) {
 				cancel()
-				if res.err != nil {
-					return zero, res.err
-				}
-				return zero, fmt.Errorf("all nodes failed")
+				return finishWithFallback(res.err)
 			}
 		}
 	}

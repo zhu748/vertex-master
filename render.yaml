@@ -18,6 +18,24 @@ services:
         sync: false
       - key: VPROXY_RULES_HASH
         value: 36800adeec862126
+      - key: VPROXY_PROXY_FAILOVER_MAX_ATTEMPTS
+        value: "30"
+      - key: VPROXY_PROXY_HEALTH_CHECK_ENABLED
+        value: "true"
+      - key: VPROXY_ALLOW_PRIVATE_SUBSCRIPTION_URLS
+        value: "false"
+      - key: VPROXY_ALLOW_DOMAIN_SUBSCRIPTION_PROXIES
+        value: "false"
+      - key: VPROXY_PROXY_SUBSCRIPTION_ALLOW_PROXY_FALLBACK
+        value: "false"
+      - key: VPROXY_PROXY_HEALTH_CHECK_INTERVAL_MINUTES
+        value: "15"
+      - key: VPROXY_PROXY_HEALTH_CHECK_BATCH_SIZE
+        value: "50"
+      - key: VPROXY_PROXY_HEALTH_CHECK_CONCURRENCY
+        value: "5"
+      - key: VPROXY_PROXY_HEALTH_CHECK_TIMEOUT_SECONDS
+        value: "8"
       - key: VPROXY_PROXY_SUBSCRIPTION_URL
         sync: false
       - key: VPROXY_PROXY_SUBSCRIPTION_TYPE

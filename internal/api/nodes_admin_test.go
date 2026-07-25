@@ -1,8 +1,10 @@
 package api
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
@@ -27,10 +29,81 @@ func TestReadLimitedSubscriptionBody(t *testing.T) {
 	}
 }
 
+func TestMaxBatchTestNodesFitsTaskBudget(t *testing.T) {
+	if got := maxBatchTestNodes(20, 60); got != 1000 {
+		t.Fatalf("high-concurrency cap=%d, want 1000", got)
+	}
+	if got := maxBatchTestNodes(1, 60); got != 59 {
+		t.Fatalf("single-worker task capacity=%d, want 59", got)
+	}
+}
+
 func TestSubscriptionURLForLogRemovesCredentialsAndQuery(t *testing.T) {
 	got := subscriptionURLForLog("https://alice:secret@example.com/list.txt?token=sensitive#fragment")
-	if got != "https://example.com/list.txt" {
+	if got != "https://example.com" {
 		t.Fatalf("sensitive subscription URL parts leaked: %q", got)
+	}
+}
+
+func TestFilterRemoteSubscriptionNodesRejectsPrivateEndpoints(t *testing.T) {
+	imported := parseImportedNodes(strings.Join([]string{
+		"http://127.0.0.1:8080",
+		"socks5://169.254.169.254:1080",
+		"http://proxy.example.com:3128",
+		"http://8.8.8.8:8080",
+	}, "\n"))
+	filtered, rejected, err := filterRemoteSubscriptionNodes(
+		context.Background(),
+		imported,
+		false,
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rejected != 3 || len(filtered) != 1 || !strings.Contains(filtered[0].RawURI, "8.8.8.8") {
+		t.Fatalf("unexpected filtering result: rejected=%d filtered=%#v", rejected, filtered)
+	}
+
+	filtered, rejected, err = filterRemoteSubscriptionNodes(
+		context.Background(),
+		imported,
+		true,
+		false,
+	)
+	if err != nil || rejected != 0 || len(filtered) != len(imported) {
+		t.Fatalf("private opt-out should preserve endpoints: rejected=%d filtered=%#v err=%v", rejected, filtered, err)
+	}
+}
+
+func TestReplaceImportRejectsEmptyParseWithoutDeletingExistingNode(t *testing.T) {
+	existingURI := "http://8.8.8.8:39871"
+	if err := nodes.MergeNodes([]nodes.Node{{
+		Type: "http", Name: "must survive", RawURI: existingURI,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { nodes.DeleteNode(existingURI) })
+
+	adm := &AdminHandler{} //nolint:exhaustruct
+	req := httptest.NewRequest(
+		"POST",
+		"/api/admin/nodes/import",
+		strings.NewReader(`{"text":"not a proxy list","replace":true}`),
+	)
+	rec := httptest.NewRecorder()
+	adm.adminImportNodes(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("empty parsed replacement status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	found := false
+	for _, node := range nodes.LoadNodes() {
+		if node.RawURI == existingURI {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("invalid replacement deleted the existing node")
 	}
 }
 
@@ -105,6 +178,38 @@ func TestAdminGetNodesPaginationAndFilters(t *testing.T) {
 	}
 	if filtered.Total != 1 || len(filtered.URIs) != 1 || filtered.URIs[0] != secondURI {
 		t.Fatalf("unexpected filtered URI response: %#v", filtered)
+	}
+}
+
+func TestAdminGetSettingsIncludesProxyPoolControls(t *testing.T) {
+	cfg := config.StaticProvider(config.DefaultConfig())
+	adm := &AdminHandler{handler: handler{cfg: cfg}} //nolint:exhaustruct
+	rec := httptest.NewRecorder()
+	adm.adminGetSettings(rec, httptest.NewRequest("GET", "/api/admin/settings", nil))
+
+	var response struct {
+		Settings map[string]any `json:"settings"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+
+	expected := map[string]any{
+		"parallel_pool_size":                  float64(5),
+		"proxy_failover_max_attempts":         float64(30),
+		"proxy_health_check_enabled":          true,
+		"proxy_health_check_interval_minutes": float64(15),
+		"proxy_health_check_batch_size":       float64(50),
+		"proxy_health_check_concurrency":      float64(5),
+		"proxy_health_check_timeout_seconds":  float64(8),
+	}
+	for key, want := range expected {
+		if got := response.Settings[key]; got != want {
+			t.Errorf("setting %q = %#v, want %#v", key, got, want)
+		}
+		if !adminAllowedSettings[key] {
+			t.Errorf("setting %q is returned but cannot be saved", key)
+		}
 	}
 }
 
@@ -340,6 +445,41 @@ func TestParseImportedNodesSupportsStandardProxyURI(t *testing.T) {
 	}
 	if imported[0].Type != "socks4" || imported[1].Type != "http" {
 		t.Fatalf("unexpected types: %#v", imported)
+	}
+}
+
+func TestImportedFallbackNamesNeverContainCredentials(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{"vless", "vless://11111111-2222-3333-4444-555555555555@8.8.8.8:443?security=tls"},
+		{"trojan", "trojan://super-secret-password@8.8.4.4:443"},
+		{"hysteria2", "hysteria2://another-secret@1.1.1.1:443"},
+		{"tuic", "tuic://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:secret@9.9.9.9:443"},
+		{"shadowsocks", "ss://YWVzLTEyOC1nY206c2VjcmV0@1.0.0.1:8388"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node, ok := parseImportedNodeLine(tt.raw)
+			if !ok {
+				t.Fatalf("failed to parse %s", tt.raw)
+			}
+			for _, secret := range []string{
+				"11111111-2222-3333-4444-555555555555",
+				"super-secret-password",
+				"another-secret",
+				"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+				"secret",
+			} {
+				if strings.Contains(node.Name, secret) {
+					t.Fatalf("credential leaked in fallback name %q", node.Name)
+				}
+			}
+			if !strings.HasPrefix(node.Name, node.Type+"-") {
+				t.Fatalf("unexpected safe fallback name %q", node.Name)
+			}
+		})
 	}
 }
 

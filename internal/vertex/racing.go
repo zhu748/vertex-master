@@ -20,8 +20,14 @@ func StreamParallel(ctx context.Context, cfg config.ConfigProvider,
 	defer streamCancel()
 
 	wrappedOp := func(ctx context.Context, uri string) (<-chan StreamChunk, error) {
-		ch := op(streamCtx, uri)
-		first, ok := <-ch
+		ch := op(ctx, uri)
+		var first StreamChunk
+		var ok bool
+		select {
+		case first, ok = <-ch:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 		if !ok {
 			return nil, fmt.Errorf("stream: %s closed immediately", nodes.GetNodeName(uri))
 		}
@@ -32,11 +38,19 @@ func StreamParallel(ctx context.Context, cfg config.ConfigProvider,
 		rest <- first
 		go func() {
 			defer close(rest)
-			for chunk := range ch {
+			for {
 				select {
-				case rest <- chunk:
-				case <-streamCtx.Done():
+				case <-ctx.Done():
 					return
+				case chunk, open := <-ch:
+					if !open {
+						return
+					}
+					select {
+					case rest <- chunk:
+					case <-ctx.Done():
+						return
+					}
 				}
 			}
 		}()
@@ -53,9 +67,14 @@ func StreamParallel(ctx context.Context, cfg config.ConfigProvider,
 		}
 		return
 	}
-	for chunk := range winnerCh {
-		if !yield(chunk) {
+	for {
+		select {
+		case <-streamCtx.Done():
 			return
+		case chunk, open := <-winnerCh:
+			if !open || !yield(chunk) {
+				return
+			}
 		}
 	}
 }

@@ -3,18 +3,18 @@ async function loadOverview() {
   const [keysD, modelsD, nodesD] = await Promise.all([
     API.keys.list().catch(() => ({keys:[]})),
     API.models.get().catch(() => ({models:[]})),
-    API.nodes.list().catch(() => ({nodes:[]})),
+    API.nodes.list({ page: 1, page_size: 1 }).catch(() => ({nodes:[]})),
   ]);
   const keys = (keysD.keys || []).length;
   const models = (modelsD.models || []).length;
-  const nodes = (nodesD.nodes || []).length;
+  const nodes = nodesD.overall_total || (nodesD.nodes || []).length;
   const spAvail = nodesD.sticky_pool_available || 0;
-  const spInUse = nodesD.sticky_pool_in_use || 0;
-  const stickySub = `可用 ${spAvail} / 占用 ${spInUse}`;
+  const poolStats = nodesD.pool_stats || {};
+  const stickySub = `近期成功 ${spAvail} / 冷却 ${poolStats.cooling || 0}`;
   $('#ovCards').innerHTML =
     card('服务状态', '运行中', 'green', 'OpenAI / Gemini 兼容') +
     card('API 密钥', keys, 'gold') +
     card('模型', models, 'blue') +
     card('代理节点', nodes, '') +
-    card('粘性节点', spAvail, 'gold', stickySub);
+    card('健康代理', poolStats.healthy || 0, 'gold', stickySub);
 }

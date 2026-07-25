@@ -1,15 +1,19 @@
 package api
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/bsfdsagfadg/vertex/internal/netx"
 	"github.com/bsfdsagfadg/vertex/internal/nodes"
 	"github.com/bsfdsagfadg/vertex/internal/transport"
 )
@@ -82,9 +86,23 @@ func parseImportedNodeLine(line string) (nodes.Node, bool) {
 
 	nodeName := extractImportedNodeName(raw, out)
 	if nodeName == "" {
-		nodeName = raw[:min(len(raw), 40)]
+		nodeName = importedNodeFallbackName(nodeType, out)
 	}
+	nodeName = nodes.SafeNodeLabel(nodeName)
 	return nodes.Node{Type: nodeType, Name: nodeName, RawURI: raw}, true
+}
+
+func importedNodeFallbackName(nodeType string, out map[string]any) string {
+	server := strings.TrimSpace(valueToString(out["server"]))
+	port := intValue(out["port"])
+	switch {
+	case server != "" && port > 0:
+		return nodeType + "-" + net.JoinHostPort(server, strconv.Itoa(port))
+	case server != "":
+		return nodeType + "-" + server
+	default:
+		return nodeType + "-node"
+	}
 }
 
 func extractImportedNodeName(raw string, out map[string]any) string {
@@ -210,6 +228,53 @@ func isStandardProxyType(proxyType string) bool {
 	}
 }
 
+// filterRemoteSubscriptionNodes prevents a remote list from turning the
+// health checker or request router into a connection primitive for local
+// services. Manual imports remain unrestricted for legitimate LAN proxies.
+func filterRemoteSubscriptionNodes(
+	ctx context.Context,
+	imported []nodes.Node,
+	allowPrivate bool,
+	allowDomains bool,
+) ([]nodes.Node, int, error) {
+	if allowPrivate {
+		return imported, 0, nil
+	}
+	allowedHosts := make(map[string]bool)
+	filtered := make([]nodes.Node, 0, len(imported))
+	rejected := 0
+	for _, node := range imported {
+		if err := ctx.Err(); err != nil {
+			return nil, rejected, err
+		}
+		parsed, err := transport.ParseURI(node.RawURI)
+		if err != nil {
+			rejected++
+			continue
+		}
+		host := strings.TrimSpace(valueToString(parsed["server"]))
+		if _, parseErr := netip.ParseAddr(strings.Trim(host, "[]")); parseErr != nil && !allowDomains {
+			rejected++
+			continue
+		}
+		cacheKey := strings.ToLower(strings.TrimSuffix(host, "."))
+		allowed, cached := allowedHosts[cacheKey]
+		if !cached {
+			hostCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			validateErr := netx.ValidatePublicHost(hostCtx, host)
+			cancel()
+			allowed = validateErr == nil
+			allowedHosts[cacheKey] = allowed
+		}
+		if !allowed {
+			rejected++
+			continue
+		}
+		filtered = append(filtered, node)
+	}
+	return filtered, rejected, nil
+}
+
 func (adm *AdminHandler) adminImportNodes(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Text    string `json:"text"`
@@ -221,15 +286,23 @@ func (adm *AdminHandler) adminImportNodes(w http.ResponseWriter, r *http.Request
 	log.Printf("[Admin] [ImportNodes] 收到优选节点文件导入请求, 替换模式: %v", body.Replace)
 
 	newNodes := parseImportedNodes(strings.TrimSpace(body.Text))
+	if len(newNodes) == 0 {
+		writeJSON(w, http.StatusBadRequest, adminErr("导入内容中没有有效节点，未修改现有代理"))
+		return
+	}
 	if body.Replace {
-		log.Printf("[Admin] [ImportNodes] 替换模式，正在清除全部已有候选节点")
-		for _, cn := range nodes.LoadNodes() {
-			nodes.DeleteNode(cn.RawURI)
+		log.Printf("[Admin] [ImportNodes] 替换模式，正在原子替换手动节点")
+		if err := nodes.ReplaceManualNodes(newNodes); err != nil {
+			writeJSON(w, http.StatusInternalServerError, adminErr("替换节点失败: "+err.Error()))
+			return
+		}
+	} else {
+		log.Printf("[Admin] [ImportNodes] 正在合并导入的新节点数量: %d", len(newNodes))
+		if err := nodes.MergeNodes(newNodes); err != nil {
+			writeJSON(w, http.StatusInternalServerError, adminErr("保存节点失败: "+err.Error()))
+			return
 		}
 	}
-
-	log.Printf("[Admin] [ImportNodes] 正在合并导入的新节点数量: %d", len(newNodes))
-	nodes.MergeNodes(newNodes)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "count": len(newNodes)})
 }
 
@@ -250,15 +323,29 @@ func (adm *AdminHandler) adminImportNodesJson(w http.ResponseWriter, r *http.Req
 		writeJSON(w, http.StatusBadRequest, adminErr("JSON 解析失败: "+err.Error()))
 		return
 	}
-
-	if body.Replace {
-		log.Printf("[Admin] [ImportNodesJson] 替换模式，正在清除全部已有候选节点")
-		for _, cn := range nodes.LoadNodes() {
-			nodes.DeleteNode(cn.RawURI)
+	validNodes := make([]nodes.Node, 0, len(d.Nodes))
+	for _, node := range d.Nodes {
+		if strings.TrimSpace(node.RawURI) != "" {
+			validNodes = append(validNodes, node)
 		}
 	}
+	if len(validNodes) == 0 {
+		writeJSON(w, http.StatusBadRequest, adminErr("JSON 中没有有效节点，未修改现有代理"))
+		return
+	}
 
-	log.Printf("[Admin] [ImportNodesJson] 正在合并导入的新节点数量: %d", len(d.Nodes))
-	nodes.MergeNodes(d.Nodes)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "count": len(d.Nodes)})
+	if body.Replace {
+		log.Printf("[Admin] [ImportNodesJson] 替换模式，正在原子替换手动节点")
+		if err := nodes.ReplaceManualNodes(validNodes); err != nil {
+			writeJSON(w, http.StatusInternalServerError, adminErr("替换节点失败: "+err.Error()))
+			return
+		}
+	} else {
+		log.Printf("[Admin] [ImportNodesJson] 正在合并导入的新节点数量: %d", len(validNodes))
+		if err := nodes.MergeNodes(validNodes); err != nil {
+			writeJSON(w, http.StatusInternalServerError, adminErr("保存节点失败: "+err.Error()))
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "count": len(validNodes)})
 }

@@ -57,6 +57,10 @@ func (a *AudioHandler) handleAudioSpeech(w http.ResponseWriter, r *http.Request)
 
 	var body map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if isRequestBodyTooLarge(err) {
+			oaiError(w, http.StatusRequestEntityTooLarge, "请求体过大 (request body too large)", "invalid_request_error")
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{
 			"message": "请求体必须是合法JSON (invalid JSON)", "type": "invalid_request_error", "code": 400}})
 		return

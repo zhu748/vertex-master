@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -21,6 +22,12 @@ import (
 )
 
 const maxSubscriptionResponseBytes int64 = 10 << 20
+const proxyBatchTestBudget = time.Hour
+
+var (
+	proxyTestTaskMu     sync.Mutex         //nolint:gochecknoglobals
+	proxyTestTaskCancel context.CancelFunc //nolint:gochecknoglobals
+)
 
 func (adm *AdminHandler) adminGetNodes(w http.ResponseWriter, r *http.Request) {
 	list := nodes.LoadNodes()
@@ -51,7 +58,7 @@ func (adm *AdminHandler) adminGetNodes(w http.ResponseWriter, r *http.Request) {
 		if source == "manual" && node.SourceID != 0 {
 			continue
 		}
-		if source == "subscription" && node.SourceID == 0 {
+		if source == "subscription" && node.SubscriptionSourceCount == 0 {
 			continue
 		}
 		if !nodeMatchesAdminStatus(node, health[node.RawURI], status) {
@@ -100,6 +107,7 @@ func (adm *AdminHandler) adminGetNodes(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sp := nodes.GetStickyPool()
+	poolStats := nodes.GetNodePoolStats(time.Now())
 	writeJSON(w, http.StatusOK, map[string]any{
 		"nodes":                 pageNodes,
 		"health":                pageHealth,
@@ -113,6 +121,8 @@ func (adm *AdminHandler) adminGetNodes(w http.ResponseWriter, r *http.Request) {
 		"sticky_pool_available": sp.AvailableCount(),
 		"sticky_pool_in_use":    sp.StaleCount(),
 		"sticky_node_priority":  adm.cfg.StickyNodePriority(),
+		"pool_stats":            poolStats,
+		"health_scheduler":      GetProxyHealthSchedulerStatus(),
 	})
 }
 
@@ -146,8 +156,10 @@ func (adm *AdminHandler) adminFetchSub(w http.ResponseWriter, r *http.Request) {
 	if !adm.decodeAdminBody(w, r, &body) {
 		return
 	}
+	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
+	defer cancel()
 	log.Printf("[Admin] [FetchSub] 开始拉取订阅 URL: %s", subscriptionURLForLog(body.URL))
-	text, err := adm.fetchSubscriptionText(r.Context(), body.URL)
+	text, err := adm.fetchSubscriptionText(ctx, body.URL)
 	if err != nil {
 		log.Printf("[Admin] [FetchSub] 拉取失败: %v", err)
 		writeJSON(w, http.StatusBadRequest, adminErr("拉取失败: "+err.Error()))
@@ -155,77 +167,163 @@ func (adm *AdminHandler) adminFetchSub(w http.ResponseWriter, r *http.Request) {
 	}
 
 	newNodes := parseImportedNodes(text)
-	nodes.MergeNodes(newNodes)
+	if len(newNodes) > maxProxySubscriptionNodes {
+		writeJSON(
+			w,
+			http.StatusBadRequest,
+			adminErr(fmt.Sprintf(
+				"订阅包含 %d 个代理，超过单订阅上限 %d",
+				len(newNodes),
+				maxProxySubscriptionNodes,
+			)),
+		)
+		return
+	}
+	newNodes, rejected, err := filterRemoteSubscriptionNodes(
+		ctx,
+		newNodes,
+		adm.cfg.AllowPrivateSubscriptionURLs(),
+		adm.cfg.AllowDomainSubscriptionProxies(),
+	)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, adminErr("代理端点校验失败: "+err.Error()))
+		return
+	}
+	if rejected > 0 {
+		log.Printf("[Admin] [FetchSub] 已过滤 %d 个非公网或无法解析的代理端点", rejected)
+	}
+	if len(newNodes) == 0 {
+		writeJSON(w, http.StatusBadRequest, adminErr("订阅中没有安全且有效的公网代理"))
+		return
+	}
+	if err := nodes.MergeNodes(newNodes); err != nil {
+		writeJSON(w, http.StatusInternalServerError, adminErr("保存节点失败: "+err.Error()))
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "count": len(newNodes)})
 }
 
-func (adm *AdminHandler) adminTestAll(w http.ResponseWriter, _ *http.Request) {
-	log.Printf("[Admin] [TestAll] 开始触发全局并发测速（基于 recaptchaToken 耗时）")
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer cancel()
+func (adm *AdminHandler) adminTestAll(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		adm.adminMethodNotAllowed(w)
+		return
+	}
+	options := struct {
+		IncludeDisabled bool `json:"include_disabled"`
+		RecoverDisabled bool `json:"recover_disabled"`
+		MaxNodes        int  `json:"max_nodes"`
+		Concurrency     int  `json:"concurrency"`
+		TimeoutSeconds  int  `json:"timeout_seconds"`
+	}{
+		MaxNodes:       500,
+		Concurrency:    10,
+		TimeoutSeconds: 15,
+	}
+	if r.ContentLength != 0 && !adm.decodeAdminBody(w, r, &options) {
+		return
+	}
+	options.Concurrency = min(max(options.Concurrency, 1), 20)
+	options.TimeoutSeconds = min(max(options.TimeoutSeconds, 3), 60)
+	options.MaxNodes = min(
+		max(options.MaxNodes, 1),
+		maxBatchTestNodes(options.Concurrency, options.TimeoutSeconds),
+	)
 
-		list := nodes.LoadNodes()
-		var enabledNodes []nodes.Node
-		for _, n := range list {
-			if !n.Disabled {
-				enabledNodes = append(enabledNodes, n)
+	list := nodes.LoadNodes()
+	testNodes := make([]nodes.Node, 0, min(len(list), options.MaxNodes))
+	for _, node := range list {
+		if node.Disabled && !options.IncludeDisabled {
+			continue
+		}
+		testNodes = append(testNodes, node)
+		if len(testNodes) >= options.MaxNodes {
+			break
+		}
+	}
+	if len(testNodes) == 0 {
+		writeJSON(w, http.StatusBadRequest, adminErr("没有符合条件的节点可测试"))
+		return
+	}
+	if !nodes.TryStartTestProgress(len(testNodes)) {
+		writeJSON(w, http.StatusConflict, adminErr("已有批量测速任务正在运行"))
+		return
+	}
+
+	log.Printf("[Admin] [TestAll] 开始触发全局并发测速（基于 recaptchaToken 耗时）")
+	taskCtx, cancel := context.WithTimeout(context.Background(), proxyBatchTestBudget)
+	var netClient *transport.NetworkClient
+	if adm.vc != nil {
+		netClient = adm.vc.Net()
+	}
+	proxyTestTaskMu.Lock()
+	proxyTestTaskCancel = cancel
+	proxyTestTaskMu.Unlock()
+
+	go func() {
+		defer func() {
+			cancel()
+			proxyTestTaskMu.Lock()
+			proxyTestTaskCancel = nil
+			proxyTestTaskMu.Unlock()
+			nodes.FinishTestProgress()
+		}()
+
+		jobs := make(chan nodes.Node)
+		var wg sync.WaitGroup
+		for range options.Concurrency {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for node := range jobs {
+					if nodes.CheckTestControl() || taskCtx.Err() != nil {
+						return
+					}
+					nodeCtx, nodeCancel := context.WithTimeout(
+						taskCtx,
+						time.Duration(options.TimeoutSeconds)*time.Second,
+					)
+					start := time.Now()
+					testErr := testProxyNodeWithRecaptcha(
+						nodeCtx,
+						netClient,
+						node,
+						options.TimeoutSeconds,
+						"admin-test-all",
+					)
+					nodeCancel()
+					duration := float64(time.Since(start).Milliseconds())
+					success := testErr == nil
+					nodes.RecordTest(node.RawURI, success, duration, safeProxyTestError(testErr))
+					if success && node.Disabled && options.RecoverDisabled {
+						nodes.EnableNode(node.RawURI)
+					}
+					nodes.UpdateTestProgress(node.Name, success)
+				}
+			}()
+		}
+	sendJobs:
+		for _, node := range testNodes {
+			if nodes.CheckTestControl() {
+				break
+			}
+			select {
+			case jobs <- node:
+			case <-taskCtx.Done():
+				break sendJobs
 			}
 		}
-		log.Printf("[Admin] [TestAll] 加载到待测启用节点数: %d / %d", len(enabledNodes), len(list))
-		nodes.StartTestProgress(len(enabledNodes))
-
-		var wg sync.WaitGroup
-		sem := make(chan struct{}, 10)
-
-		for _, n := range enabledNodes {
-			wg.Add(1)
-			go func(node nodes.Node) {
-				defer wg.Done()
-				if nodes.CheckTestControl() {
-					return
-				}
-				select {
-				case sem <- struct{}{}:
-				case <-ctx.Done():
-					return
-				}
-				defer func() { <-sem }()
-				if nodes.CheckTestControl() {
-					return
-				}
-
-				start := time.Now()
-				log.Printf("[Admin] [TestAll] 开始测试节点: %s (%s)", node.Name, node.Type)
-
-				sess, err := adm.vc.Net().CreateSession(15, node.RawURI, "admin-test-all")
-				var testErr error
-				if err == nil {
-					testErr = fetchRecaptchaTokenWithSess(ctx, sess)
-					sess.Close()
-				} else {
-					testErr = err
-				}
-
-				duration := float64(time.Since(start).Milliseconds())
-				if testErr != nil {
-					log.Printf("[Admin] [TestAll] 节点 %s 测试失败: %v, 耗时: %.0fms", node.Name, testErr, duration)
-				} else {
-					log.Printf("[Admin] [TestAll] 节点 %s 测试成功, recaptcha 耗时: %.0fms", node.Name, duration)
-				}
-				success := testErr == nil
-				nodes.RecordTest(node.RawURI, success, duration, errToStr(testErr))
-				if !success {
-					nodes.BatchUpdateNodesDisabled([]string{node.RawURI}, true)
-				}
-				nodes.UpdateTestProgress(node.Name, success)
-			}(n)
-		}
+		close(jobs)
 		wg.Wait()
-		nodes.FinishTestProgress()
 		log.Printf("[Admin] [TestAll] 全局节点测试全部结束")
 	}()
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "count": len(testNodes)})
+}
+
+func maxBatchTestNodes(concurrency, timeoutSeconds int) int {
+	concurrency = min(max(concurrency, 1), 20)
+	timeoutSeconds = min(max(timeoutSeconds, 3), 60)
+	usableSeconds := int((proxyBatchTestBudget - time.Minute) / time.Second)
+	return min(1000, (usableSeconds/timeoutSeconds)*concurrency)
 }
 
 func (adm *AdminHandler) adminTestPause(w http.ResponseWriter, r *http.Request) {
@@ -252,6 +350,11 @@ func (adm *AdminHandler) adminTestTerminate(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	nodes.TerminateTestProgress()
+	proxyTestTaskMu.Lock()
+	if proxyTestTaskCancel != nil {
+		proxyTestTaskCancel()
+	}
+	proxyTestTaskMu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -272,14 +375,17 @@ func (adm *AdminHandler) adminTestNode(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	start := time.Now()
-	sess, err := adm.vc.Net().CreateSession(15, body.RawURI, "admin-test-node")
-	var testErr error
-	if err == nil {
-		testErr = fetchRecaptchaTokenWithSess(ctx, sess)
-		sess.Close()
-	} else {
-		testErr = err
+	var netClient *transport.NetworkClient
+	if adm.vc != nil {
+		netClient = adm.vc.Net()
 	}
+	testErr := testProxyNodeWithRecaptcha(
+		ctx,
+		netClient,
+		nodes.Node{RawURI: body.RawURI},
+		int(body.TimeoutSeconds),
+		"admin-test-node",
+	)
 	elapsed := float64(time.Since(start).Milliseconds())
 
 	errStr := ""
@@ -288,16 +394,19 @@ func (adm *AdminHandler) adminTestNode(w http.ResponseWriter, r *http.Request) {
 		if ctx.Err() != nil || errors.Is(testErr, context.DeadlineExceeded) {
 			errStr = "timeout"
 		} else {
-			errStr = testErr.Error()
+			errStr = safeProxyTestError(testErr)
 		}
 	}
 
 	disabled := false
+	nodes.UpdateNodeTestResult(body.RawURI, ok, elapsed, errStr)
 	if body.AutoDisable {
-		nodes.UpdateNodeTestResult(body.RawURI, ok, elapsed, errStr)
 		disabled = !ok
 		if !ok {
-			nodes.BatchUpdateNodesDisabled([]string{body.RawURI}, true)
+			if err := nodes.BatchUpdateNodesDisabled([]string{body.RawURI}, true); err != nil {
+				writeJSON(w, http.StatusInternalServerError, adminErr("自动禁用节点失败: "+err.Error()))
+				return
+			}
 		}
 	}
 
@@ -308,6 +417,24 @@ func (adm *AdminHandler) adminTestNode(w http.ResponseWriter, r *http.Request) {
 		"error":      errStr,
 		"disabled":   disabled,
 	})
+}
+
+func testProxyNodeWithRecaptcha(
+	ctx context.Context,
+	netClient *transport.NetworkClient,
+	node nodes.Node,
+	timeoutSeconds int,
+	reqID string,
+) error {
+	if netClient == nil {
+		return errors.New("network client unavailable")
+	}
+	session, err := netClient.CreateSession(timeoutSeconds, node.RawURI, reqID)
+	if err != nil {
+		return err
+	}
+	defer session.Close()
+	return fetchRecaptchaTokenWithSess(ctx, session)
 }
 
 func (adm *AdminHandler) adminEnableNode(w http.ResponseWriter, r *http.Request) {
@@ -444,7 +571,10 @@ func (adm *AdminHandler) adminBatchDisableNodes(w http.ResponseWriter, r *http.R
 		return
 	}
 	log.Printf("[Admin] [BatchDisable] 批量禁用 %d 个节点", len(body.URIs))
-	nodes.BatchUpdateNodesDisabled(body.URIs, true)
+	if err := nodes.BatchUpdateNodesDisabled(body.URIs, true); err != nil {
+		writeJSON(w, http.StatusInternalServerError, adminErr("批量禁用节点失败: "+err.Error()))
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -456,7 +586,10 @@ func (adm *AdminHandler) adminBatchEnableNodes(w http.ResponseWriter, r *http.Re
 		return
 	}
 	log.Printf("[Admin] [BatchEnable] 批量启用 %d 个节点", len(body.URIs))
-	nodes.BatchUpdateNodesDisabled(body.URIs, false)
+	if err := nodes.BatchUpdateNodesDisabled(body.URIs, false); err != nil {
+		writeJSON(w, http.StatusInternalServerError, adminErr("批量启用节点失败: "+err.Error()))
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -468,7 +601,10 @@ func (adm *AdminHandler) adminBatchDeleteNodes(w http.ResponseWriter, r *http.Re
 		return
 	}
 	log.Printf("[Admin] [BatchDelete] 批量删除 %d 个节点", len(body.URIs))
-	nodes.BatchDeleteNodes(body.URIs)
+	if err := nodes.BatchDeleteNodes(body.URIs); err != nil {
+		writeJSON(w, http.StatusInternalServerError, adminErr("批量删除节点失败: "+err.Error()))
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -477,24 +613,30 @@ func (adm *AdminHandler) fetchSubscriptionText(ctx context.Context, rawURL strin
 	if rawURL == "" {
 		return "", errors.New("subscription url is empty")
 	}
-	parsedURL, err := url.Parse(rawURL)
-	if err != nil || parsedURL.Host == "" ||
-		(parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
-		return "", errors.New("subscription url must be a valid HTTP/HTTPS URL")
+	allowPrivate := adm.cfg.AllowPrivateSubscriptionURLs()
+	if _, err := netx.ValidateHTTPURL(ctx, rawURL, allowPrivate); err != nil {
+		return "", fmt.Errorf("subscription URL rejected: %w", err)
 	}
 
-	data, err := fetchSubscriptionDataDirect(ctx, rawURL)
+	data, err := fetchSubscriptionDataDirect(ctx, rawURL, allowPrivate)
 	if err == nil {
 		return strings.TrimSpace(string(data)), nil
 	}
 
 	proxyURI := firstNonEmpty(adm.cfg.ActiveNodeURI(), adm.cfg.ProxyURL())
-	if proxyURI == "" || adm.vc == nil || adm.vc.Net() == nil {
+	if !adm.cfg.ProxySubscriptionAllowProxyFallback() ||
+		proxyURI == "" || adm.vc == nil || adm.vc.Net() == nil {
 		return "", err
 	}
 
 	log.Printf("[Admin] [FetchSub] direct fetch failed, retry via proxy: %v", err)
-	data, proxyErr := fetchSubscriptionDataViaProxy(ctx, adm.vc.Net(), rawURL, proxyURI)
+	data, proxyErr := fetchSubscriptionDataViaProxy(
+		ctx,
+		adm.vc.Net(),
+		rawURL,
+		proxyURI,
+		allowPrivate,
+	)
 	if proxyErr != nil {
 		return "", fmt.Errorf("direct fetch failed: %v; proxy retry failed: %w", err, proxyErr)
 	}
@@ -509,13 +651,11 @@ func subscriptionURLForLog(rawURL string) string {
 		return "<invalid subscription URL>"
 	}
 	parsed.User = nil
-	parsed.RawQuery = ""
-	parsed.Fragment = ""
-	return parsed.String()
+	return parsed.Scheme + "://" + parsed.Host
 }
 
-func fetchSubscriptionDataDirect(ctx context.Context, rawURL string) ([]byte, error) {
-	client := netx.NewHTTPClient(30 * time.Second)
+func fetchSubscriptionDataDirect(ctx context.Context, rawURL string, allowPrivate bool) ([]byte, error) {
+	client := netx.NewRestrictedHTTPClient(30*time.Second, allowPrivate)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("error: %w", err)
@@ -525,7 +665,7 @@ func fetchSubscriptionDataDirect(ctx context.Context, rawURL string) ([]byte, er
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("error: %w", err)
+		return nil, safeSubscriptionRequestError(err)
 	}
 	if resp == nil {
 		return nil, fmt.Errorf("nil response received")
@@ -538,33 +678,94 @@ func fetchSubscriptionDataDirect(ctx context.Context, rawURL string) ([]byte, er
 	return readLimitedSubscriptionBody(resp.Body, resp.ContentLength)
 }
 
-func fetchSubscriptionDataViaProxy(ctx context.Context, netClient *transport.NetworkClient, rawURL string, proxyURI string) ([]byte, error) {
+func fetchSubscriptionDataViaProxy(
+	ctx context.Context,
+	netClient *transport.NetworkClient,
+	rawURL string,
+	proxyURI string,
+	allowPrivate bool,
+) ([]byte, error) {
 	if netClient == nil {
 		return nil, errors.New("network client unavailable")
 	}
 
 	sess, err := netClient.CreateSession(30, proxyURI, "admin-fetch-sub")
 	if err != nil {
-		return nil, fmt.Errorf("error: %w", err)
+		return nil, errors.New("proxy session initialization failed")
 	}
 	defer sess.Close()
+	sess.SetFollowRedirect(false)
 
 	header := transport.Header{
 		"user-agent": {subscriptionFetchUserAgent},
 		"accept":     {"*/*"},
 	}
-	resp, err := sess.Do(ctx, http.MethodGet, rawURL, header, nil)
-	if err != nil {
-		return nil, fmt.Errorf("error: %w", err)
+	currentURL := rawURL
+	for redirectCount := 0; redirectCount <= 5; redirectCount++ {
+		current, validateErr := netx.ValidateHTTPURL(ctx, currentURL, allowPrivate)
+		if validateErr != nil {
+			return nil, fmt.Errorf("redirect target rejected: %w", validateErr)
+		}
+		resp, requestErr := sess.Do(ctx, http.MethodGet, current.String(), header, nil)
+		if requestErr != nil {
+			return nil, safeSubscriptionRequestError(requestErr)
+		}
+		if resp == nil {
+			return nil, errors.New("nil response received")
+		}
+		if resp.StatusCode == http.StatusOK {
+			data, readErr := readLimitedSubscriptionBody(resp.Body, resp.ContentLength)
+			_ = resp.Body.Close()
+			return data, readErr
+		}
+		if resp.StatusCode < 300 || resp.StatusCode > 399 {
+			_ = resp.Body.Close()
+			return nil, fmt.Errorf("status code %d", resp.StatusCode)
+		}
+		location := strings.TrimSpace(resp.Header.Get("Location"))
+		_, _ = io.CopyN(io.Discard, resp.Body, 4096)
+		_ = resp.Body.Close()
+		if location == "" {
+			return nil, errors.New("redirect response is missing Location")
+		}
+		target, parseErr := url.Parse(location)
+		if parseErr != nil {
+			return nil, errors.New("invalid redirect target")
+		}
+		currentURL = current.ResolveReference(target).String()
 	}
-	if resp == nil {
-		return nil, errors.New("nil response received")
+	return nil, errors.New("too many redirects")
+}
+
+func safeSubscriptionRequestError(err error) error {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return errors.New("subscription request canceled")
+	case errors.Is(err, context.DeadlineExceeded):
+		return errors.New("subscription request timed out")
 	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("status code %d", resp.StatusCode)
+	var networkErr net.Error
+	if errors.As(err, &networkErr) && networkErr.Timeout() {
+		return errors.New("subscription request timed out")
 	}
-	return readLimitedSubscriptionBody(resp.Body, resp.ContentLength)
+	return errors.New("subscription network request failed")
+}
+
+func safeProxyTestError(err error) string {
+	if err == nil {
+		return ""
+	}
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "proxy check canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "proxy check timed out"
+	}
+	var networkErr net.Error
+	if errors.As(err, &networkErr) && networkErr.Timeout() {
+		return "proxy check timed out"
+	}
+	return "proxy connectivity check failed"
 }
 
 func readLimitedSubscriptionBody(body io.Reader, contentLength int64) ([]byte, error) {

@@ -1,6 +1,8 @@
 package api
 
 import (
+	"fmt"
+	"math"
 	"net/http"
 
 	"github.com/bsfdsagfadg/vertex/internal/config"
@@ -13,19 +15,25 @@ var adminAllowedSettings = map[string]bool{
 	"drop_max_tokens": true, "proxy_url": true,
 	"request_timeout":       true,
 	"parallel_pool_enabled": true, "parallel_pool_size": true,
-	"telemetry_enabled":           true,
-	"parallel_pool_delay_dynamic": true,
-	"parallel_pool_delay_ms":      true,
-	"active_node_uri":             true,
-	"sticky_node_priority":        true,
-	"parallel_pool_retry_enabled": true,
-	"background_image":            true,
-	"font_size":                   true,
-	"font_color_type":             true,
-	"font_color":                  true,
-	"custom_bg_presets":           true,
-	"debug_mode":                  true,
-	"auto_refresh_logs":           true,
+	"telemetry_enabled":                   true,
+	"parallel_pool_delay_dynamic":         true,
+	"parallel_pool_delay_ms":              true,
+	"proxy_failover_max_attempts":         true,
+	"proxy_health_check_enabled":          true,
+	"proxy_health_check_interval_minutes": true,
+	"proxy_health_check_batch_size":       true,
+	"proxy_health_check_concurrency":      true,
+	"proxy_health_check_timeout_seconds":  true,
+	"active_node_uri":                     true,
+	"sticky_node_priority":                true,
+	"parallel_pool_retry_enabled":         true,
+	"background_image":                    true,
+	"font_size":                           true,
+	"font_color_type":                     true,
+	"font_color":                          true,
+	"custom_bg_presets":                   true,
+	"debug_mode":                          true,
+	"auto_refresh_logs":                   true,
 }
 
 func (adm *AdminHandler) adminGetSettings(w http.ResponseWriter, _ *http.Request) {
@@ -38,22 +46,28 @@ func (adm *AdminHandler) adminGetSettings(w http.ResponseWriter, _ *http.Request
 		"max_spill_mb":      adm.cfg.MaxSpillMB(),
 		"max_request_mb":    adm.cfg.MaxRequestMB(),
 		"max_n":             adm.cfg.MaxN(),
-		"aggregate_stream":   adm.cfg.AggregateStream(),
+		"aggregate_stream":  adm.cfg.AggregateStream(),
 		"drop_max_tokens":   adm.cfg.DropMaxTokens(),
 		"telemetry_enabled": telEnabled,
 		"request_timeout":   adm.cfg.RequestTimeout(),
 		"proxy_url":         adm.cfg.ProxyURL(), "parallel_pool_enabled": adm.cfg.ParallelPoolEnabled(), "parallel_pool_size": adm.cfg.ParallelPoolSize(), "active_node_uri": adm.cfg.ActiveNodeURI(),
-		"parallel_pool_delay_dynamic": adm.cfg.ParallelPoolDelayDynamic(),
-		"parallel_pool_delay_ms":      adm.cfg.ParallelPoolDelayMs(),
-		"sticky_node_priority":        adm.cfg.StickyNodePriority(),
-		"parallel_pool_retry_enabled": adm.cfg.ParallelPoolRetryEnabled(),
-		"background_image":            adm.cfg.BackgroundImage(),
-		"font_size":                   adm.cfg.FontSize(),
-		"font_color_type":             adm.cfg.FontColorType(),
-		"font_color":                  adm.cfg.FontColor(),
-		"custom_bg_presets":           adm.cfg.CustomBgPresets(),
-		"debug_mode":                  adm.cfg.DebugMode(),
-		"auto_refresh_logs":           adm.cfg.AutoRefreshLogs(),
+		"parallel_pool_delay_dynamic":         adm.cfg.ParallelPoolDelayDynamic(),
+		"parallel_pool_delay_ms":              adm.cfg.ParallelPoolDelayMs(),
+		"proxy_failover_max_attempts":         adm.cfg.ProxyFailoverMaxAttempts(),
+		"proxy_health_check_enabled":          adm.cfg.ProxyHealthCheckEnabled(),
+		"proxy_health_check_interval_minutes": adm.cfg.ProxyHealthCheckIntervalMinutes(),
+		"proxy_health_check_batch_size":       adm.cfg.ProxyHealthCheckBatchSize(),
+		"proxy_health_check_concurrency":      adm.cfg.ProxyHealthCheckConcurrency(),
+		"proxy_health_check_timeout_seconds":  adm.cfg.ProxyHealthCheckTimeoutSeconds(),
+		"sticky_node_priority":                adm.cfg.StickyNodePriority(),
+		"parallel_pool_retry_enabled":         adm.cfg.ParallelPoolRetryEnabled(),
+		"background_image":                    adm.cfg.BackgroundImage(),
+		"font_size":                           adm.cfg.FontSize(),
+		"font_color_type":                     adm.cfg.FontColorType(),
+		"font_color":                          adm.cfg.FontColor(),
+		"custom_bg_presets":                   adm.cfg.CustomBgPresets(),
+		"debug_mode":                          adm.cfg.DebugMode(),
+		"auto_refresh_logs":                   adm.cfg.AutoRefreshLogs(),
 	}})
 }
 
@@ -76,23 +90,141 @@ func (adm *AdminHandler) adminPutSettings(w http.ResponseWriter, r *http.Request
 			continue
 		}
 		switch k {
-		case "max_retries", "max_spill_mb", "max_request_mb", "max_n", "parallel_pool_size", "parallel_pool_delay_ms", "request_timeout":
-			if f, ok := v.(float64); ok {
-				val := int(f)
-				if k == "request_timeout" && val > 1800 {
-					val = 1800
-				}
-				updates[k] = val
-				continue
+		case "max_retries", "max_spill_mb", "max_request_mb", "max_n", "parallel_pool_size",
+			"parallel_pool_delay_ms", "request_timeout", "proxy_failover_max_attempts",
+			"proxy_health_check_interval_minutes", "proxy_health_check_batch_size",
+			"proxy_health_check_concurrency", "proxy_health_check_timeout_seconds":
+			val, ok := adminSettingInt(v)
+			if !ok {
+				writeJSON(w, http.StatusBadRequest, adminErr(k+" 必须是整数"))
+				return
 			}
+			if err := validateAdminProxySetting(k, val); err != nil {
+				writeJSON(w, http.StatusBadRequest, adminErr(err.Error()))
+				return
+			}
+			updates[k] = val
+			continue
+		case "aggregate_stream", "drop_max_tokens", "telemetry_enabled",
+			"parallel_pool_enabled", "parallel_pool_delay_dynamic",
+			"proxy_health_check_enabled", "sticky_node_priority",
+			"parallel_pool_retry_enabled", "debug_mode", "auto_refresh_logs":
+			if _, ok := v.(bool); !ok {
+				writeJSON(w, http.StatusBadRequest, adminErr(k+" 必须是布尔值"))
+				return
+			}
+		case "proxy_url", "active_node_uri", "background_image", "font_size",
+			"font_color_type", "font_color":
+			if _, ok := v.(string); !ok {
+				writeJSON(w, http.StatusBadRequest, adminErr(k+" 必须是字符串"))
+				return
+			}
+		case "custom_bg_presets":
+			values, ok := v.([]any)
+			if !ok {
+				writeJSON(w, http.StatusBadRequest, adminErr(k+" 必须是字符串数组"))
+				return
+			}
+			converted := make([]string, 0, len(values))
+			for _, item := range values {
+				value, ok := item.(string)
+				if !ok {
+					writeJSON(w, http.StatusBadRequest, adminErr(k+" 必须是字符串数组"))
+					return
+				}
+				converted = append(converted, value)
+			}
+			updates[k] = converted
+			continue
 		}
 		updates[k] = v
+	}
+	poolSize := adm.cfg.ParallelPoolSize()
+	if value, ok := updates["parallel_pool_size"].(int); ok {
+		poolSize = value
+	}
+	failoverAttempts := adm.cfg.ProxyFailoverMaxAttempts()
+	if value, ok := updates["proxy_failover_max_attempts"].(int); ok {
+		failoverAttempts = value
+	}
+	if failoverAttempts < poolSize {
+		writeJSON(
+			w,
+			http.StatusBadRequest,
+			adminErr("单请求最多尝试代理不能小于最大同时并发"),
+		)
+		return
+	}
+	healthInterval := adm.cfg.ProxyHealthCheckIntervalMinutes()
+	if value, ok := updates["proxy_health_check_interval_minutes"].(int); ok {
+		healthInterval = value
+	}
+	healthBatch := adm.cfg.ProxyHealthCheckBatchSize()
+	if value, ok := updates["proxy_health_check_batch_size"].(int); ok {
+		healthBatch = value
+	}
+	healthConcurrency := adm.cfg.ProxyHealthCheckConcurrency()
+	if value, ok := updates["proxy_health_check_concurrency"].(int); ok {
+		healthConcurrency = value
+	}
+	healthTimeout := adm.cfg.ProxyHealthCheckTimeoutSeconds()
+	if value, ok := updates["proxy_health_check_timeout_seconds"].(int); ok {
+		healthTimeout = value
+	}
+	maximumHealthBatch := (healthInterval * 60 / healthTimeout) * healthConcurrency
+	if maximumHealthBatch < 1 {
+		maximumHealthBatch = 1
+	}
+	maximumHealthBatch = min(maximumHealthBatch, 500)
+	if healthBatch > maximumHealthBatch {
+		writeJSON(
+			w,
+			http.StatusBadRequest,
+			adminErr(fmt.Sprintf(
+				"当前巡检间隔、并发和超时下，单轮节点数最多为 %d",
+				maximumHealthBatch,
+			)),
+		)
+		return
 	}
 	if err := config.WriteSettings(updates); err != nil {
 		writeJSON(w, http.StatusInternalServerError, adminErr("写入配置失败 (failed to write config)"))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func adminSettingInt(value any) (int, bool) {
+	number, ok := value.(float64)
+	if !ok || math.IsNaN(number) || math.IsInf(number, 0) || math.Trunc(number) != number {
+		return 0, false
+	}
+	if number > float64(math.MaxInt) || number < float64(math.MinInt) {
+		return 0, false
+	}
+	return int(number), true
+}
+
+func validateAdminProxySetting(key string, value int) error {
+	bounds := map[string][2]int{
+		"parallel_pool_size":                  {1, 20},
+		"parallel_pool_delay_ms":              {100, 10000},
+		"max_request_mb":                      {1, 1024},
+		"request_timeout":                     {1, 1800},
+		"proxy_failover_max_attempts":         {1, 100},
+		"proxy_health_check_interval_minutes": {1, 1440},
+		"proxy_health_check_batch_size":       {1, 500},
+		"proxy_health_check_concurrency":      {1, 20},
+		"proxy_health_check_timeout_seconds":  {2, 60},
+	}
+	bound, constrained := bounds[key]
+	if !constrained {
+		return nil
+	}
+	if value < bound[0] || value > bound[1] {
+		return fmt.Errorf("%s 必须在 %d 到 %d 之间", key, bound[0], bound[1])
+	}
+	return nil
 }
 
 func (adm *AdminHandler) adminGetStats(w http.ResponseWriter, _ *http.Request) {

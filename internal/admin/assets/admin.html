@@ -262,8 +262,21 @@
                 </select>
               </div>
               <div class="desc summary-text" id="nodesSummary">当前共 0 个节点</div>
+              <div class="toolbar m-0 gap-8" style="margin-bottom:10px;">
+                <label for="batchTestMaxNodes">本轮最多</label>
+                <input id="batchTestMaxNodes" type="number" min="1" max="1000" value="500" class="w-120">
+                <span>个节点</span>
+                <label for="batchTestConcurrency">并发</label>
+                <input id="batchTestConcurrency" type="number" min="1" max="20" value="10" class="w-120">
+                <label for="batchTestTimeoutSeconds">超时</label>
+                <input id="batchTestTimeoutSeconds" type="number" min="3" max="60" value="15" class="w-120">
+                <span>秒</span>
+                <label><input id="batchTestIncludeDisabled" type="checkbox"> 复检已禁用节点</label>
+                <label><input id="batchTestRecoverDisabled" type="checkbox"> 成功后自动恢复</label>
+              </div>
+              <div class="desc field-mb-20px">批量测试会访问 Google reCAPTCHA；失败节点仅记录健康状态并进入冷却，不会被永久禁用。</div>
               <div class="actions">
-                <button class="btn ghost" onclick="testAllNodes()">批量测试</button>
+                <button class="btn ghost" id="batchTestStartBtn" onclick="testAllNodes()">批量测试</button>
                 <button class="btn ghost" onclick="sortNodesByLatency()">按延迟顺序排序</button>
                 <button class="btn ghost" onclick="sortNodesByLatencyDesc()">按延迟降序排序</button>
                 <button class="btn ghost" onclick="dedupNodes()">一键去重</button>

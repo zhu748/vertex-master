@@ -13,7 +13,7 @@ func (s staticConfig) ProxyURL() string                  { return s.c.ProxyURL }
 func (s staticConfig) DebugPprof() bool                  { return s.c.DebugPprof }
 func (s staticConfig) DebugMode() bool                   { return s.c.DebugMode }
 func (s staticConfig) DropMaxTokens() bool               { return s.c.DropMaxTokens }
-func (s staticConfig) AggregateStream() bool               { return s.c.AggregateStream }
+func (s staticConfig) AggregateStream() bool             { return s.c.AggregateStream }
 func (s staticConfig) MaxN() int                         { return s.c.MaxN }
 func (s staticConfig) MaxRequestMB() int                 { return s.c.MaxRequestMB }
 func (s staticConfig) MaxSpillMB() int                   { return s.c.MaxSpillMB }
@@ -27,8 +27,29 @@ func (s staticConfig) ParallelPoolRetryEnabled() bool    { return s.c.ParallelPo
 func (s staticConfig) ParallelPoolSize() int             { return s.c.ParallelPoolSize }
 func (s staticConfig) ParallelPoolDelayDynamic() bool    { return s.c.ParallelPoolDelayDynamic }
 func (s staticConfig) ParallelPoolDelayMs() int          { return s.c.ParallelPoolDelayMs }
+func (s staticConfig) ProxyFailoverMaxAttempts() int     { return s.c.ProxyFailoverMaxAttempts }
 func (s staticConfig) ActiveNodeURI() string             { return s.c.ActiveNodeURI }
 func (s staticConfig) ParallelNodeTopK() int             { return s.c.ParallelNodeTopK }
+func (s staticConfig) ProxyHealthCheckEnabled() bool     { return s.c.ProxyHealthCheckEnabled }
+func (s staticConfig) ProxyHealthCheckIntervalMinutes() int {
+	return s.c.ProxyHealthCheckIntervalMinutes
+}
+func (s staticConfig) ProxyHealthCheckBatchSize() int { return s.c.ProxyHealthCheckBatchSize }
+func (s staticConfig) ProxyHealthCheckConcurrency() int {
+	return s.c.ProxyHealthCheckConcurrency
+}
+func (s staticConfig) ProxyHealthCheckTimeoutSeconds() int {
+	return s.c.ProxyHealthCheckTimeoutSeconds
+}
+func (s staticConfig) AllowPrivateSubscriptionURLs() bool {
+	return s.c.AllowPrivateSubscriptionURLs
+}
+func (s staticConfig) AllowDomainSubscriptionProxies() bool {
+	return s.c.AllowDomainSubscriptionProxies
+}
+func (s staticConfig) ProxySubscriptionAllowProxyFallback() bool {
+	return s.c.ProxySubscriptionAllowProxyFallback
+}
 func (s staticConfig) BackgroundImage() string           { return s.c.BackgroundImage }
 func (s staticConfig) FontSize() string                  { return s.c.FontSize }
 func (s staticConfig) FontColorType() string             { return s.c.FontColorType }

@@ -43,6 +43,18 @@ type AppConfig struct { //nolint:govet
 	DebugMode                bool   `json:"debug_mode"`
 	ParallelPoolDelayDynamic bool   `json:"parallel_pool_delay_dynamic"`
 	ParallelPoolDelayMs      int    `json:"parallel_pool_delay_ms"`
+	ProxyFailoverMaxAttempts int    `json:"proxy_failover_max_attempts"`
+
+	// 代理池后台健康巡检
+	ProxyHealthCheckEnabled         bool `json:"proxy_health_check_enabled"`
+	ProxyHealthCheckIntervalMinutes int  `json:"proxy_health_check_interval_minutes"`
+	ProxyHealthCheckBatchSize       int  `json:"proxy_health_check_batch_size"`
+	ProxyHealthCheckConcurrency     int  `json:"proxy_health_check_concurrency"`
+	ProxyHealthCheckTimeoutSeconds  int  `json:"proxy_health_check_timeout_seconds"`
+	// Environment-only safety escape hatch for trusted LAN subscriptions.
+	AllowPrivateSubscriptionURLs        bool `json:"-"`
+	AllowDomainSubscriptionProxies      bool `json:"-"`
+	ProxySubscriptionAllowProxyFallback bool `json:"-"`
 
 	// 匿名遥测：仅发送实例 ID + 版本 + 平台，不含任何用户/网络/隐私数据。
 	// 用于了解软件的版本分布和活跃数。指针类型区分"未设置"和"显式 false"，未设置时默认开启。
@@ -59,24 +71,31 @@ type AppConfig struct { //nolint:govet
 
 func DefaultConfig() AppConfig {
 	return AppConfig{ //nolint:exhaustruct
-		PortAPI:                   2156,
-		MaxRetries:                1, // 默认为 1 次
-		VertexAPIKey:              defaultAnonAPIKey,
-		CountTokensQuerySignature: defaultCountTokensQuerySig,
-		MaxN:                      8,
-		MaxSpillMB:                2048,
-		RequestTimeout:            180,
-		ParallelPoolEnabled:       true,
-		StickyNodePriority:        false,
-		ParallelPoolSize:          15, // 默认为 15 并发
-		ParallelNodeTopK:          80,
-		ParallelPoolDelayDynamic:  false, // 建议默认关闭动态对冲，改为稳定的秒级接力
-		ParallelPoolDelayMs:       2500,  // 固定对冲间隔设为 2500ms（2.5秒），单节点撞墙后触发接力
-		BackgroundImage:           "url('background.jpg')",
-		FontSize:                  "14px",
-		FontColorType:             "adaptive",
-		FontColor:                 "#f6f1e9",
-		CustomBgPresets:           []string{},
+		PortAPI:                         2156,
+		MaxRetries:                      1, // 默认为 1 次
+		VertexAPIKey:                    defaultAnonAPIKey,
+		CountTokensQuerySignature:       defaultCountTokensQuerySig,
+		MaxN:                            8,
+		MaxSpillMB:                      2048,
+		MaxRequestMB:                    64,
+		RequestTimeout:                  180,
+		ParallelPoolEnabled:             true,
+		StickyNodePriority:              true,
+		ParallelPoolSize:                5, // 最多同时运行 5 个候选
+		ParallelNodeTopK:                80,
+		ParallelPoolDelayDynamic:        false, // 建议默认关闭动态对冲，改为稳定的秒级接力
+		ParallelPoolDelayMs:             1000,  // 每秒启动一个后备节点
+		ProxyFailoverMaxAttempts:        30,
+		ProxyHealthCheckEnabled:         true,
+		ProxyHealthCheckIntervalMinutes: 15,
+		ProxyHealthCheckBatchSize:       50,
+		ProxyHealthCheckConcurrency:     5,
+		ProxyHealthCheckTimeoutSeconds:  8,
+		BackgroundImage:                 "url('background.jpg')",
+		FontSize:                        "14px",
+		FontColorType:                   "adaptive",
+		FontColor:                       "#f6f1e9",
+		CustomBgPresets:                 []string{},
 	}
 }
 
@@ -118,20 +137,40 @@ func WriteSettings(updates map[string]any) error {
 		raw[k] = v
 	}
 
-	// 拦截并在面板保存配置时限制并发上限为 20
-	if val, ok := raw["parallel_pool_size"].(float64); ok && val > 20 {
-		log.Printf("[Config] 面板设置并发数过高 (%v)，已强制保存为上限 20", val)
-		raw["parallel_pool_size"] = 20
-	} else if val, ok2 := raw["parallel_pool_size"].(int); ok2 && val > 20 { //nolint:govet
-		log.Printf("[Config] 面板设置并发数过高 (%v)，已强制保存为上限 20", val)
-		raw["parallel_pool_size"] = 20
-	}
+	clampIntSetting(raw, "parallel_pool_size", 1, 20)
+	clampIntSetting(raw, "parallel_pool_delay_ms", 100, 10000)
+	clampIntSetting(raw, "max_request_mb", 1, 1024)
+	clampIntSetting(raw, "proxy_failover_max_attempts", 1, 100)
+	clampIntSetting(raw, "proxy_health_check_interval_minutes", 1, 1440)
+	clampIntSetting(raw, "proxy_health_check_batch_size", 1, 500)
+	clampIntSetting(raw, "proxy_health_check_concurrency", 1, 20)
+	clampIntSetting(raw, "proxy_health_check_timeout_seconds", 2, 60)
+	clampHealthCheckWorkload(raw)
 
 	if err := writeJSONFile(path, raw); err != nil {
 		return err
 	}
 	InvalidateCache()
 	return nil
+}
+
+func clampIntSetting(raw map[string]any, key string, minimum, maximum int) {
+	var value int
+	switch v := raw[key].(type) {
+	case float64:
+		value = int(v)
+	case int:
+		value = v
+	default:
+		return
+	}
+	if value < minimum {
+		value = minimum
+	}
+	if value > maximum {
+		value = maximum
+	}
+	raw[key] = value
 }
 
 func writeJSONFile(path string, v any) error {
@@ -156,32 +195,62 @@ func Load() AppConfig {
 	cfg := DefaultConfig()
 	if data, err := os.ReadFile(configPath()); err == nil {
 		if errUnm := json.Unmarshal(data, &cfg); errUnm != nil { //nolint:govet
-			log.Printf("[Config] 解析 config.json 失败: %v", err)
+			log.Printf("[Config] 解析 config.json 失败: %v", errUnm)
 		} else {
-			var needsSave bool
+			normalized := map[string]any{}
 			// 自动补偿 RequestTimeout 默认值
 			if cfg.RequestTimeout <= 0 {
 				cfg.RequestTimeout = 180
-				needsSave = true
+				normalized["request_timeout"] = cfg.RequestTimeout
 			} else if cfg.RequestTimeout > 1800 {
 				log.Printf("[Config] 警告: 请求超时配置过高 (%d)，已限制为上限 1800", cfg.RequestTimeout)
 				cfg.RequestTimeout = 1800
-				needsSave = true
+				normalized["request_timeout"] = cfg.RequestTimeout
 			}
-			// 拦截在文件读取配置时过高的并发数限制为 20
-			if cfg.ParallelPoolSize > 20 {
-				log.Printf("[Config] 警告: 并发数配置过高 (%d)，已限制为上限 20", cfg.ParallelPoolSize)
-				cfg.ParallelPoolSize = 20
-				needsSave = true
+			normalize := func(key string, target *int, minimum, maximum, fallback int) {
+				value := clampInt(*target, minimum, maximum, fallback)
+				if value != *target {
+					*target = value
+					normalized[key] = value
+				}
 			}
-			if needsSave {
+			normalize("parallel_pool_size", &cfg.ParallelPoolSize, 1, 20, 5)
+			normalize("parallel_pool_delay_ms", &cfg.ParallelPoolDelayMs, 100, 10000, 1000)
+			normalize("max_request_mb", &cfg.MaxRequestMB, 1, 1024, 64)
+			normalize("proxy_failover_max_attempts", &cfg.ProxyFailoverMaxAttempts, 1, 100, 30)
+			normalize(
+				"proxy_health_check_interval_minutes",
+				&cfg.ProxyHealthCheckIntervalMinutes,
+				1,
+				1440,
+				15,
+			)
+			normalize("proxy_health_check_batch_size", &cfg.ProxyHealthCheckBatchSize, 1, 500, 50)
+			normalize("proxy_health_check_concurrency", &cfg.ProxyHealthCheckConcurrency, 1, 20, 5)
+			normalize(
+				"proxy_health_check_timeout_seconds",
+				&cfg.ProxyHealthCheckTimeoutSeconds,
+				2,
+				60,
+				8,
+			)
+			if maximum := maxHealthCheckBatch(
+				cfg.ProxyHealthCheckIntervalMinutes,
+				cfg.ProxyHealthCheckConcurrency,
+				cfg.ProxyHealthCheckTimeoutSeconds,
+			); cfg.ProxyHealthCheckBatchSize > maximum {
+				cfg.ProxyHealthCheckBatchSize = maximum
+				normalized["proxy_health_check_batch_size"] = maximum
+			}
+			if cfg.ProxyFailoverMaxAttempts < cfg.ParallelPoolSize {
+				cfg.ProxyFailoverMaxAttempts = cfg.ParallelPoolSize
+				normalized["proxy_failover_max_attempts"] = cfg.ProxyFailoverMaxAttempts
+			}
+			if len(normalized) > 0 {
 				// 异步回写，避免阻塞加载，并保留未知字段
-				go func(t int, p int) {
-					_ = WriteSettings(map[string]any{
-						"request_timeout":    t,
-						"parallel_pool_size": p,
-					})
-				}(cfg.RequestTimeout, cfg.ParallelPoolSize)
+				go func(updates map[string]any) {
+					_ = WriteSettings(updates)
+				}(normalized)
 			}
 			log.Printf("[Config] 成功加载配置文件 config.json")
 		}
@@ -207,6 +276,112 @@ func applyEnvironmentOverrides(cfg *AppConfig) {
 	if password := strings.TrimSpace(os.Getenv("VPROXY_ADMIN_PASSWORD")); password != "" {
 		cfg.AdminPassword = password
 	}
+
+	applyEnvBool("VPROXY_PROXY_HEALTH_CHECK_ENABLED", &cfg.ProxyHealthCheckEnabled)
+	applyEnvBool("VPROXY_ALLOW_PRIVATE_SUBSCRIPTION_URLS", &cfg.AllowPrivateSubscriptionURLs)
+	applyEnvBool("VPROXY_ALLOW_DOMAIN_SUBSCRIPTION_PROXIES", &cfg.AllowDomainSubscriptionProxies)
+	applyEnvBool(
+		"VPROXY_PROXY_SUBSCRIPTION_ALLOW_PROXY_FALLBACK",
+		&cfg.ProxySubscriptionAllowProxyFallback,
+	)
+	applyEnvInt("VPROXY_PROXY_HEALTH_CHECK_INTERVAL_MINUTES", &cfg.ProxyHealthCheckIntervalMinutes, 1, 1440)
+	applyEnvInt("VPROXY_PROXY_HEALTH_CHECK_BATCH_SIZE", &cfg.ProxyHealthCheckBatchSize, 1, 500)
+	applyEnvInt("VPROXY_PROXY_HEALTH_CHECK_CONCURRENCY", &cfg.ProxyHealthCheckConcurrency, 1, 20)
+	applyEnvInt("VPROXY_PROXY_HEALTH_CHECK_TIMEOUT_SECONDS", &cfg.ProxyHealthCheckTimeoutSeconds, 2, 60)
+	applyEnvInt("VPROXY_PROXY_FAILOVER_MAX_ATTEMPTS", &cfg.ProxyFailoverMaxAttempts, 1, 100)
+	if cfg.ProxyFailoverMaxAttempts < cfg.ParallelPoolSize {
+		log.Printf(
+			"[Config] 接力尝试数 %d 小于最大并发 %d，已提升为 %d",
+			cfg.ProxyFailoverMaxAttempts,
+			cfg.ParallelPoolSize,
+			cfg.ParallelPoolSize,
+		)
+		cfg.ProxyFailoverMaxAttempts = cfg.ParallelPoolSize
+	}
+	if maximum := maxHealthCheckBatch(
+		cfg.ProxyHealthCheckIntervalMinutes,
+		cfg.ProxyHealthCheckConcurrency,
+		cfg.ProxyHealthCheckTimeoutSeconds,
+	); cfg.ProxyHealthCheckBatchSize > maximum {
+		log.Printf(
+			"[Config] 健康巡检批量 %d 超出当前周期预算，已限制为 %d",
+			cfg.ProxyHealthCheckBatchSize,
+			maximum,
+		)
+		cfg.ProxyHealthCheckBatchSize = maximum
+	}
+}
+
+func maxHealthCheckBatch(intervalMinutes, concurrency, timeoutSeconds int) int {
+	if intervalMinutes < 1 {
+		intervalMinutes = 1
+	}
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	if timeoutSeconds < 1 {
+		timeoutSeconds = 1
+	}
+	batches := (intervalMinutes * 60) / timeoutSeconds
+	if batches < 1 {
+		batches = 1
+	}
+	return min(500, batches*concurrency)
+}
+
+func clampHealthCheckWorkload(raw map[string]any) {
+	cfg := DefaultConfig()
+	data, err := json.Marshal(raw)
+	if err != nil || json.Unmarshal(data, &cfg) != nil {
+		return
+	}
+	maximum := maxHealthCheckBatch(
+		cfg.ProxyHealthCheckIntervalMinutes,
+		cfg.ProxyHealthCheckConcurrency,
+		cfg.ProxyHealthCheckTimeoutSeconds,
+	)
+	if cfg.ProxyHealthCheckBatchSize > maximum {
+		raw["proxy_health_check_batch_size"] = maximum
+	}
+}
+
+func clampInt(value, minimum, maximum, fallback int) int {
+	if value == 0 {
+		return fallback
+	}
+	if value < minimum {
+		return minimum
+	}
+	if value > maximum {
+		return maximum
+	}
+	return value
+}
+
+func applyEnvInt(key string, target *int, minimum, maximum int) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < minimum || value > maximum {
+		log.Printf("[Config] 忽略无效的 %s=%q", key, raw)
+		return
+	}
+	*target = value
+}
+
+func applyEnvBool(key string, target *bool) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		log.Printf("[Config] 忽略无效的 %s=%q", key, raw)
+		return
+	}
+	*target = value
 }
 
 func InvalidateCache() {

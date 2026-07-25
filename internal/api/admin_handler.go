@@ -22,12 +22,24 @@ type AdminHandler struct {
 func (adm *AdminHandler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/admin")
 	log.Printf("[Server] [AdminAPI] 收到请求: %s %s", r.Method, path)
+	requireMethod := func(methods ...string) bool {
+		for _, method := range methods {
+			if r.Method == method {
+				return true
+			}
+		}
+		adm.adminMethodNotAllowed(w)
+		return false
+	}
 
 	if path == "/login" {
 		adm.adminLogin(w, r)
 		return
 	}
 	if path == "/check-auth" {
+		if !requireMethod(http.MethodGet) {
+			return
+		}
 		adm.adminCheckAuth(w, r)
 		return
 	}
@@ -37,12 +49,23 @@ func (adm *AdminHandler) handleAdminAPI(w http.ResponseWriter, r *http.Request) 
 			adm.adminUnauthorized(w)
 			return
 		}
+		if !adminRequestOriginAllowed(r) {
+			writeJSON(w, http.StatusForbidden, adminErr("管理请求来源校验失败"))
+			return
+		}
+		if !requireMethod(http.MethodDelete) {
+			return
+		}
 		adm.adminDeleteKey(w, r, strings.TrimPrefix(path, "/keys/"))
 		return
 	}
 
 	if !requireAdmin(r) {
 		adm.adminUnauthorized(w)
+		return
+	}
+	if !adminRequestOriginAllowed(r) {
+		writeJSON(w, http.StatusForbidden, adminErr("管理请求来源校验失败"))
 		return
 	}
 
@@ -79,62 +102,117 @@ func (adm *AdminHandler) handleAdminAPI(w http.ResponseWriter, r *http.Request) 
 		adm.adminRefreshProxySubscription(w, r)
 		return
 	case "/nodes/test":
+		if !requireMethod(http.MethodPost) {
+			return
+		}
 		adm.adminTestNode(w, r)
 		return
 	case "/nodes/enable":
+		if !requireMethod(http.MethodPost) {
+			return
+		}
 		adm.adminEnableNode(w, r)
 		return
 	case "/nodes/test-all":
+		if !requireMethod(http.MethodPost) {
+			return
+		}
 		adm.adminTestAll(w, r)
 		return
 	case "/nodes/test-progress":
-		if r.Method == http.MethodGet {
-			adm.adminGetTestProgress(w, r)
+		if !requireMethod(http.MethodGet) {
+			return
 		}
+		adm.adminGetTestProgress(w, r)
 		return
 	case "/nodes/test-pause":
+		if !requireMethod(http.MethodPost) {
+			return
+		}
 		adm.adminTestPause(w, r)
 		return
 	case "/nodes/test-resume":
+		if !requireMethod(http.MethodPost) {
+			return
+		}
 		adm.adminTestResume(w, r)
 		return
 	case "/nodes/test-terminate":
+		if !requireMethod(http.MethodPost) {
+			return
+		}
 		adm.adminTestTerminate(w, r)
 		return
 	case "/nodes/deduplicate":
+		if !requireMethod(http.MethodPost) {
+			return
+		}
 		adm.adminDedupNodes(w, r)
 		return
 	case "/nodes/disabled":
+		if !requireMethod(http.MethodDelete) {
+			return
+		}
 		adm.adminDeleteDisabledNodes(w, r)
 		return
 	case "/nodes/import":
+		if !requireMethod(http.MethodPost) {
+			return
+		}
 		adm.adminImportNodes(w, r)
 		return
 	case "/nodes/import-json":
+		if !requireMethod(http.MethodPost) {
+			return
+		}
 		adm.adminImportNodesJson(w, r)
 		return
 	case "/subscriptions/fetch":
+		if !requireMethod(http.MethodPost) {
+			return
+		}
 		adm.adminFetchSub(w, r)
 		return
 	case "/use-node":
+		if !requireMethod(http.MethodPost) {
+			return
+		}
 		adm.adminUseNode(w, r)
 		return
 	case "/nodes/batch-disable":
+		if !requireMethod(http.MethodPost) {
+			return
+		}
 		adm.adminBatchDisableNodes(w, r)
 		return
 	case "/nodes/batch-enable":
+		if !requireMethod(http.MethodPost) {
+			return
+		}
 		adm.adminBatchEnableNodes(w, r)
 		return
 	case "/nodes/batch-delete":
+		if !requireMethod(http.MethodPost) {
+			return
+		}
 		adm.adminBatchDeleteNodes(w, r)
 		return
 	case "/nodes/sort":
+		if !requireMethod(http.MethodPost) {
+			return
+		}
 		adm.adminSortNodesByLatency(w, r)
 		return
 	case "/upload-bg":
+		if !requireMethod(http.MethodPost) {
+			return
+		}
 		adm.adminUploadBg(w, r)
 		return
 	case "/delete-bg":
+		if !requireMethod(http.MethodDelete, http.MethodPost) {
+			return
+		}
 		adm.adminDeleteBg(w, r)
 		return
 	case "/list-bgs":
@@ -148,6 +226,9 @@ func (adm *AdminHandler) handleAdminAPI(w http.ResponseWriter, r *http.Request) 
 
 	switch path {
 	case "/logout":
+		if !requireMethod(http.MethodPost) {
+			return
+		}
 		adm.adminLogout(w, r)
 	case "/password":
 		if r.Method == http.MethodPost {
@@ -165,8 +246,14 @@ func (adm *AdminHandler) handleAdminAPI(w http.ResponseWriter, r *http.Request) 
 			adm.adminMethodNotAllowed(w)
 		}
 	case "/stats":
+		if !requireMethod(http.MethodGet) {
+			return
+		}
 		adm.adminGetStats(w, r)
 	case "/stats/reset":
+		if !requireMethod(http.MethodPost) {
+			return
+		}
 		adm.adminResetStats(w, r)
 	case "/log":
 		if r.Method != http.MethodGet {
@@ -241,6 +328,10 @@ func (adm *AdminHandler) adminUploadBg(w http.ResponseWriter, r *http.Request) {
 
 	err := r.ParseMultipartForm(10 << 20)
 	if err != nil {
+		if isRequestBodyTooLarge(err) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, adminErr("请求体过大 (request body too large)"))
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, adminErr("解析上传文件失败 (parse error)"))
 		return
 	}

@@ -97,6 +97,10 @@ func (img *ImageHandler) handleImageEdits(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if err := r.ParseMultipartForm(multipartMemoryLimit); err != nil {
+		if isRequestBodyTooLarge(err) {
+			oaiError(w, http.StatusRequestEntityTooLarge, "请求体过大 (request body too large)", "invalid_request_error")
+			return
+		}
 		img.oaiBadRequest(w, "图片编辑请求解析失败，请检查 multipart 表单 (failed to parse edit request)")
 		return
 	}
@@ -142,6 +146,10 @@ func (img *ImageHandler) handleImageVariations(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if err := r.ParseMultipartForm(multipartMemoryLimit); err != nil {
+		if isRequestBodyTooLarge(err) {
+			oaiError(w, http.StatusRequestEntityTooLarge, "请求体过大 (request body too large)", "invalid_request_error")
+			return
+		}
 		img.oaiBadRequest(w, "图片变体请求解析失败，请检查 multipart 表单 (failed to parse variation request)")
 		return
 	}
@@ -220,6 +228,10 @@ func (img *ImageHandler) oaiBadRequest(w http.ResponseWriter, message string) {
 func (img *ImageHandler) readJSONObject(w http.ResponseWriter, r *http.Request) (map[string]any, bool) {
 	var body map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if isRequestBodyTooLarge(err) {
+			oaiError(w, http.StatusRequestEntityTooLarge, "请求体过大 (request body too large)", "invalid_request_error")
+			return nil, false
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{
 			"message": "请求体必须是合法JSON", "type": "invalid_request_error", "code": nil}})
 		return nil, false

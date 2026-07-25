@@ -4,6 +4,8 @@ import (
 	cryptorand "crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"io"
 	"math/rand/v2"
 	"net/http"
 	"strconv"
@@ -22,14 +24,27 @@ type handler struct {
 	cfg  config.ConfigProvider
 }
 
+func isRequestBodyTooLarge(err error) bool {
+	var maxBytesErr *http.MaxBytesError
+	return errors.As(err, &maxBytesErr)
+}
 
 func (h *handler) decodeAdminBody(w http.ResponseWriter, r *http.Request, dst any) bool {
 	if r.Body == nil {
 		writeJSON(w, http.StatusBadRequest, adminErr("请求体为空 (empty body)"))
 		return false
 	}
-	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(dst); err != nil {
+		if isRequestBodyTooLarge(err) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, adminErr("请求体过大 (request body too large)"))
+			return false
+		}
 		writeJSON(w, http.StatusBadRequest, adminErr("请求格式错误 (invalid JSON)"))
+		return false
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		writeJSON(w, http.StatusBadRequest, adminErr("请求格式错误：只能包含一个 JSON 值"))
 		return false
 	}
 	return true
@@ -231,9 +246,9 @@ func adminErr(msg string) map[string]any {
 
 func maskKey(key string) string {
 	if len(key) <= 4 {
-		return "sk-····"
+		return "····"
 	}
-	return "sk-····" + key[len(key)-4:]
+	return "····" + key[len(key)-4:]
 }
 
 func generateAPIKey() string {
