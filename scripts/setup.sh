@@ -112,10 +112,8 @@ PORT=$(ask "监听端口" "2156")
 
 # API Key
 DEFAULT_KEY=$(gen_key)
-API_KEY=$(ask "API 密钥（sk- 开头，留空自动生成）" "$DEFAULT_KEY")
+API_KEY=$(ask "API 密钥（任意非空字符串，留空自动生成）" "$DEFAULT_KEY")
 [ -z "$API_KEY" ] && API_KEY="$DEFAULT_KEY"
-# 确保 sk- 前缀
-[[ "$API_KEY" != sk-* ]] && API_KEY="sk-$API_KEY"
 
 # 管理员密码
 ADMIN_PASS=$(gen_admin_pass)

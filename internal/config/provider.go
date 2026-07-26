@@ -13,6 +13,7 @@ type ConfigProvider interface {
 	AggregateStream() bool
 	MaxN() int
 	MaxRequestMB() int
+	MaxConcurrentRequests() int
 	MaxSpillMB() int
 	RequestTimeout() int
 
@@ -77,6 +78,7 @@ func (d dynamicConfig) DropMaxTokens() bool               { return Load().DropMa
 func (d dynamicConfig) AggregateStream() bool             { return Load().AggregateStream }
 func (d dynamicConfig) MaxN() int                         { return Load().MaxN }
 func (d dynamicConfig) MaxRequestMB() int                 { return Load().MaxRequestMB }
+func (d dynamicConfig) MaxConcurrentRequests() int        { return Load().MaxConcurrentRequests }
 func (d dynamicConfig) MaxSpillMB() int                   { return Load().MaxSpillMB }
 func (d dynamicConfig) RequestTimeout() int               { return Load().RequestTimeout }
 func (d dynamicConfig) VertexAPIKey() string              { return Load().VertexAPIKey }

@@ -1,6 +1,7 @@
 package nodes
 
 import (
+	"context"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -385,6 +386,7 @@ type healthUpdateKey struct {
 
 var (
 	healthUpdateChan chan healthUpdate                        //nolint:gochecknoglobals
+	healthFlushChan  chan chan error                          //nolint:gochecknoglobals
 	healthOnce       sync.Once                                //nolint:gochecknoglobals
 	healthOverflowMu sync.Mutex                               //nolint:gochecknoglobals
 	healthOverflow   = make(map[healthUpdateKey]healthUpdate) //nolint:gochecknoglobals
@@ -414,13 +416,14 @@ func mergeHealthOverflow(batch map[healthUpdateKey]healthUpdate) {
 
 func initHealthQueue() {
 	healthUpdateChan = make(chan healthUpdate, 2048)
+	healthFlushChan = make(chan chan error)
 	go func() {
 		ticker := time.NewTicker(100 * time.Millisecond)
 		defer ticker.Stop()
 
 		batch := make(map[healthUpdateKey]healthUpdate)
 
-		flush := func() {
+		flush := func() error {
 			mergeHealthOverflow(batch)
 			database := db.CurrentDB()
 			for key := range batch {
@@ -429,7 +432,7 @@ func initHealthQueue() {
 				}
 			}
 			if len(batch) == 0 || database == nil {
-				return
+				return nil
 			}
 			tx, err := database.Begin()
 			if err != nil {
@@ -439,7 +442,7 @@ func initHealthQueue() {
 						delete(batch, k)
 					}
 				}
-				return
+				return err
 			}
 			stmt, err := tx.Prepare(`INSERT INTO node_health
 				(raw_uri, success_count, fail_count, consecutive_failures, last_test_ms,
@@ -468,7 +471,7 @@ func initHealthQueue() {
 						delete(batch, k)
 					}
 				}
-				return
+				return err
 			}
 			defer stmt.Close()
 
@@ -483,35 +486,69 @@ func initHealthQueue() {
 				); err != nil {
 					_ = tx.Rollback()
 					log.Printf("[ERROR] Failed to persist node health: %v", err)
-					return
+					return err
 				}
 			}
 			if err := tx.Commit(); err != nil {
 				log.Printf("[ERROR] Failed to commit node health: %v", err)
-				return
+				return err
 			}
 			for k := range batch {
 				delete(batch, k)
 			}
+			return nil
 		}
 
 		for {
 			select {
 			case update, ok := <-healthUpdateChan:
 				if !ok {
-					flush()
+					_ = flush()
 					return
 				}
 				key := healthUpdateKey{database: update.database, uri: update.uri}
 				batch[key] = update
 				if len(batch) >= 100 {
-					flush()
+					_ = flush()
 				}
+			case response := <-healthFlushChan:
+				// A flush is a persistence barrier. Drain updates that were queued
+				// before the request so shutdown cannot acknowledge while older
+				// health mutations are still waiting in the buffered channel.
+			drain:
+				for {
+					select {
+					case update := <-healthUpdateChan:
+						key := healthUpdateKey{database: update.database, uri: update.uri}
+						batch[key] = update
+					default:
+						break drain
+					}
+				}
+				response <- flush()
 			case <-ticker.C:
-				flush()
+				_ = flush()
 			}
 		}
 	}()
+}
+
+// FlushHealth waits until all health mutations queued before this call have
+// been persisted. It is used as a shutdown barrier before SQLite is closed.
+func FlushHealth(ctx context.Context) error {
+	healthOnce.Do(initHealthQueue)
+	response := make(chan error, 1)
+	select {
+	case healthFlushChan <- response:
+	case <-ctx.Done():
+		return ctx.Err() //nolint:wrapcheck
+	}
+	select {
+	case err := <-response:
+		return err
+	case <-ctx.Done():
+		return ctx.Err() //nolint:wrapcheck
+	}
 }
 
 func saveHealthUnsafe() {

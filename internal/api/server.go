@@ -5,12 +5,14 @@
 package api
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"path/filepath"
 	"time"
 
 	"github.com/bsfdsagfadg/vertex/internal/config"
+	"github.com/bsfdsagfadg/vertex/internal/db"
 	"github.com/bsfdsagfadg/vertex/internal/transform"
 	"github.com/bsfdsagfadg/vertex/internal/vertex"
 )
@@ -41,6 +43,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/", s.handleRoot)
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/healthz", s.handleHealth)
+	mux.HandleFunc("/readyz", s.handleReady)
 	mux.HandleFunc("/v1/models", s.handleModelsOAI)
 	mux.HandleFunc("/v1beta/models", s.handleModelsGemini)
 	mux.HandleFunc("/v1/chat/completions", s.chat.handleChatCompletions)
@@ -69,7 +72,17 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("/debug/pprof/mutex", pprofMutex)
 	}
 
-	return s.mw.withRecover(s.mw.withCORS(s.mw.withMetrics(s.mw.withAPIKey(s.mw.withBodyLimit(mux)))))
+	return s.mw.withRecover(
+		s.mw.withSecurityHeaders(
+			s.mw.withCORS(
+				s.mw.withMetrics(
+					s.mw.withAPIKey(
+						s.mw.withConcurrencyLimit(s.mw.withBodyLimit(mux)),
+					),
+				),
+			),
+		),
+	)
 }
 
 func (s *Server) handleFavicon(w http.ResponseWriter, r *http.Request) {
@@ -91,11 +104,42 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	log.Printf("[Server] [Health] 收到健康检查请求")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":          "healthy",
 		"timestamp":       time.Now().Unix(),
 		"api_keys_loaded": s.mw.keys.Count(),
+	})
+}
+
+func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		oaiError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error")
+		return
+	}
+	if s.mw.keys == nil || s.mw.keys.Count() == 0 {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"status": "not_ready", "reason": "no_api_keys", "timestamp": time.Now().Unix(),
+		})
+		return
+	}
+	database := db.CurrentDB()
+	if database == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"status": "not_ready", "reason": "database_unavailable", "timestamp": time.Now().Unix(),
+		})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	if err := database.PingContext(ctx); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"status": "not_ready", "reason": "database_unavailable", "timestamp": time.Now().Unix(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "ready", "timestamp": time.Now().Unix(), "api_keys_loaded": s.mw.keys.Count(),
 	})
 }
 

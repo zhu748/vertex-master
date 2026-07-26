@@ -169,16 +169,29 @@ async function loadAppearance() {
 
   const curBg = document.documentElement.style.getPropertyValue('--bg-img').trim() || currentAppearanceSettings.background_image || '';
   
+  const makePresetThumb = (preset, canDelete = false) => {
+    const thumb = document.createElement('div');
+    thumb.className = 'thumb' + (preset.val === curBg ? ' active' : '');
+    thumb.title = preset.name;
+    if (preset.val.startsWith('url')) thumb.style.backgroundImage = preset.val;
+    else thumb.style.background = preset.val;
+    thumb.addEventListener('click', () => setBgAndSync(preset.val));
+    if (canDelete) {
+      const del = document.createElement('div');
+      del.className = 'del-btn';
+      del.title = '删除预设';
+      del.textContent = '×';
+      del.addEventListener('click', (event) => deletePreset(preset.val, event));
+      thumb.appendChild(del);
+    }
+    return thumb;
+  };
+
   const renderThumbs = (presets, containerId, canDelete = false) => {
     const el = $('#' + containerId);
     if (!el) return;
-    el.innerHTML = presets.map(p => {
-      const isImg = p.val.startsWith('url');
-      const style = isImg ? `background-image:${p.val}` : `background:${p.val}`;
-      const activeClass = (p.val === curBg) ? ' active' : '';
-      const delBtn = canDelete ? `<div class="del-btn" onclick="deletePreset(&quot;${p.val}&quot;, event)" title="删除预设">×</div>` : '';
-      return `<div class="thumb${activeClass}" style="${style}" onclick="setBgAndSync(&quot;${p.val}&quot;)" title="${p.name}">${delBtn}</div>`;
-    }).join('');
+    el.textContent = '';
+    presets.forEach(preset => el.appendChild(makePresetThumb(preset, canDelete)));
   };
 
   if (currentAppearanceSettings.custom_bg_presets && Array.isArray(currentAppearanceSettings.custom_bg_presets)) {
@@ -207,13 +220,8 @@ async function loadAppearance() {
   
   const elImg = $('#presets');
   if (elImg) {
-    elImg.innerHTML = presetsImg.map(p => {
-      const isImg = p.val.startsWith('url');
-      const style = isImg ? `background-image:${p.val}` : `background:${p.val}`;
-      const activeClass = (p.val === curBg) ? ' active' : '';
-      const delBtn = p.canDel ? `<div class="del-btn" onclick="deletePreset(&quot;${p.val}&quot;, event)" title="删除图片">×</div>` : '';
-      return `<div class="thumb${activeClass}" style="${style}" onclick="setBgAndSync(&quot;${p.val}&quot;)" title="${p.name}">${delBtn}</div>`;
-    }).join('');
+    elImg.textContent = '';
+    presetsImg.forEach(preset => elImg.appendChild(makePresetThumb(preset, !!preset.canDel)));
   }
   renderThumbs(presetsColor, 'presetsColor');
 
@@ -229,8 +237,6 @@ async function loadAppearance() {
   
   renderGradientStops(false);
   setActiveColorTarget('font');
-  
-  PAGE_CACHE['appearance'] = $('#page-appearance').innerHTML;
 }
 
 function applyThemeColorFromBg(bgValue) {
@@ -879,7 +885,7 @@ window.deletePreset = async function(val, event) {
   if (!confirm('确定要删除这个预设吗？')) return;
 
   if (val.startsWith('url')) {
-    const match = val.match(/\/assets\/(background.*?\.jpg)/);
+    const match = val.match(/\/assets\/(background[^/'"]+\.(?:jpe?g|png|gif))/i);
     if (match && match[1]) {
       try {
         const res = await API.raw('/api/admin/delete-bg', { method: 'POST', body: JSON.stringify({ filename: match[1] }) });
@@ -890,6 +896,8 @@ window.deletePreset = async function(val, event) {
       } catch (e) {
         toast('删除失败: ' + e.message);
       }
+    } else {
+      toast('图片路径格式异常，无法删除', true);
     }
   } else {
     if (currentAppearanceSettings.custom_bg_presets) {

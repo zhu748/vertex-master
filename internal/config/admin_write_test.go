@@ -2,11 +2,52 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
+
+func TestWriteSettingsSerializesConcurrentMerges(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("VPROXY_CONFIG", path)
+	InvalidateCache()
+	t.Cleanup(InvalidateCache)
+
+	const writers = 20
+	var wg sync.WaitGroup
+	errs := make(chan error, writers)
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			errs <- WriteSettings(map[string]any{fmt.Sprintf("concurrent_%02d", index): index})
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < writers; i++ {
+		if _, ok := raw[fmt.Sprintf("concurrent_%02d", i)]; !ok {
+			t.Fatalf("concurrent update %d was lost", i)
+		}
+	}
+}
 
 // TestWriteSettingsMergesAndPreservesUnknown 验证 WriteSettings：
 // 合并已知字段、保留未提及字段（含 AppConfig 之外的额外字段）、写后缓存失效立即生效。
@@ -83,6 +124,63 @@ func TestWriteModelsRoundTrip(t *testing.T) {
 	}
 
 	InvalidateModelsCache() // 清理
+}
+
+func TestWriteModelsSerializesConcurrentWrites(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "models.json")
+	t.Setenv("VPROXY_MODELS", path)
+	InvalidateModelsCache()
+	t.Cleanup(InvalidateModelsCache)
+
+	const writers = 20
+	var wg sync.WaitGroup
+	errs := make(chan error, writers)
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			model := fmt.Sprintf("gemini-%d", index)
+			errs <- WriteModels([]string{model}, map[string]string{"current": model})
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("并发写模型配置失败: %v", err)
+		}
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed modelsFile
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("并发写入后 models.json 必须保持有效: %v", err)
+	}
+	if len(parsed.Models) != 1 || parsed.AliasMap["current"] != parsed.Models[0] {
+		t.Fatalf("模型和别名应来自同一次原子写入: %+v", parsed)
+	}
+}
+
+func TestWriteJSONFileMarshalFailurePreservesExistingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	const original = `{"keep":true}`
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeJSONFile(path, map[string]any{"unsupported": make(chan int)}); err == nil {
+		t.Fatal("不可序列化的数据应返回错误")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != original {
+		t.Fatalf("序列化失败不应破坏原文件，got %q", data)
+	}
 }
 
 func TestApplyEnvironmentOverrides(t *testing.T) {
@@ -196,12 +294,19 @@ func TestLoadLegacyConfigGetsNewProxyDefaults(t *testing.T) {
 	cfg := Load()
 	defaults := DefaultConfig()
 	if cfg.ProxyFailoverMaxAttempts != defaults.ProxyFailoverMaxAttempts ||
+		cfg.ParallelPoolRetryEnabled != defaults.ParallelPoolRetryEnabled ||
 		cfg.ProxyHealthCheckEnabled != defaults.ProxyHealthCheckEnabled ||
 		cfg.ProxyHealthCheckIntervalMinutes != defaults.ProxyHealthCheckIntervalMinutes ||
 		cfg.ProxyHealthCheckBatchSize != defaults.ProxyHealthCheckBatchSize ||
 		cfg.ProxyHealthCheckConcurrency != defaults.ProxyHealthCheckConcurrency ||
 		cfg.ProxyHealthCheckTimeoutSeconds != defaults.ProxyHealthCheckTimeoutSeconds {
 		t.Fatalf("旧配置应获得新增代理默认值，got %+v", cfg)
+	}
+}
+
+func TestDefaultConfigEnablesParallelPoolRetry(t *testing.T) {
+	if !DefaultConfig().ParallelPoolRetryEnabled {
+		t.Fatal("默认配置应开启并发池节点重试，以便 429 可在节点内自动重试")
 	}
 }
 

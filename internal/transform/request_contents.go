@@ -169,7 +169,8 @@ func hasRemotePrefix(url string) bool {
 func BuildVertexVariables(model string, geminiPayload map[string]any, cfg config.ConfigProvider) map[string]any {
 	stripGeminiIDs(geminiPayload)
 	vars := map[string]any{}
-	vars["model"] = parseModelName(model)
+	resolvedModel := parseModelName(model)
+	vars["model"] = resolvedModel
 
 	for _, field := range supportedVarFields {
 		if v, ok := geminiPayload[field]; ok {
@@ -206,8 +207,12 @@ func BuildVertexVariables(model string, geminiPayload map[string]any, cfg config
 		vars["toolConfig"] = convertToolsFormat(tc)
 	}
 
-	if genCfg := buildGenerationConfig(geminiPayload); len(genCfg) > 0 {
+	genCfg := buildGenerationConfig(geminiPayload)
+	applyModelGenerationCompatibility(resolvedModel, genCfg)
+	if len(genCfg) > 0 {
 		vars["generationConfig"] = genCfg
+	} else {
+		delete(vars, "generationConfig")
 	}
 
 	if _, ok := vars["safetySettings"]; !ok {

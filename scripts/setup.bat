@@ -28,7 +28,7 @@ if "%PORT%"=="" set "PORT=2156"
 
 :: 生成随机 API Key
 set "API_KEY=sk-%RANDOM%%RANDOM%%RANDOM%"
-set /p "API_KEY=API 密钥（sk- 开头，留空自动生成）[%API_KEY%]: "
+set /p "API_KEY=API 密钥（任意非空字符串，留空自动生成）[%API_KEY%]: "
 if "%API_KEY%"=="" set "API_KEY=sk-%RANDOM%%RANDOM%%RANDOM%"
 
 :: 生成管理员密码

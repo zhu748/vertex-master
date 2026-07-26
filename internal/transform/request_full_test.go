@@ -429,6 +429,45 @@ func TestTopKClamp(t *testing.T) {
 	}
 }
 
+func TestGemini36DropsDeprecatedGenerationFields(t *testing.T) {
+	payload := map[string]any{
+		"contents": []any{map[string]any{
+			"role": "user", "parts": []any{map[string]any{"text": "hi"}},
+		}},
+		"generationConfig": map[string]any{
+			"temperature":     0.7,
+			"topP":            0.9,
+			"topK":            40,
+			"candidateCount":  2,
+			"maxOutputTokens": 1024,
+			"thinkingConfig": map[string]any{
+				"thinkingLevel": "medium", "thinkingBudget": 256,
+			},
+		},
+	}
+	vars := BuildVertexVariables(
+		"gemini-3.6-flash",
+		payload,
+		config.StaticProvider(config.DefaultConfig()),
+	)
+	gc := vars["generationConfig"].(map[string]any)
+	for _, key := range []string{"temperature", "topP", "topK", "candidateCount"} {
+		if _, exists := gc[key]; exists {
+			t.Errorf("Gemini 3.6 不应继续发送已弃用字段 %s: %v", key, gc)
+		}
+	}
+	if gc["maxOutputTokens"] != 1024 {
+		t.Fatalf("兼容清理不应移除仍受支持的字段: %v", gc)
+	}
+	thinking := gc["thinkingConfig"].(map[string]any)
+	if _, exists := thinking["thinkingBudget"]; exists {
+		t.Fatalf("Gemini 3.6 不应发送 thinkingBudget: %v", thinking)
+	}
+	if thinking["thinkingLevel"] != "MEDIUM" {
+		t.Fatalf("thinkingLevel 应保留并规范为大写: %v", thinking)
+	}
+}
+
 func TestParallelToolCalls_GracefullyAccepted(t *testing.T) {
 	// parallel_tool_calls 应被优雅接受、不报错、不影响 payload。
 	body := map[string]any{

@@ -107,6 +107,9 @@ func printLegacyBanner() {
 
 func main() {
 	setupTermuxCerts() // 优先初始化 Termux 证书
+	if renderCommit := strings.TrimSpace(os.Getenv("RENDER_GIT_COMMIT")); buildCommit == "unknown" && renderCommit != "" {
+		buildCommit = renderCommit
+	}
 
 	logDir := filepath.Join(filepath.Dir(config.ConfigDir()), "logs")
 	dailyLogger := logger.NewDailyLogger(logDir)
@@ -230,10 +233,18 @@ func main() {
 			ctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
 			if err := httpServer.Shutdown(ctx); err != nil {
 				log.Printf("[vproxy] 关闭超时/出错：%v(强制结束)", err)
+				if closeErr := httpServer.Close(); closeErr != nil {
+					log.Printf("[vproxy] 强制关闭监听连接失败：%v", closeErr)
+				}
 			}
 			cancel()
 			stopProxyHealthScheduler()
 			stopProxySubscriptionScheduler()
+			flushCtx, flushCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := nodes.FlushHealth(flushCtx); err != nil {
+				log.Printf("[vproxy] 关闭前写入代理健康状态失败：%v", err)
+			}
+			flushCancel()
 			transport.StopAllProxies()
 			telemetry.Stop()
 			_ = dailyLogger.Close()

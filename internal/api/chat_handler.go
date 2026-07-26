@@ -125,7 +125,12 @@ func (c *ChatHandler) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 			writeJSON(w, ve.Code, vertexErrorToOAI(ve))
 			return
 		}
-		writeJSON(w, http.StatusOK, c.respConv.AggregateN(responses, model))
+		oaiResp := c.respConv.AggregateN(responses, model)
+		transform.StripAssistantPrefillFromOAI(
+			oaiResp,
+			transform.AssistantPrefillFromPayload(geminiPayload),
+		)
+		writeJSON(w, http.StatusOK, oaiResp)
 		return
 	}
 
@@ -142,6 +147,10 @@ func (c *ChatHandler) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 	}
 
 	oaiResp := c.respConv.ToOAI(geminiResp, model)
+	transform.StripAssistantPrefillFromOAI(
+		oaiResp,
+		transform.AssistantPrefillFromPayload(geminiPayload),
+	)
 	writeJSON(w, http.StatusOK, oaiResp)
 }
 
@@ -171,6 +180,9 @@ func (c *ChatHandler) streamChatCompletions(ctx context.Context, w http.Response
 	gotContent := false
 	streamErrWritten := false
 	startTime := time.Now()
+	prefillFilter := transform.NewAssistantPrefillStreamFilter(
+		transform.AssistantPrefillFromPayload(geminiPayload),
+	)
 
 	c.vc.StreamChat(ctx, model, geminiPayload, func(ch vertex.StreamChunk) bool {
 		if isFirst && ch.Err == nil {
@@ -182,6 +194,7 @@ func (c *ChatHandler) streamChatCompletions(ctx context.Context, w http.Response
 			streamErrWritten = true
 			return false
 		}
+		prefillFilter.FilterGeminiChunk(ch.Data)
 		events := c.respConv.StreamToSSE(ch.Data, model, requestID, isFirst)
 		isFirst = false
 		for _, ev := range events {
@@ -211,7 +224,19 @@ func (c *ChatHandler) streamChatCompletions(ctx context.Context, w http.Response
 	if streamErrWritten {
 		return
 	}
-	if !gotContent {
+	if tail := prefillFilter.Finalize(); tail != "" {
+		base := streamChunkBase(model, requestID)
+		base["choices"] = []any{map[string]any{
+			"index":         0,
+			"delta":         map[string]any{"content": tail},
+			"finish_reason": nil,
+		}}
+		if !writeSilent(sseEvent(base)) {
+			return
+		}
+		gotContent = true
+	}
+	if !gotContent && !prefillFilter.SawText() {
 		ee := vertex.NewEmptyResponseError("Upstream returned empty response (no content)")
 		c.writeStreamError(write, ee, requestID, model)
 		return
@@ -247,10 +272,27 @@ func (c *ChatHandler) oaiFakeStream(ctx context.Context, w http.ResponseWriter, 
 	}
 
 	oai := c.respConv.ToOAI(resp, model)
-	contentText := firstChoiceContent(oai)
+	contentText := transform.StripAssistantPrefillEcho(
+		firstChoiceContent(oai),
+		transform.AssistantPrefillFromPayload(geminiPayload),
+	)
 
 	createdTS := time.Now().Unix()
 	chunks := splitIntoRuneChunks(contentText)
+	if len(chunks) == 0 {
+		base := streamChunkBase(model, requestID)
+		base["created"] = createdTS
+		base["choices"] = []any{map[string]any{
+			"index":         0,
+			"delta":         map[string]any{"role": "assistant", "content": ""},
+			"finish_reason": "stop",
+		}}
+		if !sw.write(sseEvent(base)) {
+			return
+		}
+		_ = sw.write("data: [DONE]\n\n")
+		return
+	}
 	for i, piece := range chunks {
 		base := streamChunkBase(model, requestID)
 		base["created"] = createdTS
@@ -284,7 +326,10 @@ func (c *ChatHandler) oaiAggregateStream(ctx context.Context, w http.ResponseWri
 	}
 
 	oai := c.respConv.ToOAI(resp, model)
-	contentText := firstChoiceContent(oai)
+	contentText := transform.StripAssistantPrefillEcho(
+		firstChoiceContent(oai),
+		transform.AssistantPrefillFromPayload(geminiPayload),
+	)
 
 	createdTS := time.Now().Unix()
 	base := streamChunkBase(model, requestID)

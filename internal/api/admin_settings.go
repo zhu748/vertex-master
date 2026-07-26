@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"os"
+	"strings"
 
 	"github.com/bsfdsagfadg/vertex/internal/config"
 )
@@ -11,7 +13,7 @@ import (
 //nolint:gochecknoglobals // Constant-like map of allowed settings
 var adminAllowedSettings = map[string]bool{
 	"max_retries": true, "max_spill_mb": true,
-	"max_request_mb": true, "max_n": true, "aggregate_stream": true,
+	"max_request_mb": true, "max_concurrent_requests": true, "max_n": true, "aggregate_stream": true,
 	"drop_max_tokens": true, "proxy_url": true,
 	"request_timeout":       true,
 	"parallel_pool_enabled": true, "parallel_pool_size": true,
@@ -36,39 +38,65 @@ var adminAllowedSettings = map[string]bool{
 	"auto_refresh_logs":                   true,
 }
 
+//nolint:gochecknoglobals // Stable mapping used to explain Render-managed settings to the UI.
+var adminSettingEnvironmentVariables = map[string]string{
+	"admin_password":                      "VPROXY_ADMIN_PASSWORD",
+	"max_concurrent_requests":             "VPROXY_MAX_CONCURRENT_REQUESTS",
+	"proxy_failover_max_attempts":         "VPROXY_PROXY_FAILOVER_MAX_ATTEMPTS",
+	"proxy_health_check_enabled":          "VPROXY_PROXY_HEALTH_CHECK_ENABLED",
+	"proxy_health_check_interval_minutes": "VPROXY_PROXY_HEALTH_CHECK_INTERVAL_MINUTES",
+	"proxy_health_check_batch_size":       "VPROXY_PROXY_HEALTH_CHECK_BATCH_SIZE",
+	"proxy_health_check_concurrency":      "VPROXY_PROXY_HEALTH_CHECK_CONCURRENCY",
+	"proxy_health_check_timeout_seconds":  "VPROXY_PROXY_HEALTH_CHECK_TIMEOUT_SECONDS",
+}
+
+func environmentManagedAdminSettings() map[string]string {
+	managed := make(map[string]string)
+	for setting, environmentVariable := range adminSettingEnvironmentVariables {
+		if strings.TrimSpace(os.Getenv(environmentVariable)) != "" {
+			managed[setting] = environmentVariable
+		}
+	}
+	return managed
+}
+
 func (adm *AdminHandler) adminGetSettings(w http.ResponseWriter, _ *http.Request) {
 	telEnabled := true
 	if adm.cfg.TelemetryEnabled() != nil {
 		telEnabled = *adm.cfg.TelemetryEnabled()
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"settings": map[string]any{
-		"max_retries":       adm.cfg.MaxRetries(),
-		"max_spill_mb":      adm.cfg.MaxSpillMB(),
-		"max_request_mb":    adm.cfg.MaxRequestMB(),
-		"max_n":             adm.cfg.MaxN(),
-		"aggregate_stream":  adm.cfg.AggregateStream(),
-		"drop_max_tokens":   adm.cfg.DropMaxTokens(),
-		"telemetry_enabled": telEnabled,
-		"request_timeout":   adm.cfg.RequestTimeout(),
-		"proxy_url":         adm.cfg.ProxyURL(), "parallel_pool_enabled": adm.cfg.ParallelPoolEnabled(), "parallel_pool_size": adm.cfg.ParallelPoolSize(), "active_node_uri": adm.cfg.ActiveNodeURI(),
-		"parallel_pool_delay_dynamic":         adm.cfg.ParallelPoolDelayDynamic(),
-		"parallel_pool_delay_ms":              adm.cfg.ParallelPoolDelayMs(),
-		"proxy_failover_max_attempts":         adm.cfg.ProxyFailoverMaxAttempts(),
-		"proxy_health_check_enabled":          adm.cfg.ProxyHealthCheckEnabled(),
-		"proxy_health_check_interval_minutes": adm.cfg.ProxyHealthCheckIntervalMinutes(),
-		"proxy_health_check_batch_size":       adm.cfg.ProxyHealthCheckBatchSize(),
-		"proxy_health_check_concurrency":      adm.cfg.ProxyHealthCheckConcurrency(),
-		"proxy_health_check_timeout_seconds":  adm.cfg.ProxyHealthCheckTimeoutSeconds(),
-		"sticky_node_priority":                adm.cfg.StickyNodePriority(),
-		"parallel_pool_retry_enabled":         adm.cfg.ParallelPoolRetryEnabled(),
-		"background_image":                    adm.cfg.BackgroundImage(),
-		"font_size":                           adm.cfg.FontSize(),
-		"font_color_type":                     adm.cfg.FontColorType(),
-		"font_color":                          adm.cfg.FontColor(),
-		"custom_bg_presets":                   adm.cfg.CustomBgPresets(),
-		"debug_mode":                          adm.cfg.DebugMode(),
-		"auto_refresh_logs":                   adm.cfg.AutoRefreshLogs(),
-	}})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"managed_fields": environmentManagedAdminSettings(),
+		"settings": map[string]any{
+			"max_retries":             adm.cfg.MaxRetries(),
+			"max_spill_mb":            adm.cfg.MaxSpillMB(),
+			"max_request_mb":          adm.cfg.MaxRequestMB(),
+			"max_concurrent_requests": adm.cfg.MaxConcurrentRequests(),
+			"max_n":                   adm.cfg.MaxN(),
+			"aggregate_stream":        adm.cfg.AggregateStream(),
+			"drop_max_tokens":         adm.cfg.DropMaxTokens(),
+			"telemetry_enabled":       telEnabled,
+			"request_timeout":         adm.cfg.RequestTimeout(),
+			"proxy_url":               adm.cfg.ProxyURL(), "parallel_pool_enabled": adm.cfg.ParallelPoolEnabled(), "parallel_pool_size": adm.cfg.ParallelPoolSize(), "active_node_uri": adm.cfg.ActiveNodeURI(),
+			"parallel_pool_delay_dynamic":         adm.cfg.ParallelPoolDelayDynamic(),
+			"parallel_pool_delay_ms":              adm.cfg.ParallelPoolDelayMs(),
+			"proxy_failover_max_attempts":         adm.cfg.ProxyFailoverMaxAttempts(),
+			"proxy_health_check_enabled":          adm.cfg.ProxyHealthCheckEnabled(),
+			"proxy_health_check_interval_minutes": adm.cfg.ProxyHealthCheckIntervalMinutes(),
+			"proxy_health_check_batch_size":       adm.cfg.ProxyHealthCheckBatchSize(),
+			"proxy_health_check_concurrency":      adm.cfg.ProxyHealthCheckConcurrency(),
+			"proxy_health_check_timeout_seconds":  adm.cfg.ProxyHealthCheckTimeoutSeconds(),
+			"sticky_node_priority":                adm.cfg.StickyNodePriority(),
+			"parallel_pool_retry_enabled":         adm.cfg.ParallelPoolRetryEnabled(),
+			"background_image":                    adm.cfg.BackgroundImage(),
+			"font_size":                           adm.cfg.FontSize(),
+			"font_color_type":                     adm.cfg.FontColorType(),
+			"font_color":                          adm.cfg.FontColor(),
+			"custom_bg_presets":                   adm.cfg.CustomBgPresets(),
+			"debug_mode":                          adm.cfg.DebugMode(),
+			"auto_refresh_logs":                   adm.cfg.AutoRefreshLogs(),
+		},
+	})
 }
 
 func (adm *AdminHandler) adminPutSettings(w http.ResponseWriter, r *http.Request) {
@@ -77,6 +105,17 @@ func (adm *AdminHandler) adminPutSettings(w http.ResponseWriter, r *http.Request
 	}
 	if !adm.decodeAdminBody(w, r, &body) {
 		return
+	}
+	managed := environmentManagedAdminSettings()
+	for key := range body.Settings {
+		if environmentVariable, ok := managed[key]; ok {
+			writeJSON(
+				w,
+				http.StatusConflict,
+				adminErr(fmt.Sprintf("%s 由环境变量 %s 托管，请在 Render 中修改", key, environmentVariable)),
+			)
+			return
+		}
 	}
 	updates := map[string]any{}
 
@@ -90,7 +129,7 @@ func (adm *AdminHandler) adminPutSettings(w http.ResponseWriter, r *http.Request
 			continue
 		}
 		switch k {
-		case "max_retries", "max_spill_mb", "max_request_mb", "max_n", "parallel_pool_size",
+		case "max_retries", "max_spill_mb", "max_request_mb", "max_concurrent_requests", "max_n", "parallel_pool_size",
 			"parallel_pool_delay_ms", "request_timeout", "proxy_failover_max_attempts",
 			"proxy_health_check_interval_minutes", "proxy_health_check_batch_size",
 			"proxy_health_check_concurrency", "proxy_health_check_timeout_seconds":
@@ -210,6 +249,7 @@ func validateAdminProxySetting(key string, value int) error {
 		"parallel_pool_size":                  {1, 20},
 		"parallel_pool_delay_ms":              {100, 10000},
 		"max_request_mb":                      {1, 1024},
+		"max_concurrent_requests":             {1, 1000},
 		"request_timeout":                     {1, 1800},
 		"proxy_failover_max_attempts":         {1, 100},
 		"proxy_health_check_interval_minutes": {1, 1440},

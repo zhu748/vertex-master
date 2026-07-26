@@ -75,6 +75,50 @@ func TestRunRaceRetryableFailureLaunchesNextImmediately(t *testing.T) {
 	}
 }
 
+func TestRunRaceRecordsMeasuredProxyLatency(t *testing.T) {
+	uris := installRaceTestNodes(t, 1)
+	cfg := raceTestConfig(1, 1, 100)
+
+	value, err := RunRace(context.Background(), cfg, func(_ context.Context, _ string) (string, error) {
+		time.Sleep(90 * time.Millisecond)
+		return "ok", nil
+	})
+	if err != nil || value != "ok" {
+		t.Fatalf("RunRace() = %q, %v", value, err)
+	}
+
+	health := nodes.LoadHealth()[uris[0]]
+	if health == nil {
+		t.Fatal("successful proxy attempt did not create health data")
+	}
+	if health.LastTestMs < 70 {
+		t.Fatalf("recorded latency = %.2fms, want measured latency near 90ms", health.LastTestMs)
+	}
+	if health.LastTestMs == 50 {
+		t.Fatal("proxy latency is still the old hard-coded 50ms value")
+	}
+}
+
+func TestRunRaceDoesNotPenalizeProxyForRequestError(t *testing.T) {
+	uris := installRaceTestNodes(t, 1)
+	cfg := raceTestConfig(1, 1, 100)
+
+	_, err := RunRace(context.Background(), cfg, func(_ context.Context, _ string) (string, error) {
+		return "", NewInvalidArgumentError("invalid request")
+	})
+	if err == nil {
+		t.Fatal("RunRace() error = nil, want invalid argument error")
+	}
+
+	health := nodes.LoadHealth()[uris[0]]
+	if health == nil {
+		t.Fatal("node selection should create health metadata")
+	}
+	if health.FailCount != 0 || health.ConsecutiveFailures != 0 || health.CooldownUntil != 0 {
+		t.Fatalf("request error penalized proxy health: %#v", health)
+	}
+}
+
 func TestRunRaceRespectsMaximumConcurrentCandidates(t *testing.T) {
 	const (
 		candidateCount = 5

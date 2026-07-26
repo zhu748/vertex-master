@@ -68,10 +68,11 @@ func (c *VertexAIClient) StreamChat(ctx context.Context, model string, geminiPay
 
 func (c *VertexAIClient) executeStreamingWithRetries(ctx context.Context, model string, geminiPayload map[string]any, proxyURI string, yield func(StreamChunk) bool) {
 	cfg := c.cfg
-	maxRetries := cfg.MaxRetries()
-	if cfg.ParallelPoolEnabled() && !cfg.ParallelPoolRetryEnabled() {
-		maxRetries = 0
-	}
+	maxRetries := effectiveMaxRetries(
+		cfg.MaxRetries(),
+		cfg.ParallelPoolEnabled(),
+		cfg.ParallelPoolRetryEnabled(),
+	)
 	contentYielded := false
 	var lastError *VertexError
 
@@ -81,7 +82,9 @@ func (c *VertexAIClient) executeStreamingWithRetries(ctx context.Context, model 
 		yield(StreamChunk{Err: NewInternalError("create session: " + err.Error())})
 		return
 	}
-	defer sess.Close()
+	// Capture sess at return time. The 429 path replaces this variable, while a
+	// direct defer sess.Close() would only close the first session.
+	defer func() { sess.Close() }()
 
 	recaptchaToken := ""
 	isFirstAuth := true
@@ -202,6 +205,13 @@ retryLoop:
 	if !contentYielded && lastError != nil {
 		yield(StreamChunk{Err: lastError})
 	}
+}
+
+func effectiveMaxRetries(configured int, parallelPoolEnabled, parallelPoolRetryEnabled bool) int {
+	if configured < 0 || (parallelPoolEnabled && !parallelPoolRetryEnabled) {
+		return 0
+	}
+	return configured
 }
 
 // executeStreamingAttempt 执行单次流式请求：发请求 → 增量扫描 JSON → 提取 chunk → 过滤 finishReason。

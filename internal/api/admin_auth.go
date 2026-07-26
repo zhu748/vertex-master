@@ -6,9 +6,11 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,14 +21,112 @@ import (
 const (
 	adminCookieName = "admin_token"
 	adminSessionTTL = 24 * time.Hour
+
+	adminLoginFailureLimit = 5
+	adminLoginWindow       = 15 * time.Minute
+	adminLoginLockDuration = 15 * time.Minute
+	maxAdminLoginTrackers  = 10_000
 )
+
+type adminLoginAttempt struct {
+	Failures      int
+	WindowStarted time.Time
+	LockedUntil   time.Time
+	LastSeen      time.Time
+}
 
 var (
 	//nolint:gochecknoglobals // Admin sessions state
 	adminSessionsMu sync.Mutex
 	//nolint:gochecknoglobals // Admin sessions state
 	adminSessions = map[string]time.Time{}
+	//nolint:gochecknoglobals // Bounded in-memory login abuse protection.
+	adminLoginAttemptsMu sync.Mutex
+	//nolint:gochecknoglobals // Bounded in-memory login abuse protection.
+	adminLoginAttempts = map[string]adminLoginAttempt{}
 )
+
+func adminClientIP(r *http.Request) string {
+	remote := strings.TrimSpace(r.RemoteAddr)
+	if host, _, err := net.SplitHostPort(remote); err == nil {
+		remote = host
+	}
+
+	trustForwarded := strings.TrimSpace(os.Getenv("RENDER")) != "" ||
+		strings.EqualFold(strings.TrimSpace(os.Getenv("VPROXY_TRUST_PROXY_HEADERS")), "true")
+	if !trustForwarded {
+		return remote
+	}
+	forwarded := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-For"), ",")[0])
+	if parsed := net.ParseIP(forwarded); parsed != nil {
+		return parsed.String()
+	}
+	return remote
+}
+
+func adminLoginRetryAfter(clientIP string, now time.Time) int {
+	adminLoginAttemptsMu.Lock()
+	defer adminLoginAttemptsMu.Unlock()
+	attempt, ok := adminLoginAttempts[clientIP]
+	if !ok || !now.Before(attempt.LockedUntil) {
+		return 0
+	}
+	return max(1, int((attempt.LockedUntil.Sub(now)+time.Second-1)/time.Second))
+}
+
+func recordAdminLoginFailure(clientIP string, now time.Time) int {
+	adminLoginAttemptsMu.Lock()
+	defer adminLoginAttemptsMu.Unlock()
+
+	if len(adminLoginAttempts) >= maxAdminLoginTrackers {
+		staleBefore := now.Add(-time.Hour)
+		for key, item := range adminLoginAttempts {
+			if item.LastSeen.Before(staleBefore) && !now.Before(item.LockedUntil) {
+				delete(adminLoginAttempts, key)
+			}
+		}
+		for len(adminLoginAttempts) >= maxAdminLoginTrackers {
+			for key := range adminLoginAttempts {
+				delete(adminLoginAttempts, key)
+				break
+			}
+		}
+	}
+
+	attempt := adminLoginAttempts[clientIP]
+	if attempt.WindowStarted.IsZero() || now.Sub(attempt.WindowStarted) >= adminLoginWindow {
+		attempt.Failures = 0
+		attempt.WindowStarted = now
+		attempt.LockedUntil = time.Time{}
+	}
+	attempt.Failures++
+	attempt.LastSeen = now
+	if attempt.Failures >= adminLoginFailureLimit {
+		attempt.LockedUntil = now.Add(adminLoginLockDuration)
+	}
+	adminLoginAttempts[clientIP] = attempt
+	if now.Before(attempt.LockedUntil) {
+		return max(1, int((attempt.LockedUntil.Sub(now)+time.Second-1)/time.Second))
+	}
+	return 0
+}
+
+func clearAdminLoginFailures(clientIP string) {
+	adminLoginAttemptsMu.Lock()
+	delete(adminLoginAttempts, clientIP)
+	adminLoginAttemptsMu.Unlock()
+}
+
+func cleanupAdminLoginAttempts(now time.Time) {
+	staleBefore := now.Add(-time.Hour)
+	adminLoginAttemptsMu.Lock()
+	for key, item := range adminLoginAttempts {
+		if item.LastSeen.Before(staleBefore) && !now.Before(item.LockedUntil) {
+			delete(adminLoginAttempts, key)
+		}
+	}
+	adminLoginAttemptsMu.Unlock()
+}
 
 func issueAdminToken() string {
 	b := make([]byte, 32)
@@ -143,6 +243,7 @@ func StartAdminSessionCleanup(interval time.Duration) {
 			if n := cleanupAdminSessions(); n > 0 {
 				log.Printf("[Admin] 已清理 %d 个过期会话 token", n)
 			}
+			cleanupAdminLoginAttempts(time.Now())
 		}
 	}()
 }
@@ -175,6 +276,12 @@ func (adm *AdminHandler) adminLogin(w http.ResponseWriter, r *http.Request) {
 		adm.adminMethodNotAllowed(w)
 		return
 	}
+	clientIP := adminClientIP(r)
+	if retryAfter := adminLoginRetryAfter(clientIP, time.Now()); retryAfter > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		writeJSON(w, http.StatusTooManyRequests, adminErr("登录尝试过多，请稍后再试"))
+		return
+	}
 	var body struct {
 		Password string `json:"password"`
 	}
@@ -187,11 +294,18 @@ func (adm *AdminHandler) adminLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if subtle.ConstantTimeCompare([]byte(strings.TrimSpace(body.Password)), []byte(expected)) != 1 {
-		log.Printf("[Security] 警告：后台登录失败，密码错误。来源 IP: %s", r.RemoteAddr)
+		retryAfter := recordAdminLoginFailure(clientIP, time.Now())
+		log.Printf("[Security] 警告：后台登录失败，密码错误。来源 IP: %s", clientIP)
+		if retryAfter > 0 {
+			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+			writeJSON(w, http.StatusTooManyRequests, adminErr("登录尝试过多，请稍后再试"))
+			return
+		}
 		writeJSON(w, http.StatusUnauthorized, adminErr("密码错误 (invalid password)"))
 		return
 	}
-	log.Printf("[Admin] 管理后台登录成功。来源 IP: %s", r.RemoteAddr)
+	clearAdminLoginFailures(clientIP)
+	log.Printf("[Admin] 管理后台登录成功。来源 IP: %s", clientIP)
 	cleanupAdminSessions()
 	tok := issueAdminToken()
 	http.SetCookie(w, &http.Cookie{

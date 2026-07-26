@@ -584,7 +584,6 @@ func TestToNativeSchema_UnknownTypeFallsBackToSTRING(t *testing.T) {
 	}
 }
 
-
 // TestConvertToolsFormat_NumericConstraints 端到端验证工具参数数值约束转字符串。
 func TestConvertToolsFormat_NumericConstraints(t *testing.T) {
 	geminiPayload := map[string]any{

@@ -4,7 +4,26 @@ import (
 	"io"
 	"strings"
 	"testing"
+
+	"github.com/bsfdsagfadg/vertex/internal/config"
 )
+
+func TestEffectiveMaxRetriesDefaultsTo429RetryInParallelPool(t *testing.T) {
+	cfg := config.DefaultConfig()
+	if got := effectiveMaxRetries(
+		cfg.MaxRetries,
+		cfg.ParallelPoolEnabled,
+		cfg.ParallelPoolRetryEnabled,
+	); got != 1 {
+		t.Fatalf("默认并发池应保留 1 次节点内重试，got %d", got)
+	}
+	if got := effectiveMaxRetries(cfg.MaxRetries, true, false); got != 0 {
+		t.Fatalf("显式关闭并发池重试时应为 0，got %d", got)
+	}
+	if got := effectiveMaxRetries(-1, false, true); got != 0 {
+		t.Fatalf("负数重试配置应安全归零，got %d", got)
+	}
+}
 
 // collectStream 把 scanStream 跑到底，收集所有 emit 出来的 chunk，返回 (chunks, 终止错误)。
 // onObject 用 processStreamingObject 的真实逻辑，确保测的是端到端的流式提取 + finishReason 过滤。

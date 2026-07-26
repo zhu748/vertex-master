@@ -58,6 +58,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ver
 | `max_request_mb` | 64 | 单次 HTTP 请求体上限（MiB，面板修改即时生效） |
 | `proxy_url` | 空 | 出站代理地址 (如 `http://127.0.0.1:7890`) |
 | `parallel_pool_enabled` | true | 是否开启并发竞速节点池 |
+| `parallel_pool_retry_enabled` | true | 并发池节点遇到 429 等可重试错误时是否在节点内自动重试 |
 | `parallel_pool_size` | 5 | 同时运行的候选代理上限 |
 | `proxy_failover_max_attempts` | 30 | 单次请求最多尝试的代理数 |
 | `parallel_pool_delay_ms` | 1000 | 后备代理启动间隔（毫秒） |
@@ -67,10 +68,12 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ver
 | `proxy_health_check_concurrency` | 5 | 健康巡检并发数 |
 | `proxy_health_check_timeout_seconds` | 8 | 单个代理巡检超时（秒） |
 
-> **提示**：在模型名（如 `gemini-3.5-flash`）前加上 `fake-` 或 `假流式-` 前缀，可将非流式模型伪装成流式输出。
+> **提示**：默认模型清单已包含稳定版 `gemini-3.6-flash`。在模型名前加上 `fake-` 或 `假流式-` 前缀，可将非流式模型伪装成流式输出。
+
+> **酒馆兼容**：通过 OpenAI 兼容接口调用 `gemini-3.6-flash` 时，服务会自动把末尾 `assistant` 预填充转换为 Gemini 3.6 支持的续写指令，并在流式或非流式回复中移除模型可能重复输出的前缀。其他模型保持原有预填充行为。
 
 详细配置说明请参阅 [部署指南](部署指南.md#配置怎么改)。
 
 ## ☁️ 部署到 Render
 
-仓库根目录已提供 `render.yaml`，可在上传 GitHub 后直接创建 Render Blueprint。部署时只需填写管理面板密码和 API Key；还可选填纯文本代理订阅 URL，服务启动后会立即拉取并默认每 60 分钟更新。远程订阅 URL 默认只能指向公网，订阅代理默认只接受公网 IP 字面量，避免误访问 Render 内部网络和 DNS 重绑定。Blueprint 默认同时运行最多 5 个候选代理、单次请求最多接力尝试 30 个节点、每 1000 毫秒启动一个后备节点，并每 15 分钟分批巡检代理健康。详细配置、免费方案限制和持久化说明见 [Render 部署指南](RENDER_DEPLOY.md)。
+仓库根目录已提供 `render.yaml`，可在上传 GitHub 后直接创建 Render Blueprint。部署时只需填写管理面板密码和 API Key；还可选填纯文本代理订阅 URL，服务启动后会立即拉取并默认每 60 分钟更新。远程订阅 URL 默认只能指向公网，订阅代理默认只接受公网 IP 字面量，避免误访问 Render 内部网络和 DNS 重绑定。Blueprint 默认同时运行最多 5 个候选代理、单次请求最多接力尝试 30 个节点、全局最多处理 16 个上游请求，并每 15 分钟分批巡检代理健康。`/healthz` 用于进程存活检查，Render 使用 `/readyz` 同时验证 SQLite 和 API Key 已就绪。详细配置、免费方案限制和持久化说明见 [Render 部署指南](RENDER_DEPLOY.md)。

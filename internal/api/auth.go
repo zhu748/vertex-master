@@ -245,6 +245,17 @@ func (m *APIKeyManager) List() ([]apiKeyEntry, error) {
 // Add 新增（或按 name 覆盖）一个密钥，写回文件并重载内存。
 // 先剔除同名旧条目，再追加，最后 load_keys。
 func (m *APIKeyManager) Add(name, key, description string) error {
+	name = strings.TrimSpace(name)
+	key = strings.TrimSpace(key)
+	description = strings.TrimSpace(description)
+	if name == "" || key == "" {
+		return fmt.Errorf("API key name and value are required")
+	}
+	if strings.Contains(name, ":") || strings.Contains(key, ":") ||
+		strings.ContainsAny(name, "\r\n") || strings.ContainsAny(key, "\r\n") ||
+		strings.ContainsAny(description, "\r\n") {
+		return fmt.Errorf("API key fields contain unsupported delimiters")
+	}
 	if isPlaceholderAPIKey(key) {
 		return fmt.Errorf("示例密钥不能作为有效 API Key")
 	}

@@ -1,5 +1,9 @@
 FROM golang:1.26-alpine AS builder
 
+ARG VPROXY_VERSION=dev
+ARG VPROXY_BUILD_COMMIT=unknown
+ARG VPROXY_BUILD_TIME=unknown
+
 WORKDIR /build
 
 COPY go.mod go.sum* ./
@@ -9,7 +13,9 @@ RUN go mod download
 COPY cmd/ ./cmd/
 COPY internal/ ./internal/
 
-RUN CGO_ENABLED=0 go build -buildvcs=false -trimpath -ldflags="-s -w" -o vproxy ./cmd/vproxy \
+RUN CGO_ENABLED=0 go build -buildvcs=false -trimpath \
+    -ldflags="-s -w -X main.version=${VPROXY_VERSION} -X main.buildCommit=${VPROXY_BUILD_COMMIT} -X main.buildTime=${VPROXY_BUILD_TIME}" \
+    -o vproxy ./cmd/vproxy \
     && go clean -cache -modcache -testcache
 
 FROM alpine:3.20

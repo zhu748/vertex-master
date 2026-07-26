@@ -108,28 +108,37 @@ func (adm *AdminHandler) adminGetNodes(w http.ResponseWriter, r *http.Request) {
 
 	sp := nodes.GetStickyPool()
 	poolStats := nodes.GetNodePoolStats(time.Now())
+	healthCycleEstimateMinutes := 0
+	if adm.cfg.ProxyHealthCheckEnabled() && enabledCount > 0 {
+		batchSize := max(1, adm.cfg.ProxyHealthCheckBatchSize())
+		rounds := (enabledCount + batchSize - 1) / batchSize
+		healthCycleEstimateMinutes = rounds * max(1, adm.cfg.ProxyHealthCheckIntervalMinutes())
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"nodes":                 pageNodes,
-		"health":                pageHealth,
-		"total":                 len(filtered),
-		"overall_total":         len(list),
-		"page":                  page,
-		"page_size":             pageSize,
-		"total_pages":           totalPages,
-		"enabled_count":         enabledCount,
-		"disabled_count":        disabledCount,
-		"sticky_pool_available": sp.AvailableCount(),
-		"sticky_pool_in_use":    sp.StaleCount(),
-		"sticky_node_priority":  adm.cfg.StickyNodePriority(),
-		"pool_stats":            poolStats,
-		"health_scheduler":      GetProxyHealthSchedulerStatus(),
-		"recent_proxy":          nodes.GetRecentProxyStatus(),
+		"nodes":                         pageNodes,
+		"health":                        pageHealth,
+		"total":                         len(filtered),
+		"overall_total":                 len(list),
+		"page":                          page,
+		"page_size":                     pageSize,
+		"total_pages":                   totalPages,
+		"enabled_count":                 enabledCount,
+		"disabled_count":                disabledCount,
+		"sticky_pool_available":         sp.AvailableCount(),
+		"sticky_pool_in_use":            sp.StaleCount(),
+		"sticky_node_priority":          adm.cfg.StickyNodePriority(),
+		"pool_stats":                    poolStats,
+		"health_scheduler":              GetProxyHealthSchedulerStatus(),
+		"health_cycle_estimate_minutes": healthCycleEstimateMinutes,
+		"recent_proxy":                  nodes.GetRecentProxyStatus(),
+		"recent_proxy_history":          nodes.GetRecentProxyHistory(10),
 	})
 }
 
 func (adm *AdminHandler) adminGetRecentProxy(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"recent_proxy": nodes.GetRecentProxyStatus(),
+		"recent_proxy":         nodes.GetRecentProxyStatus(),
+		"recent_proxy_history": nodes.GetRecentProxyHistory(10),
 	})
 }
 

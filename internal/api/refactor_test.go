@@ -166,6 +166,22 @@ func TestRefactor(t *testing.T) {
 				t.Errorf("%s missing timestamp", path)
 			}
 		}
+
+		resp, err := http.Get(fx.server.URL + "/readyz")
+		if err != nil {
+			t.Fatalf("GET /readyz: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("/readyz status=%d, want 200", resp.StatusCode)
+		}
+		var ready map[string]any
+		if err := json.NewDecoder(resp.Body).Decode(&ready); err != nil {
+			t.Fatal(err)
+		}
+		if ready["status"] != "ready" {
+			t.Fatalf("/readyz response=%v", ready)
+		}
 	})
 
 	t.Run("models_oai", func(t *testing.T) {
@@ -270,6 +286,35 @@ func TestRefactor(t *testing.T) {
 		content, _ := msg["content"].(string)
 		if content == "" {
 			t.Error("content should not be empty")
+		}
+	})
+
+	t.Run("chat_completion_fake_stream_empty_after_prefill_strip", func(t *testing.T) {
+		fx := newTestServer(t)
+
+		body := map[string]any{
+			"model": "fake-gemini-3.6-flash",
+			"messages": []any{
+				map[string]any{"role": "user", "content": "Continue"},
+				map[string]any{"role": "assistant", "content": "Hello! How can I help you today?"},
+			},
+			"stream": true,
+		}
+		resp := doPost(t, fx.server.URL+"/v1/chat/completions", "sk-test-key", body)
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status=%d, want 200", resp.StatusCode)
+		}
+		data, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		streamBody := string(data)
+		if !strings.Contains(streamBody, `"role":"assistant"`) ||
+			!strings.Contains(streamBody, `"finish_reason":"stop"`) ||
+			!strings.Contains(streamBody, "data: [DONE]") {
+			t.Fatalf("空续写也必须返回完整 SSE assistant/finish/DONE，got %q", streamBody)
 		}
 	})
 

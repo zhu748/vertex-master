@@ -315,3 +315,22 @@ func TestExamplePlaceholderKeyIsRejectedAndHidden(t *testing.T) {
 		t.Fatalf("placeholder should be hidden from admin list: entries=%#v err=%v", entries, err)
 	}
 }
+
+func TestAPIKeyManagerRejectsLineInjection(t *testing.T) {
+	t.Setenv("VPROXY_API_KEYS", filepath.Join(t.TempDir(), "api_keys.txt"))
+	manager := NewAPIKeyManager()
+	tests := []struct {
+		name        string
+		key         string
+		description string
+	}{
+		{name: "first\ninjected", key: "safe", description: ""},
+		{name: "first", key: "safe\ninjected", description: ""},
+		{name: "first", key: "safe", description: "ok\ninjected:secret"},
+	}
+	for _, test := range tests {
+		if err := manager.Add(test.name, test.key, test.description); err == nil {
+			t.Fatalf("line injection was accepted: %#v", test)
+		}
+	}
+}

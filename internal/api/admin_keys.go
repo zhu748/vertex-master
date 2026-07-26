@@ -47,25 +47,30 @@ func (adm *AdminHandler) adminAddKey(w http.ResponseWriter, r *http.Request) {
 	}
 	name := strings.TrimSpace(body.Name)
 	key := strings.TrimSpace(body.Key)
+	description := strings.TrimSpace(body.Description)
 	if name == "" {
 		writeJSON(w, http.StatusBadRequest, adminErr("名称不能为空 (name is required)"))
 		return
 	}
-	if strings.Contains(name, ":") {
-		writeJSON(w, http.StatusBadRequest, adminErr("名称不能包含冒号 (name must not contain ':')"))
+	if strings.Contains(name, ":") || strings.ContainsAny(name, "\r\n") {
+		writeJSON(w, http.StatusBadRequest, adminErr("名称不能包含冒号或换行符"))
 		return
 	}
 	if key == "" {
 		key = generateAPIKey()
-	} else if strings.Contains(key, ":") {
-		writeJSON(w, http.StatusBadRequest, adminErr("密钥不能包含冒号 (key must not contain ':')"))
+	} else if strings.Contains(key, ":") || strings.ContainsAny(key, "\r\n") {
+		writeJSON(w, http.StatusBadRequest, adminErr("密钥不能包含冒号或换行符"))
 		return
 	}
 	if isPlaceholderAPIKey(key) {
 		writeJSON(w, http.StatusBadRequest, adminErr("公开示例密钥不能使用，请生成或填写新的密钥"))
 		return
 	}
-	if err := adm.keys.Add(name, key, body.Description); err != nil {
+	if strings.ContainsAny(description, "\r\n") {
+		writeJSON(w, http.StatusBadRequest, adminErr("描述不能包含换行符"))
+		return
+	}
+	if err := adm.keys.Add(name, key, description); err != nil {
 		writeJSON(w, http.StatusInternalServerError, adminErr("写入密钥失败 (failed to write keys)"))
 		return
 	}

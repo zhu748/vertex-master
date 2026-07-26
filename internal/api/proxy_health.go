@@ -183,7 +183,9 @@ func runProxyHealthBatch(ctx context.Context, vc *vertex.VertexAIClient, cfg con
 // StartProxyHealthScheduler 启动低频、限量的代理健康巡检，不会永久禁用失败节点。
 func StartProxyHealthScheduler(vc *vertex.VertexAIClient, cfg config.ConfigProvider) func() {
 	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		const configPollInterval = 10 * time.Second
 		nextRun := time.Now().Add(10 * time.Second)
 		var previousInterval time.Duration
@@ -238,5 +240,8 @@ func StartProxyHealthScheduler(vc *vertex.VertexAIClient, cfg config.ConfigProvi
 			}
 		}
 	}()
-	return cancel
+	return func() {
+		cancel()
+		<-done
+	}
 }

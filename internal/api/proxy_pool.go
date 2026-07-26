@@ -368,6 +368,7 @@ func (adm *AdminHandler) refreshProxySubscription(ctx context.Context, item node
 // StartProxySubscriptionScheduler 启动持久化代理订阅的自动刷新器。
 func StartProxySubscriptionScheduler(vc *vertex.VertexAIClient, cfg config.ConfigProvider) func() {
 	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
 	adm := &AdminHandler{handler: handler{vc: vc, cfg: cfg}} //nolint:exhaustruct
 	refreshDue := func() {
 		items, err := nodes.DueProxySubscriptions(time.Now())
@@ -398,6 +399,7 @@ func StartProxySubscriptionScheduler(vc *vertex.VertexAIClient, cfg config.Confi
 		wg.Wait()
 	}
 	go func() {
+		defer close(done)
 		refreshDue()
 		ticker := time.NewTicker(time.Minute)
 		defer ticker.Stop()
@@ -410,5 +412,8 @@ func StartProxySubscriptionScheduler(vc *vertex.VertexAIClient, cfg config.Confi
 			}
 		}
 	}()
-	return cancel
+	return func() {
+		cancel()
+		<-done
+	}
 }

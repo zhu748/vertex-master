@@ -1,12 +1,46 @@
 package nodes
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/bsfdsagfadg/vertex/internal/db"
 )
+
+func TestFlushHealthPersistsQueuedState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "flush.db")
+	db.CloseDB()
+	if err := db.InitDB(path); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(db.CloseDB)
+	resetState()
+
+	proxyURI := "http://8.8.8.8:3128"
+	if err := MergeNodes([]Node{{Type: "http", Name: "flush", RawURI: proxyURI}}); err != nil {
+		t.Fatal(err)
+	}
+	RecordTest(proxyURI, true, 123.5, "")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := FlushHealth(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	var successCount int
+	var latency float64
+	if err := db.CurrentDB().QueryRow(
+		"SELECT success_count, last_test_ms FROM node_health WHERE raw_uri = ?",
+		proxyURI,
+	).Scan(&successCount, &latency); err != nil {
+		t.Fatal(err)
+	}
+	if successCount != 1 || latency != 123.5 {
+		t.Fatalf("persisted health = success:%d latency:%.1f", successCount, latency)
+	}
+}
 
 func TestNodesAndHealthReloadAfterDatabaseRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "restart.db")

@@ -40,6 +40,24 @@ func TestInvalidateModelsCacheReloads(t *testing.T) {
 	InvalidateModelsCache()
 }
 
+func TestDefaultModelsIncludeGemini36Flash(t *testing.T) {
+	t.Setenv("VPROXY_MODELS", filepath.Join(t.TempDir(), "missing-models.json"))
+	InvalidateModelsCache()
+	t.Cleanup(InvalidateModelsCache)
+
+	if got := BaseModels(); !contains(got, "gemini-3.6-flash") {
+		t.Fatalf("默认模型清单应包含 gemini-3.6-flash，got %v", got)
+	}
+	variants := ModelsWithFakeVariants()
+	for _, want := range []string{
+		"gemini-3.6-flash", "假流式-gemini-3.6-flash", "fake-gemini-3.6-flash",
+	} {
+		if !contains(variants, want) {
+			t.Fatalf("模型 API 清单应包含 %s，got %v", want, variants)
+		}
+	}
+}
+
 func contains(ss []string, target string) bool {
 	for _, s := range ss {
 		if s == target {

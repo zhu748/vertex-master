@@ -37,9 +37,44 @@ func safeResetTimer(t *time.Timer, d time.Duration) {
 }
 
 type raceResult[T any] struct {
-	uri string
-	val T
-	err error
+	uri     string
+	val     T
+	err     error
+	elapsed time.Duration
+}
+
+func proxyAttemptMilliseconds(elapsed time.Duration) float64 {
+	return float64(elapsed) / float64(time.Millisecond)
+}
+
+// recordProxyAttempt keeps proxy health separate from request semantics.
+// Invalid arguments, missing models, and other non-retryable upstream errors
+// describe the request rather than the proxy, so they must not cool down an
+// otherwise healthy node. The return value reports whether sticky state should
+// be evicted for this attempt.
+func recordProxyAttempt(uri string, err error, elapsed time.Duration) bool {
+	if uri == "" {
+		return false
+	}
+	if err == nil {
+		nodes.RecordTest(uri, true, proxyAttemptMilliseconds(elapsed), "")
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+
+	ve := asVertexError(err)
+	if ve != nil && ve.Kind == "ratelimit" {
+		nodes.RecordRateLimit(uri, 30)
+		return true
+	}
+	if ve != nil && !ve.IsRetryable() {
+		return false
+	}
+
+	nodes.RecordTest(uri, false, proxyAttemptMilliseconds(elapsed), err.Error())
+	return true
 }
 
 // RunRace runs a hedge race across multiple candidate nodes.
@@ -52,7 +87,8 @@ type raceResult[T any] struct {
 //   - hedge timer with static/dynamic delay
 //   - result collection: first success wins immediately
 //   - cancellation of losing candidates as soon as a winner is selected
-//   - error classification: 429 → RecordRateLimit, others → RecordTest(ok=false)
+//   - error classification: 429 → rate-limit cooldown; retryable connection/upstream
+//     errors → failed health; non-retryable request errors do not penalize the proxy
 //   - hard error (non-retryable) terminates the race early
 //   - context.Canceled errors are not counted as failures
 func RunRace[T any](ctx context.Context, cfg config.ConfigProvider,
@@ -105,9 +141,17 @@ func runRacePreferred[T any](
 			proxy = cfg.ProxyURL()
 		}
 		log.Printf("[Vertex] [RunParallel] 降级为单节点运行: %s", nodes.GetNodeName(proxy))
+		startedAt := time.Now()
 		value, err := run(ctx, proxy)
 		if err == nil {
-			nodes.RecordProxySuccess(proxy)
+			recordProxyAttempt(proxy, nil, time.Since(startedAt))
+			nodes.RecordProxySuccessForRequest(
+				proxy,
+				RequestIDFromContext(ctx),
+				proxyAttemptMilliseconds(time.Since(startedAt)),
+			)
+		} else {
+			recordProxyAttempt(proxy, err, time.Since(startedAt))
 		}
 		return value, err
 	}
@@ -149,9 +193,10 @@ func runRacePreferred[T any](
 		nodes.RecordSelection(uri)
 		atomic.AddInt32(&active, 1)
 		go func(u string) {
+			startedAt := time.Now()
 			v, err := run(nodeCtx, u)
 			select {
-			case resCh <- raceResult[T]{u, v, err}:
+			case resCh <- raceResult[T]{uri: u, val: v, err: err, elapsed: time.Since(startedAt)}:
 			case <-ctxRace.Done():
 			}
 		}(uri)
@@ -236,7 +281,7 @@ func runRacePreferred[T any](
 			name := nodes.GetNodeName(res.uri)
 
 			if res.err == nil {
-				nodes.RecordTest(res.uri, true, 50, "")
+				recordProxyAttempt(res.uri, nil, res.elapsed)
 				stickyPool.Add(res.uri)
 				if preferred != nil && !preferred(res.val) {
 					fallbackResults = append(fallbackResults, res.val)
@@ -250,7 +295,11 @@ func runRacePreferred[T any](
 					}
 					continue
 				}
-				nodes.RecordProxySuccess(res.uri)
+				nodes.RecordProxySuccessForRequest(
+					res.uri,
+					RequestIDFromContext(ctx),
+					proxyAttemptMilliseconds(res.elapsed),
+				)
 				log.Printf("[Racing] 竞速胜出节点: %s", name)
 				cli.UpdateReqWinner(RequestIDFromContext(ctx), name)
 				cli.UpdateReqState(RequestIDFromContext(ctx), "🟢 数据传输", "\033[32m", "已建立连接")
@@ -275,10 +324,8 @@ func runRacePreferred[T any](
 					if cfg.DebugMode() {
 						log.Printf("[Racing] 节点 %s 触发 429 API 限制，进入 30 秒短时歇息", name)
 					}
-					nodes.RecordRateLimit(res.uri, 30)
-					stickyPool.Evict(res.uri)
-				} else {
-					nodes.RecordTest(res.uri, false, 0, res.err.Error())
+				}
+				if recordProxyAttempt(res.uri, res.err, res.elapsed) {
 					stickyPool.Evict(res.uri)
 				}
 

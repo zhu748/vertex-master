@@ -143,7 +143,8 @@ func TestAdminGetRecentProxy(t *testing.T) {
 	))
 
 	var response struct {
-		Recent nodes.RecentProxyStatus `json:"recent_proxy"`
+		Recent  nodes.RecentProxyStatus  `json:"recent_proxy"`
+		History []nodes.RecentProxyEvent `json:"recent_proxy_history"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
@@ -155,6 +156,9 @@ func TestAdminGetRecentProxy(t *testing.T) {
 	}
 	if strings.Contains(response.Recent.Address, "secret") {
 		t.Fatalf("proxy credentials leaked: %q", response.Recent.Address)
+	}
+	if len(response.History) == 0 || response.History[0].Address != "8.8.4.4:3128" {
+		t.Fatalf("unexpected recent proxy history: %#v", response.History)
 	}
 }
 

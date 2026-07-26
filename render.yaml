@@ -4,7 +4,7 @@ services:
     runtime: docker
     plan: free
     dockerfilePath: ./Dockerfile
-    healthCheckPath: /healthz
+    healthCheckPath: /readyz
     envVars:
       - key: VPROXY_CONFIG
         value: /app/storage/config/config.json
@@ -20,6 +20,8 @@ services:
         value: 36800adeec862126
       - key: VPROXY_PROXY_FAILOVER_MAX_ATTEMPTS
         value: "30"
+      - key: VPROXY_MAX_CONCURRENT_REQUESTS
+        value: "16"
       - key: VPROXY_PROXY_HEALTH_CHECK_ENABLED
         value: "true"
       - key: VPROXY_ALLOW_PRIVATE_SUBSCRIPTION_URLS

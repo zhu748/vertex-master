@@ -142,6 +142,7 @@ func coerceTokenCount(v any) int {
 	}
 	return 0
 }
+
 // estimateTokens 递归或嵌套遍历 contents 计算估算的 token 总数。
 func estimateTokens(contents []any) int {
 	totalTokens := 0

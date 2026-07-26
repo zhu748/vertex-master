@@ -30,6 +30,7 @@ type AppConfig struct { //nolint:govet
 	MaxN                      int               `json:"max_n"`
 	MaxSpillMB                int               `json:"max_spill_mb"`
 	MaxRequestMB              int               `json:"max_request_mb"`
+	MaxConcurrentRequests     int               `json:"max_concurrent_requests"`
 	RequestTimeout            int               `json:"request_timeout"`
 
 	// 并发池与节点锁定配置
@@ -78,9 +79,11 @@ func DefaultConfig() AppConfig {
 		MaxN:                            8,
 		MaxSpillMB:                      2048,
 		MaxRequestMB:                    64,
+		MaxConcurrentRequests:           16,
 		RequestTimeout:                  180,
 		ParallelPoolEnabled:             true,
 		StickyNodePriority:              true,
+		ParallelPoolRetryEnabled:        true,
 		ParallelPoolSize:                5, // 最多同时运行 5 个候选
 		ParallelNodeTopK:                80,
 		ParallelPoolDelayDynamic:        false, // 建议默认关闭动态对冲，改为稳定的秒级接力
@@ -102,6 +105,8 @@ func DefaultConfig() AppConfig {
 var (
 	//nolint:gochecknoglobals // Global configuration cache
 	mu sync.Mutex
+	//nolint:gochecknoglobals // Serializes atomic config read-modify-write cycles.
+	settingsWriteMu sync.Mutex
 	//nolint:gochecknoglobals // Global configuration cache
 	cached *AppConfig
 	//nolint:gochecknoglobals // Global configuration cache
@@ -128,6 +133,8 @@ func ConfigPath() string { return configPath() }
 func ConfigDir() string { return filepath.Dir(configPath()) }
 
 func WriteSettings(updates map[string]any) error {
+	settingsWriteMu.Lock()
+	defer settingsWriteMu.Unlock()
 	path := configPath()
 	raw := map[string]any{}
 	if data, err := os.ReadFile(path); err == nil {
@@ -140,6 +147,7 @@ func WriteSettings(updates map[string]any) error {
 	clampIntSetting(raw, "parallel_pool_size", 1, 20)
 	clampIntSetting(raw, "parallel_pool_delay_ms", 100, 10000)
 	clampIntSetting(raw, "max_request_mb", 1, 1024)
+	clampIntSetting(raw, "max_concurrent_requests", 1, 1000)
 	clampIntSetting(raw, "proxy_failover_max_attempts", 1, 100)
 	clampIntSetting(raw, "proxy_health_check_interval_minutes", 1, 1440)
 	clampIntSetting(raw, "proxy_health_check_batch_size", 1, 500)
@@ -177,13 +185,20 @@ func writeJSONFile(path string, v any) error {
 	if dir := filepath.Dir(path); dir != "" {
 		_ = os.MkdirAll(dir, 0o755)
 	}
-	data, _ := json.MarshalIndent(v, "", "  ")
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal JSON: %w", err)
+	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return fmt.Errorf("error: %w", err)
 
 	}
-	return os.Rename(tmp, path) //nolint:wrapcheck
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err //nolint:wrapcheck
+	}
+	return nil
 }
 
 func Load() AppConfig {
@@ -217,6 +232,7 @@ func Load() AppConfig {
 			normalize("parallel_pool_size", &cfg.ParallelPoolSize, 1, 20, 5)
 			normalize("parallel_pool_delay_ms", &cfg.ParallelPoolDelayMs, 100, 10000, 1000)
 			normalize("max_request_mb", &cfg.MaxRequestMB, 1, 1024, 64)
+			normalize("max_concurrent_requests", &cfg.MaxConcurrentRequests, 1, 1000, 16)
 			normalize("proxy_failover_max_attempts", &cfg.ProxyFailoverMaxAttempts, 1, 100, 30)
 			normalize(
 				"proxy_health_check_interval_minutes",
@@ -289,6 +305,7 @@ func applyEnvironmentOverrides(cfg *AppConfig) {
 	applyEnvInt("VPROXY_PROXY_HEALTH_CHECK_CONCURRENCY", &cfg.ProxyHealthCheckConcurrency, 1, 20)
 	applyEnvInt("VPROXY_PROXY_HEALTH_CHECK_TIMEOUT_SECONDS", &cfg.ProxyHealthCheckTimeoutSeconds, 2, 60)
 	applyEnvInt("VPROXY_PROXY_FAILOVER_MAX_ATTEMPTS", &cfg.ProxyFailoverMaxAttempts, 1, 100)
+	applyEnvInt("VPROXY_MAX_CONCURRENT_REQUESTS", &cfg.MaxConcurrentRequests, 1, 1000)
 	if cfg.ProxyFailoverMaxAttempts < cfg.ParallelPoolSize {
 		log.Printf(
 			"[Config] 接力尝试数 %d 小于最大并发 %d，已提升为 %d",

@@ -116,7 +116,15 @@ func ConvertChatRequest(body map[string]any, cfg config.ConfigProvider) (string,
 		}
 	}
 
+	assistantPrefill := ""
+	if isGemini36Model(cfg.ResolveModelName(model)) {
+		contents, assistantPrefill = convertTrailingAssistantPrefill(contents)
+	}
+
 	geminiPayload := map[string]any{"contents": contents}
+	if assistantPrefill != "" {
+		geminiPayload[assistantPrefillMetadataKey] = assistantPrefill
+	}
 	if len(systemParts) > 0 {
 		geminiPayload["systemInstruction"] = map[string]any{"parts": systemParts}
 	}

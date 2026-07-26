@@ -1,7 +1,12 @@
 package api
 
 import (
+	"bytes"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"io/fs"
 	"log"
@@ -13,6 +18,11 @@ import (
 
 	"github.com/bsfdsagfadg/vertex/internal/admin"
 	"github.com/bsfdsagfadg/vertex/internal/config"
+)
+
+const (
+	maxBackgroundUploadBytes  = 10 << 20
+	maxBackgroundUploadPixels = 40_000_000
 )
 
 type AdminHandler struct {
@@ -317,6 +327,8 @@ func contentTypeFor(name string) string {
 		return "image/jpeg"
 	case strings.HasSuffix(name, ".png"):
 		return "image/png"
+	case strings.HasSuffix(name, ".gif"):
+		return "image/gif"
 	case strings.HasSuffix(name, ".css"):
 		return "text/css; charset=utf-8"
 	case strings.HasSuffix(name, ".js"):
@@ -332,7 +344,7 @@ func (adm *AdminHandler) adminUploadBg(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := r.ParseMultipartForm(10 << 20)
+	err := r.ParseMultipartForm(1 << 20)
 	if err != nil {
 		if isRequestBodyTooLarge(err) {
 			writeJSON(w, http.StatusRequestEntityTooLarge, adminErr("请求体过大 (request body too large)"))
@@ -341,6 +353,9 @@ func (adm *AdminHandler) adminUploadBg(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, adminErr("解析上传文件失败 (parse error)"))
 		return
 	}
+	if r.MultipartForm != nil {
+		defer func() { _ = r.MultipartForm.RemoveAll() }()
+	}
 
 	file, _, err := r.FormFile("file")
 	if err != nil {
@@ -348,33 +363,62 @@ func (adm *AdminHandler) adminUploadBg(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxBackgroundUploadBytes+1))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, adminErr("读取上传文件失败"))
+		return
+	}
+	if len(data) == 0 || len(data) > maxBackgroundUploadBytes {
+		writeJSON(w, http.StatusRequestEntityTooLarge, adminErr("背景图片不能超过 10 MiB"))
+		return
+	}
+	extension, err := validateBackgroundImage(data)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, adminErr(err.Error()))
+		return
+	}
 
 	assetsDir := filepath.Join(filepath.Dir(adm.cfg.ConfigDir()), "assets")
 	_ = os.MkdirAll(assetsDir, 0o755)
 
-	filename := fmt.Sprintf("background%d.jpg", time.Now().UnixMilli())
+	filename := fmt.Sprintf("background%d%s", time.Now().UnixNano(), extension)
 	targetPath := filepath.Join(assetsDir, filename)
 
-	out, err := os.Create(targetPath)
-	if err != nil {
+	if err := os.WriteFile(targetPath, data, 0o644); err != nil {
 		writeJSON(w, http.StatusInternalServerError, adminErr("无法保存文件 (create error)"))
-		return
-	}
-	defer out.Close()
-
-	if _, err = io.Copy(out, file); err != nil {
-		writeJSON(w, http.StatusInternalServerError, adminErr("保存文件失败 (copy error)"))
 		return
 	}
 
 	bgURL := "url('/assets/" + filename + "')"
 	err = config.WriteSettings(map[string]any{"background_image": bgURL})
 	if err != nil {
+		_ = os.Remove(targetPath)
 		writeJSON(w, http.StatusInternalServerError, adminErr("更新配置失败 (save config error)"))
 		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "url": bgURL})
+}
+
+func validateBackgroundImage(data []byte) (string, error) {
+	imageConfig, format, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		return "", fmt.Errorf("仅支持有效的 JPEG、PNG 或 GIF 图片")
+	}
+	if imageConfig.Width < 1 || imageConfig.Height < 1 ||
+		int64(imageConfig.Width)*int64(imageConfig.Height) > maxBackgroundUploadPixels {
+		return "", fmt.Errorf("背景图片像素尺寸过大，最多 4000 万像素")
+	}
+	switch format {
+	case "jpeg":
+		return ".jpg", nil
+	case "png":
+		return ".png", nil
+	case "gif":
+		return ".gif", nil
+	default:
+		return "", fmt.Errorf("不支持的背景图片格式")
+	}
 }
 
 func (adm *AdminHandler) adminDeleteBg(w http.ResponseWriter, r *http.Request) {
@@ -416,7 +460,10 @@ func (adm *AdminHandler) adminListBgs(w http.ResponseWriter, r *http.Request) {
 
 	var bgs []string
 	for _, f := range files {
-		if !f.IsDir() && strings.HasPrefix(f.Name(), "background") {
+		name := strings.ToLower(f.Name())
+		if !f.IsDir() && strings.HasPrefix(name, "background") &&
+			(strings.HasSuffix(name, ".jpg") || strings.HasSuffix(name, ".jpeg") ||
+				strings.HasSuffix(name, ".png") || strings.HasSuffix(name, ".gif")) {
 			bgs = append(bgs, f.Name())
 		}
 	}

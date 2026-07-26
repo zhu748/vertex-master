@@ -19,6 +19,9 @@ func resetAdminSessions() {
 	adminSessionsMu.Lock()
 	adminSessions = map[string]time.Time{}
 	adminSessionsMu.Unlock()
+	adminLoginAttemptsMu.Lock()
+	adminLoginAttempts = map[string]adminLoginAttempt{}
+	adminLoginAttemptsMu.Unlock()
 }
 
 // ---- session token：生成 / 校验 / 过期 / 登出 ----
@@ -89,6 +92,44 @@ func TestCleanupAdminSessions(t *testing.T) {
 	adminSessionsMu.Unlock()
 	if left != 2 {
 		t.Fatalf("清理后应剩 2 个有效 token，实际 %d", left)
+	}
+}
+
+func TestAdminLoginRateLimitIsScopedByClientIP(t *testing.T) {
+	resetAdminSessions()
+	t.Cleanup(resetAdminSessions)
+	t.Setenv("VPROXY_ADMIN_PASSWORD", "correct-password")
+	t.Setenv("RENDER", "")
+	t.Setenv("VPROXY_TRUST_PROXY_HEADERS", "")
+	config.InvalidateCache()
+	t.Cleanup(config.InvalidateCache)
+
+	adm := &AdminHandler{} //nolint:exhaustruct
+	login := func(ip, password string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/api/admin/login", bytes.NewBufferString(
+			`{"password":"`+password+`"}`,
+		))
+		req.RemoteAddr = ip + ":12345"
+		rec := httptest.NewRecorder()
+		adm.adminLogin(rec, req)
+		return rec
+	}
+
+	for attempt := 1; attempt < adminLoginFailureLimit; attempt++ {
+		if rec := login("198.51.100.10", "wrong"); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d status=%d, want 401", attempt, rec.Code)
+		}
+	}
+	locked := login("198.51.100.10", "wrong")
+	if locked.Code != http.StatusTooManyRequests || locked.Header().Get("Retry-After") == "" {
+		t.Fatalf("lock response status=%d headers=%v", locked.Code, locked.Header())
+	}
+	if rec := login("198.51.100.10", "correct-password"); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("locked client bypassed limiter with correct password: status=%d", rec.Code)
+	}
+	if rec := login("198.51.100.11", "correct-password"); rec.Code != http.StatusOK {
+		t.Fatalf("different client IP should remain able to log in: status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 

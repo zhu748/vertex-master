@@ -33,7 +33,7 @@ func (c *VertexAIClient) CompleteChat(ctx context.Context, model string, geminiP
 	// Preferred STOP results are recorded by the race engine. If all candidates
 	// are soft fallbacks, record the exact fallback selected here.
 	if candidateFinish(selected.resp) != "STOP" {
-		nodes.RecordProxySuccess(selected.proxyURI)
+		nodes.RecordProxySuccessForRequest(selected.proxyURI, RequestIDFromContext(ctx), 0)
 	}
 	return selected.resp, nil
 }

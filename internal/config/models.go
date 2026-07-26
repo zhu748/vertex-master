@@ -30,7 +30,7 @@ var defaultModels = []string{
 	"gemini-2.5-flash-image", "gemini-2.5-pro", "gemini-3-flash-preview",
 	"gemini-3-pro-image-preview", "gemini-3-pro-image", "gemini-3.1-flash-lite",
 	"gemini-3.1-flash-image-preview", "gemini-3.1-flash-image", "gemini-3.1-pro-preview",
-	"gemini-3.5-flash", "imagen-3.0-capability", "imagen-4.0-generate-001",
+	"gemini-3.5-flash", "gemini-3.6-flash", "imagen-3.0-capability", "imagen-4.0-generate-001",
 	"imagen-4.0-ultra-generate-001", "imagen-4.0-fast-generate-001", "virtual-try-on-001",
 	"lyria-002", "veo-2-generate-001", "veo-3-generate-001", "veo-3-fast-generate-001",
 }
@@ -44,6 +44,8 @@ type modelsFile struct { //nolint:govet
 var (
 	//nolint:gochecknoglobals // Global model cache
 	modelsMu sync.Mutex
+	//nolint:gochecknoglobals // Serializes atomic model file writes.
+	modelsWriteMu sync.Mutex
 	//nolint:gochecknoglobals // Global model cache
 	cachedModels *modelsFile
 	//nolint:gochecknoglobals // Global model cache
@@ -85,7 +87,7 @@ func loadModelsFile() *modelsFile {
 	if data, err := os.ReadFile(modelsPath()); err == nil {
 		var parsed modelsFile
 		if errUnm := json.Unmarshal(data, &parsed); errUnm != nil { //nolint:govet
-			log.Printf("[Config] 解析 models.json 失败: %v", err)
+			log.Printf("[Config] 解析 models.json 失败: %v", errUnm)
 		} else if len(parsed.Models) > 0 {
 			mf.Models = parsed.Models
 			if parsed.AliasMap != nil {
@@ -143,6 +145,8 @@ func ResolveModelName(model string) string {
 // WriteModels 把模型清单与别名映射写回 models.json（原子写）并清空缓存，使下次读取即生效。
 // 写盘 + 立即热重载。aliasMap 为 nil 时写空表。
 func WriteModels(models []string, aliasMap map[string]string) error {
+	modelsWriteMu.Lock()
+	defer modelsWriteMu.Unlock()
 	if aliasMap == nil {
 		aliasMap = map[string]string{}
 	}

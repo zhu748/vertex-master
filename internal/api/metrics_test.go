@@ -27,7 +27,7 @@ func TestWithMetrics(t *testing.T) {
 		t.Fatalf("context 里的 request-id 应与响应头一致，got ctx=%q header=%q", seenReqID, rec.Header().Get("X-Request-Id"))
 	}
 
-	for _, path := range []string{"/health", "/healthz"} {
+	for _, path := range []string{"/health", "/healthz", "/readyz"} {
 		rec := httptest.NewRecorder()
 		mw.withMetrics(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)

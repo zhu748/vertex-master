@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bsfdsagfadg/vertex/internal/cli"
@@ -16,6 +17,33 @@ import (
 type middleware struct {
 	cfg  config.ConfigProvider
 	keys *APIKeyManager
+	gate requestConcurrencyGate
+}
+
+type requestConcurrencyGate struct {
+	mu     sync.Mutex
+	active int
+}
+
+func (g *requestConcurrencyGate) tryAcquire(limit int) bool {
+	if limit < 1 {
+		limit = 1
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.active >= limit {
+		return false
+	}
+	g.active++
+	return true
+}
+
+func (g *requestConcurrencyGate) release() {
+	g.mu.Lock()
+	if g.active > 0 {
+		g.active--
+	}
+	g.mu.Unlock()
 }
 
 type statusWriter struct {
@@ -81,6 +109,29 @@ func (m *middleware) withCORS(next http.Handler) http.Handler {
 	})
 }
 
+func (m *middleware) withSecurityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		w.Header().Set(
+			"Content-Security-Policy",
+			"default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; "+
+				"form-action 'self'; connect-src 'self'; img-src 'self' data: blob: https:; "+
+				"style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'",
+		)
+		if requestIsHTTPS(r) {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
+		if r.URL.Path == "/admin" || strings.HasPrefix(r.URL.Path, "/admin/") ||
+			strings.HasPrefix(r.URL.Path, "/api/admin/") {
+			w.Header().Set("Cache-Control", "no-store")
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (m *middleware) withBodyLimit(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		limit := int64(m.cfg.MaxRequestMB()) << 20
@@ -104,8 +155,38 @@ func (m *middleware) withBodyLimit(next http.Handler) http.Handler {
 	})
 }
 
+func (m *middleware) withConcurrencyLimit(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isUpstreamWorkloadPath(r.URL.Path) || r.Method == http.MethodOptions {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if !m.gate.tryAcquire(m.cfg.MaxConcurrentRequests()) {
+			w.Header().Set("Retry-After", "1")
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]any{
+				"code":    http.StatusServiceUnavailable,
+				"message": "服务繁忙，请稍后重试 (server overloaded)",
+				"status":  "UNAVAILABLE",
+			}})
+			return
+		}
+		defer m.gate.release()
+		next.ServeHTTP(w, r)
+	})
+}
+
+func isUpstreamWorkloadPath(path string) bool {
+	switch path {
+	case "/v1/chat/completions", "/v1/images/generations", "/v1/images/edits",
+		"/v1/images/variations", "/v1/audio/speech":
+		return true
+	default:
+		return strings.HasPrefix(path, "/v1beta/models/") || strings.HasPrefix(path, "/v1/models/")
+	}
+}
+
 func (m *middleware) withMetrics(next http.Handler) http.Handler {
-	skip := map[string]bool{"/": true, "/health": true, "/healthz": true}
+	skip := map[string]bool{"/": true, "/health": true, "/healthz": true, "/readyz": true}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if skip[r.URL.Path] || isAdminPath(r.URL.Path) {
 			next.ServeHTTP(w, r)
@@ -125,7 +206,7 @@ func (m *middleware) withMetrics(next http.Handler) http.Handler {
 }
 
 func (m *middleware) withAPIKey(next http.Handler) http.Handler {
-	excluded := map[string]bool{"/": true, "/health": true, "/healthz": true, "/favicon.ico": true}
+	excluded := map[string]bool{"/": true, "/health": true, "/healthz": true, "/readyz": true, "/favicon.ico": true}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if excluded[r.URL.Path] || isAdminPath(r.URL.Path) {
 			next.ServeHTTP(w, r)

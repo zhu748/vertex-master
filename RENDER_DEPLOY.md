@@ -29,6 +29,7 @@
 
 | 环境变量 | 默认值 | 说明 |
 |---|---:|---|
+| `VPROXY_MAX_CONCURRENT_REQUESTS` | `16` | 全局同时执行的上游请求上限，超限时返回 `503` 和 `Retry-After` |
 | `VPROXY_PROXY_FAILOVER_MAX_ATTEMPTS` | `30` | 单次请求最多尝试的代理节点数 |
 | `VPROXY_PROXY_HEALTH_CHECK_ENABLED` | `true` | 启用后台自动健康巡检 |
 | `VPROXY_ALLOW_PRIVATE_SUBSCRIPTION_URLS` | `false` | 是否允许订阅 URL 和订阅代理指向私网/本机；仅可信内网自托管场景才应开启 |
@@ -39,7 +40,7 @@
 | `VPROXY_PROXY_HEALTH_CHECK_CONCURRENCY` | `5` | 每轮巡检的最大并发数 |
 | `VPROXY_PROXY_HEALTH_CHECK_TIMEOUT_SECONDS` | `8` | 单个代理巡检超时（秒） |
 
-代理池本身默认最多同时运行 `5` 个候选节点、每次请求最多接力尝试 `30` 个节点，并以 `1000` 毫秒的间隔启动后备节点。前三项可在管理面板的「设置」页分别通过 `parallel_pool_size`、`proxy_failover_max_attempts` 和 `parallel_pool_delay_ms` 调整。
+代理池本身默认最多同时运行 `5` 个候选节点、每次请求最多接力尝试 `30` 个节点，并以 `1000` 毫秒的间隔启动后备节点；节点遇到 429 时默认允许 `1` 次节点内重试。Blueprint 中声明的设置由 Render 环境变量托管，面板会显示“环境托管”并锁定对应输入框；请在 Render 的 **Environment** 页面修改。未由环境变量托管的 `parallel_pool_size`、`parallel_pool_delay_ms`、`parallel_pool_retry_enabled` 等设置仍可在面板调整，但免费实例重启后本地修改会丢失。
 
 远程订阅直连拉取会校验初始地址、每次重定向和实际拨号 IP。订阅产生的代理端点默认只接受公网 IP 字面量，并过滤回环、私网、链路本地和保留地址，从而避免代理域名在导入后发生 DNS 重绑定。示例 jsDelivr 地址中的代理行自带协议且使用 IP，可直接使用。
 
@@ -73,11 +74,11 @@ git push -u origin main
    - `VPROXY_PROXY_SUBSCRIPTION_URL`（可选，不使用代理池时留空）
 5. 代理类型、订阅刷新、接力尝试和健康巡检已有默认值；如需覆盖，可在 `render.yaml` 或服务的 **Environment** 页面修改。
 6. 创建 Blueprint 并等待构建完成。
-7. 打开 `https://<你的服务名>.onrender.com/healthz`，返回 `"status":"healthy"` 即表示部署成功。
+7. 打开 `https://<你的服务名>.onrender.com/readyz`，返回 `"status":"ready"` 即表示数据库和 API Key 均已就绪。`/healthz` 只表示进程仍在运行。
 
 设置代理 URL 后，服务会在启动时创建“环境变量代理池”并立即拉取一次，此后默认每 60 分钟刷新。后台健康巡检默认每 15 分钟从待检测节点中最多选择 50 个，以不超过 5 个并发逐一检测；请求遇到不可用代理时，会在本次请求的尝试上限内自动接力到后备节点。在管理面板中可以查看状态、手动刷新和调整运行参数；修改、停用或移除环境变量托管订阅时，请在 Render 环境变量中操作并重新部署。
 
-通过 `VPROXY_API_KEY` 设置的密钥会在面板中显示为“环境托管”，只展示脱敏指纹，不会把环境变量明文发送到浏览器，也不能在面板中删除。代理页顶部会每 2 秒刷新“最近实际使用的代理”；由于代理池可能同时竞速多个候选节点，该状态表示最近一次成功响应的胜出代理，而不是唯一的进程级连接。
+通过 `VPROXY_API_KEY` 设置的密钥会在面板中显示为“环境托管”，只展示脱敏指纹，不会把环境变量明文发送到浏览器，也不能在面板中删除。代理页顶部会每 2 秒刷新“最近实际使用的代理”，页面进入后台后会暂停轮询；由于代理池可能同时竞速多个候选节点，该状态表示最近一次成功响应的胜出代理，而不是唯一的进程级连接。节点摘要还会根据启用节点数、巡检批次和间隔估算完整巡检全池所需时间。
 
 管理后台地址：
 
@@ -113,6 +114,8 @@ https://<你的服务名>.onrender.com/v1
 - 日志显示规则未同意并且容器退出：检查 `VPROXY_RULES_HASH` 是否与上文完全一致。
 - Render 报告没有监听端口：不要删除 Render 自动注入的 `PORT`；程序会自动监听该端口。
 - API 返回 401：检查请求头是否为 `Authorization: Bearer <VPROXY_API_KEY>`，且密钥是否与 Render 环境变量完全一致。
+- `/healthz` 正常但 `/readyz` 返回 503：检查 `VPROXY_API_KEY` 是否非空，以及日志中是否存在 SQLite 初始化或访问错误。
+- API 返回 503 且带 `Retry-After: 1`：实例已达到 `VPROXY_MAX_CONCURRENT_REQUESTS`，请稍后重试或谨慎提高并发上限。
 - 免费实例唤醒后代理列表暂时为空：等待环境变量订阅完成首次拉取，或进入管理面板手动刷新。
 - 大型代理池巡检造成外联流量过高：调低 `VPROXY_PROXY_HEALTH_CHECK_BATCH_SIZE`、调大 `VPROXY_PROXY_HEALTH_CHECK_INTERVAL_MINUTES`，或将 `VPROXY_PROXY_HEALTH_CHECK_ENABLED` 设为 `false`。
 - 私有订阅 URL 被拒绝：默认安全策略只允许公网目标；仅在订阅和代理来源完全可信时设置 `VPROXY_ALLOW_PRIVATE_SUBSCRIPTION_URLS=true`。

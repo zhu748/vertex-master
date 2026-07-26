@@ -150,6 +150,47 @@ func TestAdminPutSettingsAcceptsValidProxySettings(t *testing.T) {
 	}
 }
 
+func TestAdminSettingsExposeAndRejectEnvironmentManagedFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("VPROXY_CONFIG", path)
+	t.Setenv("VPROXY_PROXY_HEALTH_CHECK_INTERVAL_MINUTES", "45")
+	config.InvalidateCache()
+	t.Cleanup(config.InvalidateCache)
+	adm := newAdminSettingsTestHandler()
+
+	getRec := httptest.NewRecorder()
+	adm.adminGetSettings(getRec, httptest.NewRequest(http.MethodGet, "/api/admin/settings", nil))
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("get settings status=%d body=%s", getRec.Code, getRec.Body.String())
+	}
+	var response struct {
+		ManagedFields map[string]string `json:"managed_fields"`
+	}
+	if err := json.Unmarshal(getRec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if got := response.ManagedFields["proxy_health_check_interval_minutes"]; got != "VPROXY_PROXY_HEALTH_CHECK_INTERVAL_MINUTES" {
+		t.Fatalf("managed field metadata = %q", got)
+	}
+
+	putRec := httptest.NewRecorder()
+	adm.adminPutSettings(
+		putRec,
+		httptest.NewRequest(
+			http.MethodPut,
+			"/api/admin/settings",
+			bytes.NewBufferString(`{"settings":{"proxy_health_check_interval_minutes":30}}`),
+		),
+	)
+	if putRec.Code != http.StatusConflict ||
+		!strings.Contains(putRec.Body.String(), "VPROXY_PROXY_HEALTH_CHECK_INTERVAL_MINUTES") {
+		t.Fatalf("managed update status=%d body=%s", putRec.Code, putRec.Body.String())
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("managed setting must not be written locally: stat err=%v", err)
+	}
+}
+
 func newAdminSettingsTestHandler() *AdminHandler {
 	cfg := config.DefaultConfig()
 	return &AdminHandler{handler: handler{cfg: config.StaticProvider(cfg)}} //nolint:exhaustruct

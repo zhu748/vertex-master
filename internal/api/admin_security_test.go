@@ -2,15 +2,64 @@ package api
 
 import (
 	"bytes"
+	"image"
+	"image/color"
+	"image/png"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/bsfdsagfadg/vertex/internal/config"
 )
+
+func TestValidateBackgroundImage(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 2, 2))
+	img.Set(0, 0, color.White)
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, img); err != nil {
+		t.Fatal(err)
+	}
+	if extension, err := validateBackgroundImage(encoded.Bytes()); err != nil || extension != ".png" {
+		t.Fatalf("valid PNG = extension:%q err:%v", extension, err)
+	}
+	if _, err := validateBackgroundImage([]byte("<script>alert(1)</script>")); err == nil {
+		t.Fatal("non-image upload should be rejected")
+	}
+}
+
+func TestAdminListBgsOnlyReturnsSupportedImages(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config", "config.json")
+	t.Setenv("VPROXY_CONFIG", configPath)
+	assetsDir := filepath.Join(root, "assets")
+	if err := os.MkdirAll(assetsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"background1.png", "background2.gif", "background.txt", "other.jpg"} {
+		if err := os.WriteFile(filepath.Join(assetsDir, name), []byte("test"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	adm := &AdminHandler{handler: handler{cfg: config.StaticProvider(config.DefaultConfig())}} //nolint:exhaustruct
+	rec := httptest.NewRecorder()
+	adm.adminListBgs(rec, httptest.NewRequest(http.MethodGet, "/api/admin/list-bgs", nil))
+	body := rec.Body.String()
+	for _, want := range []string{"background1.png", "background2.gif"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("supported background %q missing from %s", want, body)
+		}
+	}
+	for _, rejected := range []string{"background.txt", "other.jpg"} {
+		if strings.Contains(body, rejected) {
+			t.Fatalf("unsupported background %q leaked into %s", rejected, body)
+		}
+	}
+}
 
 func TestBodyLimitHotReloadAndChunkedResponse(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
@@ -154,4 +203,57 @@ func TestAdminRoutesRejectWrongMethods(t *testing.T) {
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("wrong method status=%d body=%s", rec.Code, rec.Body.String())
 	}
+}
+
+func TestSecurityHeaders(t *testing.T) {
+	mw := &middleware{} //nolint:exhaustruct
+	req := httptest.NewRequest(http.MethodGet, "https://app.example/admin", nil)
+	req.Header.Set("X-Forwarded-Proto", "https")
+	rec := httptest.NewRecorder()
+	mw.withSecurityHeaders(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})).ServeHTTP(rec, req)
+
+	for _, header := range []string{
+		"Content-Security-Policy", "X-Content-Type-Options", "X-Frame-Options",
+		"Referrer-Policy", "Permissions-Policy", "Strict-Transport-Security",
+	} {
+		if rec.Header().Get(header) == "" {
+			t.Errorf("missing security header %s", header)
+		}
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("admin cache control = %q, want no-store", got)
+	}
+}
+
+func TestConcurrencyLimitRejectsExcessUpstreamWork(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.MaxConcurrentRequests = 1
+	mw := &middleware{cfg: config.StaticProvider(cfg)} //nolint:exhaustruct
+	started := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan struct{})
+	limited := mw.withConcurrencyLimit(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(started)
+		<-release
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	go func() {
+		defer close(done)
+		limited.ServeHTTP(
+			httptest.NewRecorder(),
+			httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
+		)
+	}()
+	<-started
+
+	rec := httptest.NewRecorder()
+	limited.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil))
+	if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") != "1" {
+		t.Fatalf("overload response status=%d headers=%v body=%s", rec.Code, rec.Header(), rec.Body.String())
+	}
+	close(release)
+	<-done
 }

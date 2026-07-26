@@ -11,7 +11,7 @@ document.getElementById('nodesBody').addEventListener('click', function (e) {
 });
 
 var curNodePage = 1;
-var nodePageSize = 50;
+var nodePageSize = window.matchMedia && window.matchMedia('(max-width: 720px)').matches ? 25 : 50;
 var totalNodePages = 1;
 var totalNodeCount = 0;
 var filteredNodeCount = 0;
@@ -53,7 +53,7 @@ function updateRecentProxyRowBadges() {
   });
 }
 
-function renderRecentProxy(status) {
+function renderRecentProxy(status, history) {
   status = status || {};
   var name = document.getElementById('recentProxyName');
   var address = document.getElementById('recentProxyAddress');
@@ -77,17 +77,53 @@ function renderRecentProxy(status) {
     updated.textContent = recentProxyAge(status.last_used_at);
   }
   updateRecentProxyRowBadges();
+  renderRecentProxyHistory(history || []);
+}
+
+function renderRecentProxyHistory(history) {
+  var container = document.getElementById('recentProxyHistory');
+  if (!container) return;
+  container.textContent = '';
+  if (!history.length) {
+    var empty = document.createElement('div');
+    empty.className = 'desc';
+    empty.textContent = '暂无路由记录';
+    container.appendChild(empty);
+    return;
+  }
+  history.forEach(function (event) {
+    var row = document.createElement('div');
+    row.className = 'recent-proxy-history-row';
+    var route = document.createElement('div');
+    route.className = 'recent-proxy-history-route';
+    var name = document.createElement('strong');
+    name.textContent = event.name || (event.direct ? '直连' : '代理节点');
+    var address = document.createElement('span');
+    address.textContent = event.address || '—';
+    route.appendChild(name);
+    route.appendChild(address);
+    var meta = document.createElement('div');
+    meta.className = 'recent-proxy-history-meta';
+    var values = [];
+    if (event.latency_ms) values.push(Math.round(event.latency_ms) + 'ms');
+    if (event.request_id) values.push('#' + event.request_id.slice(-8));
+    values.push(recentProxyAge(event.used_at));
+    meta.textContent = values.join(' · ');
+    row.appendChild(route);
+    row.appendChild(meta);
+    container.appendChild(row);
+  });
 }
 
 async function loadRecentProxyStatus() {
   try {
     var data = await API.nodes.current();
-    renderRecentProxy(data.recent_proxy);
+    renderRecentProxy(data.recent_proxy, data.recent_proxy_history);
   } catch (e) { }
 }
 
 function startRecentProxyPolling() {
-  if (recentProxyTimer) return;
+  if (recentProxyTimer || document.hidden) return;
   recentProxyTimer = setInterval(loadRecentProxyStatus, 2000);
 }
 
@@ -96,6 +132,16 @@ function stopRecentProxyPolling() {
   clearInterval(recentProxyTimer);
   recentProxyTimer = null;
 }
+
+document.addEventListener('visibilitychange', function () {
+  var page = document.getElementById('page-nodes');
+  if (document.hidden || !page || page.classList.contains('hidden')) {
+    stopRecentProxyPolling();
+    return;
+  }
+  loadRecentProxyStatus();
+  startRecentProxyPolling();
+});
 
 function setActionBusy(button, busy, busyText) {
   if (!button) return;
@@ -164,6 +210,7 @@ if (nodeSearchInput) {
 });
 var nodePageSizeInput = document.getElementById('nodePageSize');
 if (nodePageSizeInput) {
+  nodePageSizeInput.value = String(nodePageSize);
   nodePageSizeInput.addEventListener('change', function () {
     nodePageSize = Number(this.value) || 50;
     curNodePage = 1;
@@ -250,7 +297,7 @@ async function loadNodes() {
   }
   if (loadSequence !== nodesLoadSequence) return;
   const nodes = d.nodes || [];
-  renderRecentProxy(d.recent_proxy);
+  renderRecentProxy(d.recent_proxy, d.recent_proxy_history);
   startRecentProxyPolling();
   cachedNodesList = nodes;
   totalNodeCount = Number(d.overall_total !== undefined ? d.overall_total : d.total) || 0;
@@ -288,6 +335,12 @@ async function loadNodes() {
         ? ' · 上轮巡检 ' + (scheduler.checked || 0) + ' 个（可用 ' +
           (scheduler.succeeded || 0) + ' / 失败 ' + (scheduler.failed || 0) + '）'
         : ' · 等待首次自动巡检');
+    var cycleMinutes = Number(d.health_cycle_estimate_minutes) || 0;
+    if (cycleMinutes > 0) {
+      summary += cycleMinutes >= 60
+        ? ' · 全池约 ' + (cycleMinutes / 60).toFixed(cycleMinutes % 60 ? 1 : 0) + ' 小时'
+        : ' · 全池约 ' + cycleMinutes + ' 分钟';
+    }
   }
   if (filteredNodeCount !== totalNodeCount) summary += '，筛选结果 ' + filteredNodeCount + ' 个';
   document.getElementById('nodesSummary').textContent = summary;

@@ -31,6 +31,30 @@ func buildGenerationConfig(geminiPayload map[string]any) map[string]any {
 	return convertToGeminiFormat(final)
 }
 
+// applyModelGenerationCompatibility removes parameters deprecated by the
+// Gemini 3.6 family. The public API currently ignores these sampling fields
+// and documents that future revisions may reject them, so stripping them keeps
+// OpenAI clients with legacy defaults compatible with the new model.
+func applyModelGenerationCompatibility(model string, cfg map[string]any) {
+	if !isGemini36Model(model) {
+		return
+	}
+	for _, key := range []string{"temperature", "topP", "topK", "candidateCount"} {
+		delete(cfg, key)
+	}
+	if thinking, ok := cfg["thinkingConfig"].(map[string]any); ok {
+		delete(thinking, "thinkingBudget")
+		if len(thinking) == 0 {
+			delete(cfg, "thinkingConfig")
+		}
+	}
+}
+
+func isGemini36Model(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	return strings.HasPrefix(model, "gemini-3.6-")
+}
+
 // convertToGeminiFormat 把 generationConfig 转为 Gemini 期望格式。
 func convertToGeminiFormat(cfg map[string]any) map[string]any {
 	out := map[string]any{}
