@@ -1,0 +1,107 @@
+name: Release
+
+# 推送 v* 标签时构建多平台产物并发布 Release；
+# 也可在 Actions 页面手动触发（workflow_dispatch）指定版本号试跑。
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（如 v1.0.0）'
+        required: true
+        type: string
+      draft:
+        description: '发布为草稿（不直接公开）'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    name: 构建前校验
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Check formatting
+        run: test -z "$(gofmt -l ./cmd ./internal)"
+      - name: Check JavaScript syntax
+        run: |
+          for file in internal/admin/assets/*.js; do
+            node --check "$file"
+          done
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test ./... -count=1
+      - name: Race detector
+        run: go test -race ./... -count=1
+
+  build:
+    name: 交叉编译与打包
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Android 需要 CGO + NDK；ubuntu runner 自带，路径写入 ANDROID_NDK_HOME
+      # 供 scripts/build-release.sh 使用。
+      - name: Resolve Android NDK
+        run: |
+          if [ -n "${ANDROID_NDK_LATEST_HOME:-}" ]; then
+            echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+          elif [ -n "${ANDROID_NDK_ROOT:-}" ]; then
+            echo "ANDROID_NDK_HOME=$ANDROID_NDK_ROOT" >> "$GITHUB_ENV"
+          else
+            echo "未找到 Android NDK，将跳过 android/arm64 产物" >&2
+          fi
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "构建版本: $VERSION"
+
+      - name: Build release packages
+        run: bash scripts/build-release.sh "${{ steps.version.outputs.version }}"
+
+      # 产物较多，附一份 SHA256 清单便于用户校验下载完整性。
+      - name: Generate checksums
+        working-directory: dist
+        run: |
+          sha256sum *.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-packages
+          path: dist/*
+          retention-days: 7
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: ${{ steps.version.outputs.version }}
+          draft: ${{ github.event_name == 'workflow_dispatch' && inputs.draft }}
+          generate_release_notes: true
+          files: dist/*

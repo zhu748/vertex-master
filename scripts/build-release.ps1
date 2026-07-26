@@ -120,7 +120,8 @@ Build-Release -goos windows -goarch 386   -bin vertex-proxy.exe -pkg vertex-prox
 Build-Release -goos linux -goarch amd64 -bin vertex-proxy -pkg vertex-proxy-linux-amd64 -files @("scripts\start.sh", "scripts\vertex-proxy.service", "scripts\setup.sh")
 Build-Release -goos linux -goarch 386   -bin vertex-proxy -pkg vertex-proxy-linux-386   -files @("scripts\start.sh", "scripts\vertex-proxy.service", "scripts\setup.sh")
 Build-Release -goos linux -goarch arm64 -bin vertex-proxy -pkg vertex-proxy-linux-arm64 -files @("scripts\start.sh", "scripts\vertex-proxy.service", "scripts\setup.sh")
-Build-Release -goos linux -goarch arm32 -bin vertex-proxy -pkg vertex-proxy-linux-arm32 -files @("scripts\start.sh", "scripts\vertex-proxy.service", "scripts\setup.sh")
+# 32 位 ARM 的 GOARCH 是 arm（不是 arm32）；包名仍用 arm32 以便用户区分位数。
+Build-Release -goos linux -goarch arm -bin vertex-proxy -pkg vertex-proxy-linux-arm32 -files @("scripts\start.sh", "scripts\vertex-proxy.service", "scripts\setup.sh")
 
 # Android
 Build-Release -goos android -goarch arm64 -bin vertex-proxy -pkg vertex-proxy-android-arm64 -files @("scripts\start.sh", "scripts\setup.sh")

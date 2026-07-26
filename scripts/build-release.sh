@@ -94,7 +94,8 @@ build windows 386   vertex-proxy.exe vertex-proxy-windows-386   scripts/启动.b
 build linux   amd64 vertex-proxy     vertex-proxy-linux-amd64   scripts/start.sh scripts/vertex-proxy.service scripts/setup.sh
 build linux   386   vertex-proxy     vertex-proxy-linux-386     scripts/start.sh scripts/vertex-proxy.service scripts/setup.sh
 build linux   arm64 vertex-proxy     vertex-proxy-linux-arm64   scripts/start.sh scripts/vertex-proxy.service scripts/setup.sh
-build linux   arm32 vertex-proxy     vertex-proxy-linux-arm32   scripts/start.sh scripts/vertex-proxy.service scripts/setup.sh
+# 32 位 ARM 的 GOARCH 是 arm（不是 arm32）；包名仍用 arm32 以便用户区分位数。
+build linux   arm   vertex-proxy     vertex-proxy-linux-arm32   scripts/start.sh scripts/vertex-proxy.service scripts/setup.sh
 
 # Android（启用 CGO 编译，指定 NDK 编译器，API 28 以兼容 Android 9+）
 if [ -n "${ANDROID_NDK_HOME:-}" ]; then
