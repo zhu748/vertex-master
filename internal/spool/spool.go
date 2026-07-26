@@ -10,22 +10,24 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync/atomic"
 )
 
 var (
 	//nolint:gochecknoglobals // Internal spool state
-	maxMemSize int64 // 0 = unlimited（永不落盘）
+	maxMemSize atomic.Int64 // 0 = unlimited（永不落盘）
 	//nolint:gochecknoglobals // Internal spool state
-	spilledBytes int64
+	spilledBytes atomic.Int64
 )
 
 // SetMaxSpillBytes 设置磁盘溢出阈值（字节数）；0 或负数表示永不落盘。
 func SetMaxSpillBytes(limit int64) {
-	maxMemSize = limit
+	maxMemSize.Store(limit)
 }
 
 // SpilledBytes 返回进程启动以来写入临时文件的累计字节数。
-func SpilledBytes() int64 { return spilledBytes }
+// Buffer 本身按单请求串行使用，但多个请求会并发落盘并读取该计数器，故用原子操作。
+func SpilledBytes() int64 { return spilledBytes.Load() }
 
 // Buffer 是"先写后读"字节缓冲，支持自动磁盘溢出。
 //
@@ -52,11 +54,10 @@ func (b *Buffer) Write(p []byte) (int, error) {
 
 	}
 
-	if maxMemSize > 0 && int64(len(b.mem)+len(p)) > maxMemSize {
+	if limit := maxMemSize.Load(); limit > 0 && int64(len(b.mem)+len(p)) > limit {
 		tmp, err := os.CreateTemp("", "spool-*")
 		if err != nil {
-			return 0, fmt.Errorf("error: %w", err)
-
+			return 0, fmt.Errorf("创建溢出临时文件: %w", err)
 		}
 		b.file = tmp
 		b.filePath = tmp.Name()
@@ -64,8 +65,7 @@ func (b *Buffer) Write(p []byte) (int, error) {
 
 		if len(b.mem) > 0 {
 			if _, err := b.file.Write(b.mem); err != nil {
-				return 0, fmt.Errorf("error: %w", err)
-
+				return 0, fmt.Errorf("转存内存缓冲到临时文件: %w", err)
 			}
 		}
 		n, err := b.file.Write(p)
@@ -73,9 +73,8 @@ func (b *Buffer) Write(p []byte) (int, error) {
 			b.totalWritten = int64(len(b.mem)) + int64(n)
 		}
 		b.mem = nil
-		spilledBytes += b.totalWritten
+		spilledBytes.Add(b.totalWritten)
 		return n, err
-
 	}
 
 	b.mem = append(b.mem, p...)
@@ -96,8 +95,7 @@ func (b *Buffer) Len() int64 {
 func (b *Buffer) Reader() (io.Reader, error) {
 	if b.spilled {
 		if _, err := b.file.Seek(0, 0); err != nil {
-			return nil, fmt.Errorf("error: %w", err)
-
+			return nil, fmt.Errorf("重置溢出文件读取位置: %w", err)
 		}
 		return b.file, nil
 	}
@@ -145,8 +143,7 @@ func EncodeJSON(v any) (*Buffer, error) {
 	enc.SetEscapeHTML(false)
 	if err := enc.Encode(v); err != nil {
 		_ = b.Close()
-		return nil, fmt.Errorf("error: %w", err)
-
+		return nil, fmt.Errorf("序列化 JSON 到 spool 缓冲: %w", err)
 	}
 	b.trimTrailingNewline()
 	return b, nil

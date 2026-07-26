@@ -20,13 +20,13 @@
       <div class="sub">OpenAI 兼容 · Vertex / Gemini 代理</div>
       <label for="pw" class="sr-only">管理员密码</label><input id="pw" type="password" placeholder="管理员密码"
         autocomplete="current-password">
-      <button class="btn" onclick="login()">登 录</button>
+      <button class="btn" data-click-action="login">登 录</button>
       <div class="err" id="loginErr"></div>
     </div>
   </div>
 
   <div id="app" class="hidden">
-    <button class="menu-btn" id="menuBtn" onclick="toggleMenu()">☰</button>
+    <button class="menu-btn" id="menuBtn" data-click-action="toggleMenu">☰</button>
     <aside class="glass">
       <div class="brand"><span class="mk">V</span> Vertex AI Proxy</div>
       <nav>
@@ -39,10 +39,10 @@
         <button data-page="appearance"><span class="ic">🎨</span> 外观</button>
       </nav>
       <div class="spacer"></div>
-      <button class="btn ghost" onclick="logout()">退出登录</button>
+      <button class="btn ghost" data-click-action="logout">退出登录</button>
     </aside>
 
-    <div class="menu-overlay" id="menuOverlay" onclick="closeMenu()"></div>
+    <div class="menu-overlay" id="menuOverlay" data-click-action="closeMenu"></div>
 
     <main>
       <div class="glass main-glass-bg"></div>
@@ -53,7 +53,7 @@
               <h2>概览</h2>
               <div class="hint">服务运行状态与资源概况</div>
             </div>
-            <button class="btn ghost" onclick="loadOverview()">刷新</button>
+            <button class="btn ghost" data-click-action="loadOverview">刷新</button>
           </div>
           <div class="grid stats" id="ovCards"></div>
         </section>
@@ -79,11 +79,11 @@
             <div class="toolbar">
               <div class="key-input-wrap"><label for="kName" class="sr-only">名称（如 alice）</label><input id="kName"
                   placeholder="名称（如 alice）"><label for="kKey" class="sr-only">密钥（留空自动生成）</label><input id="kKey"
-                  placeholder="密钥（留空自动生成）"><button class="key-gen-btn" onclick="generateKey()" title="随机生成">✨</button>
+                  placeholder="密钥（留空自动生成）"><button class="key-gen-btn" data-click-action="generateKey" title="随机生成">✨</button>
               </div>
             </div>
             <div class="toolbar"><label for="kDesc" class="sr-only">描述</label><input id="kDesc"
-                placeholder="描述（可选）"><button class="btn" onclick="addKey()">添加</button></div>
+                placeholder="描述（可选）"><button class="btn" data-click-action="addKey">添加</button></div>
             <div class="table-wrap">
               <table>
                 <thead>
@@ -106,7 +106,7 @@
               <h2>模型</h2>
               <div class="hint">对外暴露的模型清单（每行一个）+ 别名映射</div>
             </div>
-            <button class="btn" onclick="saveModels()">保存</button>
+            <button class="btn" data-click-action="saveModels">保存</button>
           </div>
           <div class="grid grid-2">
             <div class="card glass">
@@ -156,7 +156,7 @@
             <div class="card glass">
               <div class="field"><label for="globalProxy">全局外部代理 (HTTP/HTTPS/SOCKS4/SOCKS5)</label>
                 <div class="toolbar m-0"><input id="globalProxy" placeholder="socks5://127.0.0.1:1080"><button
-                    class="btn" onclick="saveGlobalProxy()">保存</button></div>
+                    class="btn" data-click-action="saveGlobalProxy">保存</button></div>
                 <div class="desc">配置后默认走该代理；如果未启用并发池且无锁定节点，将使用此代理。</div>
               </div>
             </div>
@@ -181,7 +181,7 @@
                 <input id="manualProxyUsername" placeholder="用户名（可选）">
                 <label for="manualProxyPassword" class="sr-only">代理密码</label>
                 <input id="manualProxyPassword" type="password" placeholder="密码（可选）">
-                <button class="btn" id="addStandardProxyBtn" onclick="addStandardProxy()">添加到代理池</button>
+                <button class="btn" id="addStandardProxyBtn" data-click-action="addStandardProxy">添加到代理池</button>
               </div>
               <div class="desc">也可填写完整 URI，此时以 URI 中的协议和凭据为准；支持 HTTP、HTTPS、SOCKS4、SOCKS4A、SOCKS5 和 SOCKS5H。</div>
             </div>
@@ -208,8 +208,8 @@
                 <input id="proxySubInterval" type="number" min="1" max="10080" value="60" class="w-120">
                 <span>分钟刷新</span>
                 <label><input id="proxySubEnabled" type="checkbox" checked> 启用自动刷新</label>
-                <button class="btn" id="proxySubSaveBtn" onclick="saveProxySubscription()">保存并立即拉取</button>
-                <button class="btn ghost" onclick="resetProxySubscriptionForm()">清空</button>
+                <button class="btn" id="proxySubSaveBtn" data-click-action="saveProxySubscription">保存并立即拉取</button>
+                <button class="btn ghost" data-click-action="resetProxySubscriptionForm">清空</button>
               </div>
               <div class="desc">纯文本地址支持每行一个代理：host:port、user:pass@host:port、host:port:user:pass，或带协议的完整 URI。</div>
               <div class="table-wrap mt-12">
@@ -225,8 +225,8 @@
                 <div class="toolbar m-0 gap-8">
                   <label for="nodeImportFile" class="sr-only">选择节点导入文件</label><input type="file" id="nodeImportFile"
                     accept=".txt,.yaml,.yml,.json,.conf,.list" class="file-input">
-                  <button class="btn ghost" onclick="importFileNodes(false)">导入追加</button>
-                  <button class="btn danger" onclick="importFileNodes(true)">清空并替换</button>
+                  <button class="btn ghost" data-click-action="import-file" data-replace="0">导入追加</button>
+                  <button class="btn danger" data-click-action="import-file" data-replace="1">清空并替换</button>
                 </div>
                 <div class="desc">导入本地导出的节点配置文件 (.txt / .yaml)。支持以追加或覆盖形式批量配置节点。</div>
               </div>
@@ -236,8 +236,8 @@
                 <div class="toolbar m-0 gap-8">
                   <label for="nodeJsonImportFile" class="sr-only">选择 nodes.json 导入文件</label><input type="file"
                     id="nodeJsonImportFile" accept=".json" class="file-input">
-                  <button class="btn ghost" onclick="importJsonNodes(false)">导入追加</button>
-                  <button class="btn danger" onclick="importJsonNodes(true)">清空并替换</button>
+                  <button class="btn ghost" data-click-action="import-json" data-replace="0">导入追加</button>
+                  <button class="btn danger" data-click-action="import-json" data-replace="1">清空并替换</button>
                 </div>
                 <div class="desc">导入旧版 nodes.json。支持以追加或覆盖形式批量配置节点。</div>
               </div>
@@ -247,7 +247,7 @@
               <div class="field-heading label-gold">一次性协议节点订阅</div>
               <div class="toolbar"><label for="subUrl" class="sr-only">订阅链接</label><input id="subUrl"
                   placeholder="订阅链接 (vless/vmess/trojan/ss/ssr...)"><button class="btn"
-                  onclick="addAndFetchSub()">拉取并保存</button></div>
+                  data-click-action="addAndFetchSub">拉取并保存</button></div>
               <div class="desc field-mb-20px">仅执行一次拉取和导入，不会创建自动刷新任务。</div>
               <div class="toolbar node-filter-toolbar">
                 <label for="nodeSearch" class="sr-only">搜索节点</label>
@@ -301,26 +301,26 @@
               </div>
               <div class="desc field-mb-20px">批量测试会访问 Google reCAPTCHA；失败节点仅记录健康状态并进入冷却，不会被永久禁用。</div>
               <div class="actions">
-                <button class="btn ghost" id="batchTestStartBtn" onclick="testAllNodes()">批量测试</button>
-                <button class="btn ghost" onclick="sortNodesByLatency()">按延迟顺序排序</button>
-                <button class="btn ghost" onclick="sortNodesByLatencyDesc()">按延迟降序排序</button>
-                <button class="btn ghost" onclick="dedupNodes()">一键去重</button>
-                <button class="btn ghost" onclick="exportNodes()">导出节点</button>
-                <button class="btn danger" onclick="deleteDisabledNodes()">删除禁用节点</button>
+                <button class="btn ghost" id="batchTestStartBtn" data-click-action="testAllNodes">批量测试</button>
+                <button class="btn ghost" data-click-action="sortNodesByLatency">按延迟顺序排序</button>
+                <button class="btn ghost" data-click-action="sortNodesByLatencyDesc">按延迟降序排序</button>
+                <button class="btn ghost" data-click-action="dedupNodes">一键去重</button>
+                <button class="btn ghost" data-click-action="exportNodes">导出节点</button>
+                <button class="btn danger" data-click-action="deleteDisabledNodes">删除禁用节点</button>
                 <span class="flex-1"></span>
-                <button class="btn ghost btn-blue" onclick="toggleSelectAllNodes()">全选/反选</button>
-                <button class="btn ghost btn-green" onclick="batchEnableSelectedNodes()">批量启用</button>
-                <button class="btn ghost btn-red" onclick="batchDisableSelectedNodes()">批量禁用</button>
-                <button class="btn danger" onclick="batchDeleteSelectedNodes()">批量删除</button>
+                <button class="btn ghost btn-blue" data-click-action="toggleSelectAllNodes">全选/反选</button>
+                <button class="btn ghost btn-green" data-click-action="batchEnableSelectedNodes">批量启用</button>
+                <button class="btn ghost btn-red" data-click-action="batchDisableSelectedNodes">批量禁用</button>
+                <button class="btn danger" data-click-action="batchDeleteSelectedNodes">批量删除</button>
               </div>
               <div id="testProgress" class="test-progress">
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 6px;">
                   <div id="testProgressText" class="test-progress-text" style="margin-bottom:0;">准备测试...</div>
                   <div style="display:flex; gap:8px;">
                     <button class="btn ghost" id="btnTestPauseResume" style="padding:2px 10px; font-size:12px;"
-                      onclick="toggleTestPauseResume()">暂停</button>
+                      data-click-action="toggleTestPauseResume">暂停</button>
                     <button class="btn danger" style="padding:2px 10px; font-size:12px;"
-                      onclick="terminateTestAll()">终止</button>
+                      data-click-action="terminateTestAll">终止</button>
                   </div>
                 </div>
                 <div class="progress-track">
@@ -332,14 +332,14 @@
                 style="display:none; background: rgba(143,208,232,0.15); border: 1px solid var(--blue); color: var(--text); padding: 8px 12px; border-radius: 6px; margin-bottom: 10px;">
                 <span id="crossPageSelectText"></span>
                 <button class="btn ghost btn-blue" style="margin-left:12px; padding:2px 8px; font-size:12px;"
-                  onclick="selectAllNodesAcrossPages()">全选所有页共 <span id="crossPageSelectTotal">0</span> 个节点</button>
+                  data-click-action="selectAllNodesAcrossPages">全选所有页共 <span id="crossPageSelectTotal">0</span> 个节点</button>
               </div>
               <div class="table-wrap">
                 <table id="nodesTable">
                   <thead>
                     <tr>
                       <th class="th-center"><label for="selectAllNodesCheckbox" class="sr-only">全选</label><input
-                          type="checkbox" id="selectAllNodesCheckbox" onclick="toggleSelectAllNodesCheckbox(this)"></th>
+                          type="checkbox" id="selectAllNodesCheckbox" data-click-action="toggle-select-all-checkbox"></th>
                       <th>节点名 & 连接属性</th>
                       <th>协议</th>
                       <th>状态/延迟</th>
@@ -353,11 +353,11 @@
                 style="margin-top: 12px; justify-content: space-between; align-items: center;">
                 <div id="nodesPaginationInfo" style="font-size: 13px; color: var(--text-dim);"></div>
                 <div class="flex-gap-11" style="display: flex; gap: 8px; align-items: center;">
-                  <button class="btn ghost" id="btnPageFirst" onclick="changeNodePage(1)">首页</button>
-                  <button class="btn ghost" id="btnPagePrev" onclick="changeNodePage(curNodePage - 1)">上一页</button>
+                  <button class="btn ghost" id="btnPageFirst" data-click-action="node-page" data-page-target="first">首页</button>
+                  <button class="btn ghost" id="btnPagePrev" data-click-action="node-page" data-page-target="prev">上一页</button>
                   <span id="nodesPageNumDisplay" style="font-size: 13px; font-weight: 600; padding: 0 6px;">1 / 1</span>
-                  <button class="btn ghost" id="btnPageNext" onclick="changeNodePage(curNodePage + 1)">下一页</button>
-                  <button class="btn ghost" id="btnPageLast" onclick="changeNodePage(totalNodePages)">末页</button>
+                  <button class="btn ghost" id="btnPageNext" data-click-action="node-page" data-page-target="next">下一页</button>
+                  <button class="btn ghost" id="btnPageLast" data-click-action="node-page" data-page-target="last">末页</button>
                 </div>
               </div>
             </div>
@@ -374,15 +374,15 @@
           <div class="card glass">
             <div class="field"><label for="bgUrl">图片 URL</label>
               <div class="toolbar m-0"><input id="bgUrl" placeholder="粘贴图片 URL…"><button class="btn"
-                  onclick="applyBgUrl()">应用</button></div>
+                  data-click-action="applyBgUrl">应用</button></div>
             </div>
             <div class="field">
               <div class="field-heading">从本地上传</div>
               <div class="flex-gap-11"><button class="btn ghost"
-                  onclick="document.getElementById('bgFile').click()">选择图片…</button><button class="btn ghost"
-                  onclick="resetBg()">恢复默认</button></div>
+                  data-click-action="pick-bg-file">选择图片…</button><button class="btn ghost"
+                  data-click-action="resetBg">恢复默认</button></div>
               <label for="bgFile" class="sr-only">上传背景图片</label><input id="bgFile" type="file" accept="image/*"
-                class="hidden" onchange="uploadBg(event)">
+                class="hidden" data-change-action="upload-bg">
             </div>
             <div class="field m-0">
               <div class="field-heading">图片预设</div>
@@ -403,9 +403,9 @@
               </div>
               <div class="font-ctrl-group" style="margin-top: 12px; margin-bottom: 20px;">
                 <span>自定义单色背景:</span>
-                <div class="color-preview-box" id="bgColorBox" onclick="setActiveColorTarget('bg', -1, null, event)"
+                <div class="color-preview-box" id="bgColorBox" data-click-action="color-target" data-target-kind="bg"
                   title="点击编辑单色背景"></div>
-                <button class="btn ghost" onclick="saveCustomPreset('color')" style="margin-left:12px;">保存为预设</button>
+                <button class="btn ghost" data-click-action="save-preset" data-preset-kind="color" style="margin-left:12px;">保存为预设</button>
               </div>
             </div>
 
@@ -413,9 +413,9 @@
             <div class="gradient-builder" style="margin-bottom: 20px;">
               <div class="gradient-stops" id="gradientStops"></div>
               <div class="flex-gap-11" style="margin-top: 8px;">
-                <button class="btn ghost" onclick="addGradientStop()">+ 添加色标</button>
-                <button class="btn ghost" onclick="applyGradient()">应用渐变</button>
-                <button class="btn ghost" onclick="saveCustomPreset('gradient')">保存为预设</button>
+                <button class="btn ghost" data-click-action="addGradientStop">+ 添加色标</button>
+                <button class="btn ghost" data-click-action="applyGradient">应用渐变</button>
+                <button class="btn ghost" data-click-action="save-preset" data-preset-kind="gradient">保存为预设</button>
               </div>
             </div>
 
@@ -423,15 +423,15 @@
             <div class="appearance-advanced">
               <div class="font-ctrl-group">
                 <span>基础字号:</span>
-                <button class="btn ghost" onclick="adjustFontSize(-1)">A-</button>
+                <button class="btn ghost" data-click-action="font-size" data-delta="-1">A-</button>
                 <span id="currentFontSize" style="min-width: 40px; text-align: center;">14px</span>
-                <button class="btn ghost" onclick="adjustFontSize(1)">A+</button>
+                <button class="btn ghost" data-click-action="font-size" data-delta="1">A+</button>
               </div>
               <div class="font-ctrl-group">
                 <span>字体颜色:</span>
-                <button class="btn ghost" id="btnColorAdaptive" onclick="setFontColorType('adaptive')">自适应</button>
-                <button class="btn ghost" id="btnColorSpecified" onclick="setFontColorType('specified')">指定色</button>
-                <div class="color-preview-box" id="fontColorBox" onclick="setActiveColorTarget('font', -1, null, event)"
+                <button class="btn ghost" id="btnColorAdaptive" data-click-action="font-color-type" data-color-type="adaptive">自适应</button>
+                <button class="btn ghost" id="btnColorSpecified" data-click-action="font-color-type" data-color-type="specified">指定色</button>
+                <div class="color-preview-box" id="fontColorBox" data-click-action="color-target" data-target-kind="font"
                   title="点击编辑字体颜色"></div>
               </div>
             </div>
@@ -444,7 +444,7 @@
 
               <div class="palette-tools">
                 <div class="palette-preview" id="palettePreview"></div>
-                <button class="btn ghost btn-icon palette-btn" onclick="activateEyeDropper()" title="吸管工具">
+                <button class="btn ghost btn-icon palette-btn" data-click-action="activateEyeDropper" title="吸管工具">
                   <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"
                     stroke-linecap="round" stroke-linejoin="round">
                     <path d="m2 22 6-6" />
@@ -456,7 +456,7 @@
                   </svg>
                   <span>取色工具</span>
                 </button>
-                <button class="btn ghost btn-icon palette-btn" title="重置" onclick="resetColorTarget()">
+                <button class="btn ghost btn-icon palette-btn" title="重置" data-click-action="resetColorTarget">
                   <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"
                     stroke-linecap="round" stroke-linejoin="round">
                     <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
@@ -481,26 +481,26 @@
               <div class="palette-inputs">
                 <div class="input-row hex-row">
                   <span class="input-label">HEX</span>
-                  <input type="text" id="hex-input" class="hex-input" value="#FF0000" onchange="updateFromHEX()"
-                    oninput="updateFromHEX()">
+                  <input type="text" id="hex-input" class="hex-input" value="#FF0000" data-change-action="updateFromHEX"
+                    data-input-action="updateFromHEX">
                 </div>
                 <div class="input-row rgb-row">
                   <span class="input-label">RGB</span>
-                  <label>R: <input type="number" id="rgb-r" min="0" max="255" value="255" onchange="updateFromRGB()"
-                      oninput="updateFromRGB()"></label>
-                  <label>G: <input type="number" id="rgb-g" min="0" max="255" value="0" onchange="updateFromRGB()"
-                      oninput="updateFromRGB()"></label>
-                  <label>B: <input type="number" id="rgb-b" min="0" max="255" value="0" onchange="updateFromRGB()"
-                      oninput="updateFromRGB()"></label>
+                  <label>R: <input type="number" id="rgb-r" min="0" max="255" value="255" data-change-action="updateFromRGB"
+                      data-input-action="updateFromRGB"></label>
+                  <label>G: <input type="number" id="rgb-g" min="0" max="255" value="0" data-change-action="updateFromRGB"
+                      data-input-action="updateFromRGB"></label>
+                  <label>B: <input type="number" id="rgb-b" min="0" max="255" value="0" data-change-action="updateFromRGB"
+                      data-input-action="updateFromRGB"></label>
                 </div>
                 <div class="input-row hsb-row">
                   <span class="input-label">HSB</span>
-                  <label>H: <input type="number" id="hsb-h" min="0" max="360" value="0" onchange="updateFromHSB()"
-                      oninput="updateFromHSB()"></label>
-                  <label>S: <input type="number" id="hsb-s" min="0" max="100" value="100" onchange="updateFromHSB()"
-                      oninput="updateFromHSB()"></label>
-                  <label>B: <input type="number" id="hsb-b" min="0" max="100" value="100" onchange="updateFromHSB()"
-                      oninput="updateFromHSB()"></label>
+                  <label>H: <input type="number" id="hsb-h" min="0" max="360" value="0" data-change-action="updateFromHSB"
+                      data-input-action="updateFromHSB"></label>
+                  <label>S: <input type="number" id="hsb-s" min="0" max="100" value="100" data-change-action="updateFromHSB"
+                      data-input-action="updateFromHSB"></label>
+                  <label>B: <input type="number" id="hsb-b" min="0" max="100" value="100" data-change-action="updateFromHSB"
+                      data-input-action="updateFromHSB"></label>
                 </div>
               </div>
             </div>
@@ -520,11 +520,11 @@
                 <span
                   style="font-size:calc(var(--base-font-size) * 13 / 14); color:var(--text); font-weight:500;">自动刷新</span>
                 <label class="toggle">
-                  <input type="checkbox" id="autoRefreshLogsCheck" checked onchange="toggleAutoRefreshLogs()">
+                  <input type="checkbox" id="autoRefreshLogsCheck" checked data-change-action="toggleAutoRefreshLogs">
                   <span class="track"></span>
                 </label>
               </div>
-              <button class="btn ghost" onclick="loadLogs()">立即刷新</button>
+              <button class="btn ghost" data-click-action="loadLogs">立即刷新</button>
             </div>
           </div>
           <div class="card glass">
@@ -581,8 +581,8 @@
       <div class="err" id="changePwErr" style="color:#ff5f56;font-size:12px;margin-bottom:12px;text-align:center;">
       </div>
       <div style="display:flex;gap:12px;justify-content:flex-end;">
-        <button class="btn ghost" onclick="closeChangePasswordModal()">取消</button>
-        <button class="btn" onclick="submitChangePassword()">确定修改</button>
+        <button class="btn ghost" data-click-action="closeChangePasswordModal">取消</button>
+        <button class="btn" data-click-action="submitChangePassword">确定修改</button>
       </div>
     </div>
   </div>

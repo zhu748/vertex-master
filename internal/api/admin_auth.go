@@ -57,9 +57,18 @@ func adminClientIP(r *http.Request) string {
 	if !trustForwarded {
 		return remote
 	}
-	forwarded := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-For"), ",")[0])
-	if parsed := net.ParseIP(forwarded); parsed != nil {
-		return parsed.String()
+	// 取 X-Forwarded-For 最右侧条目：该段由我们信任的前置代理写入，客户端无法伪造。
+	// 最左侧是客户端自称的地址，攻击者可为每次请求编造不同值，从而绕过按 IP 的登录限流。
+	forwarded := r.Header.Get("X-Forwarded-For")
+	parts := strings.Split(forwarded, ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		candidate := strings.TrimSpace(parts[i])
+		if candidate == "" {
+			continue
+		}
+		if parsed := net.ParseIP(strings.Trim(candidate, "[]")); parsed != nil {
+			return parsed.String()
+		}
 	}
 	return remote
 }

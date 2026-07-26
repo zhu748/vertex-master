@@ -107,8 +107,7 @@ func parseStandardProxyURI(raw string) (map[string]any, bool) {
 func parseSimple(uri, typ string) (map[string]any, error) {
 	u, err := url.Parse(uri)
 	if err != nil {
-		return nil, fmt.Errorf("error: %w", err)
-
+		return nil, fmt.Errorf("解析 %s 节点 URI: %w", typ, err)
 	}
 	port, _ := strconv.Atoi(u.Port())
 	if port == 0 {
@@ -239,13 +238,11 @@ func parseVmess(uri string) (map[string]any, error) {
 	}
 	b, err := base64.StdEncoding.DecodeString(padB64(b64Str))
 	if err != nil {
-		return nil, fmt.Errorf("error: %w", err)
-
+		return nil, fmt.Errorf("解码 vmess 节点 base64 载荷: %w", err)
 	}
 	var d map[string]any
 	if err := json.Unmarshal(b, &d); err != nil {
-		return nil, fmt.Errorf("error: %w", err)
-
+		return nil, fmt.Errorf("解析 vmess 节点 JSON 载荷: %w", err)
 	}
 	portStr := fmt.Sprintf("%v", d["port"])
 	port, _ := strconv.Atoi(portStr)
@@ -344,8 +341,7 @@ func parseVmess(uri string) (map[string]any, error) {
 func parseShadowsocksURI(uri string) (map[string]any, error) {
 	u, err := url.Parse(uri)
 	if err != nil {
-		return nil, fmt.Errorf("error: %w", err)
-
+		return nil, fmt.Errorf("解析 shadowsocks 节点 URI: %w", err)
 	}
 	if u.User == nil || u.Hostname() == "" {
 		return parseSS(uri)

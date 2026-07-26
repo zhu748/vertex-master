@@ -225,6 +225,38 @@ function changeNodePage(p) {
   loadNodes();
 }
 
+// 无参数动作沿用原函数名，便于 HTML 与 JS 对照；带参数的另行命名。
+registerActions({
+  addStandardProxy: function () { addStandardProxy(); },
+  saveGlobalProxy: function () { saveGlobalProxy(); },
+  saveProxySubscription: function () { saveProxySubscription(); },
+  resetProxySubscriptionForm: function () { resetProxySubscriptionForm(); },
+  addAndFetchSub: function () { addAndFetchSub(); },
+  testAllNodes: function () { testAllNodes(); },
+  toggleTestPauseResume: function () { toggleTestPauseResume(); },
+  terminateTestAll: function () { terminateTestAll(); },
+  sortNodesByLatency: function () { sortNodesByLatency(); },
+  sortNodesByLatencyDesc: function () { sortNodesByLatencyDesc(); },
+  dedupNodes: function () { dedupNodes(); },
+  exportNodes: function () { exportNodes(); },
+  deleteDisabledNodes: function () { deleteDisabledNodes(); },
+  toggleSelectAllNodes: function () { toggleSelectAllNodes(); },
+  batchEnableSelectedNodes: function () { batchEnableSelectedNodes(); },
+  batchDisableSelectedNodes: function () { batchDisableSelectedNodes(); },
+  batchDeleteSelectedNodes: function () { batchDeleteSelectedNodes(); },
+  selectAllNodesAcrossPages: function () { selectAllNodesAcrossPages(); },
+  'toggle-select-all-checkbox': function (el) { toggleSelectAllNodesCheckbox(el); },
+  'import-file': function (el) { importFileNodes(el.dataset.replace === '1'); },
+  'import-json': function (el) { importJsonNodes(el.dataset.replace === '1'); },
+  'node-page': function (el) {
+    var target = el.dataset.pageTarget;
+    if (target === 'first') changeNodePage(1);
+    else if (target === 'prev') changeNodePage(curNodePage - 1);
+    else if (target === 'next') changeNodePage(curNodePage + 1);
+    else if (target === 'last') changeNodePage(totalNodePages);
+  },
+});
+
 function updateSelectHeaderAndBanner() {
   var mainCb = document.getElementById('selectAllNodesCheckbox');
   var banner = document.getElementById('crossPageSelectBanner');

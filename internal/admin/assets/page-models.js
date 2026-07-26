@@ -4,3 +4,5 @@ async function saveModels() {
   $('#aliasMap').value.split('\n').forEach(line => { const i = line.indexOf('='); if (i > 0) alias_map[line.slice(0, i).trim()] = line.slice(i + 1).trim(); });
   await API.models.put(models, alias_map); toast('模型已保存');
 }
+
+registerActions({ saveModels: function () { saveModels(); } });

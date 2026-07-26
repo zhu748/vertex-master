@@ -53,7 +53,7 @@ async function loadSettings() {
     if (f.type === 'bool') return `<div class="field bool ${managedBy ? 'managed-setting' : ''}"><div class="min-w-0"><label for="set_${f.k}">${f.label}</label>${f.desc ? `<div class="desc mt-4px">${f.desc}</div>` : ''}${managedHint}</div><label class="toggle"><input type="checkbox" id="set_${f.k}" ${v ? 'checked' : ''} ${disabled}><span class="track"></span></label></div>`;
     let input;
     if (f.type === 'select') input = `<select id="set_${f.k}" ${disabled}>${f.opts.map(o => `<option ${o === v ? 'selected' : ''}>${o}</option>`).join('')}</select>`;
-    else input = `<input type="${f.type}" id="set_${f.k}" value="${v ?? ''}" ${f.max !== undefined ? `max="${f.max}" oninput="if(this.value!=='' && parseInt(this.value)>${f.max}) this.value='${f.max}'"` : ''} ${f.min !== undefined ? `min="${f.min}"` : ''} ${disabled}>`;
+    else input = `<input type="${f.type}" id="set_${f.k}" value="${v ?? ''}" ${f.max !== undefined ? `max="${f.max}" data-input-action="clamp-max" data-clamp-max="${f.max}"` : ''} ${f.min !== undefined ? `min="${f.min}"` : ''} ${disabled}>`;
     return `<div class="field ${managedBy ? 'managed-setting' : ''}"><label for="set_${f.k}">${f.label}</label>${input}${f.desc ? `<div class="desc">${f.desc}</div>` : ''}${managedHint}</div>`;
   };
 
@@ -84,7 +84,7 @@ async function loadSettings() {
             <div style="font-weight:600; font-size:14px;">管理后台密码</div>
             <div class="desc" style="margin-top:4px;">定期修改密码有助于保障管理后台及节点会话安全</div>
           </div>
-          <button type="button" class="btn ghost" style="padding:8px 16px;" onclick="showChangePasswordModal()" ${managedSettings.admin_password ? 'disabled title="请在 Render Environment 中修改 VPROXY_ADMIN_PASSWORD"' : ''}>${managedSettings.admin_password ? '环境托管' : '修改密码'}</button>
+          <button type="button" class="btn ghost" style="padding:8px 16px;" data-click-action="showChangePasswordModal" ${managedSettings.admin_password ? 'disabled title="请在 Render Environment 中修改 VPROXY_ADMIN_PASSWORD"' : ''}>${managedSettings.admin_password ? '环境托管' : '修改密码'}</button>
         </div>
       `;
     }
@@ -99,7 +99,7 @@ async function loadSettings() {
 
   $('#settingsForm').innerHTML =
     sectionsHtml +
-    '<button class="btn mt-14px" onclick="saveSettings()">保存设置</button>';
+    '<button class="btn mt-14px" data-click-action="saveSettings">保存设置</button>';
 
   $('#settingsForm').addEventListener('input', () => window.hasUnsavedSettings = true);
   $('#settingsForm').addEventListener('change', () => window.hasUnsavedSettings = true);
@@ -235,3 +235,15 @@ async function submitChangePassword() {
     errEl.textContent = e.message || '修改密码失败';
   }
 }
+
+registerActions({
+  saveSettings: function () { saveSettings(); },
+  showChangePasswordModal: function () { showChangePasswordModal(); },
+  closeChangePasswordModal: function () { closeChangePasswordModal(); },
+  submitChangePassword: function () { submitChangePassword(); },
+  'clamp-max': function (el) {
+    // 原内联 oninput 的上限钳制逻辑。
+    var max = Number(el.dataset.clampMax);
+    if (el.value !== '' && parseInt(el.value, 10) > max) el.value = String(max);
+  },
+});

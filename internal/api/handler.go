@@ -171,8 +171,12 @@ func withUpstreamDetail(friendly string, e *vertex.VertexError) string {
 	return friendly + "（上游原因：" + detail + "）"
 }
 
+// toVertexError 把任意错误归一为 *vertex.VertexError 以便映射成对外响应。
+// 用 errors.As 而非裸断言：被包装过的上游错误仍需保留其状态码与限流语义，
+// 否则 429/404 会被一律降级成 500。
 func toVertexError(err error) *vertex.VertexError {
-	if ve, ok := err.(*vertex.VertexError); ok {
+	var ve *vertex.VertexError
+	if errors.As(err, &ve) {
 		return ve
 	}
 	return vertex.NewInternalError(err.Error())

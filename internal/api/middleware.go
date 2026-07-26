@@ -115,11 +115,15 @@ func (m *middleware) withSecurityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		// script-src 不含 'unsafe-inline'：管理面板的全部交互都通过
+		// data-*-action 事件委派绑定（assets/utils.js），没有内联事件处理器或
+		// 内联 <script>，因此严格策略可以真正拦下注入的脚本。
+		// style-src 仍保留 'unsafe-inline'：面板有动态背景/字体色与内联 style 属性。
 		w.Header().Set(
 			"Content-Security-Policy",
 			"default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; "+
 				"form-action 'self'; connect-src 'self'; img-src 'self' data: blob: https:; "+
-				"style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'",
+				"style-src 'self' 'unsafe-inline'; script-src 'self'",
 		)
 		if requestIsHTTPS(r) {
 			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")

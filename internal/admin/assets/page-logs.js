@@ -109,3 +109,8 @@ function toggleAutoRefreshLogs(silent) {
     }
   }
 }
+
+registerActions({
+  loadLogs: function () { loadLogs(); },
+  toggleAutoRefreshLogs: function () { toggleAutoRefreshLogs(); },
+});

@@ -29,8 +29,7 @@ func InitDB(dbPath string) error {
 
 	dir := filepath.Dir(dbPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("error: %w", err)
-
+		return fmt.Errorf("创建数据库目录 %s: %w", dir, err)
 	}
 
 	isNewDB := false
@@ -46,8 +45,7 @@ func InitDB(dbPath string) error {
 		"&_pragma=busy_timeout(5000)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
-		return fmt.Errorf("error: %w", err)
-
+		return fmt.Errorf("打开 SQLite 数据库 %s: %w", dbPath, err)
 	}
 	// SQLite permits many readers but only one writer. Keeping one pooled
 	// connection serializes background health writes with admin mutations and
@@ -56,10 +54,9 @@ func InitDB(dbPath string) error {
 	db.SetMaxIdleConns(1)
 
 	// Ensure DB is reachable
-	if errPing := db.Ping(); errPing != nil { //nolint:govet
+	if errPing := db.Ping(); errPing != nil {
 		_ = db.Close()
-		return fmt.Errorf("error: %w", errPing)
-
+		return fmt.Errorf("连接 SQLite 数据库 %s: %w", dbPath, errPing)
 	}
 
 	// Create tables
@@ -145,7 +142,7 @@ func createTables(db *sql.DB) error {
 	`
 	_, err := db.Exec(schema)
 	if err != nil {
-		return fmt.Errorf("error: %w", err)
+		return fmt.Errorf("创建数据库表结构: %w", err)
 	}
 
 	tx, err := db.Begin()

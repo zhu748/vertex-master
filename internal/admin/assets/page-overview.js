@@ -18,3 +18,5 @@ async function loadOverview() {
     card('代理节点', nodes, '') +
     card('健康代理', poolStats.healthy || 0, 'gold', stickySub);
 }
+
+registerActions({ loadOverview: function () { loadOverview(); } });

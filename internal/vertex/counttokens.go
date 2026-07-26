@@ -10,13 +10,14 @@ import (
 	"github.com/bsfdsagfadg/vertex/internal/transport"
 )
 
-// CountTokens 统计给定 contents 在指定模型下的 token 数（Vertex CountTokens）。
+// CountTokens 统计给定 contents 在指定模型下的 token 数。
 //
-// 走匿名 batchGraphql 的 CountTokens operation（独立 querySignature/operationName），
-// 单 session + 实时 recaptcha。失败/解析不到时返回 0（吞错），语义为"尽力计数"——
-// CountTokens 在上游不返数时不报错，给客户端一个 0。
+// 当前为本地启发式估算（estimateTokens），不发起任何上游请求，因此不消耗配额、
+// 不受代理与 recaptcha 影响，但结果是近似值而非上游精确计数。
 //
-// querySignature 从 config（count_tokens_query_signature）读，缺省值=内置硬编码值。
+// 下方的 buildCountTokensPayload / countTokensHeaders / parseCountTokensResponse
+// 是走匿名 batchGraphql CountTokens operation 的真实实现所需组件，目前未接线；
+// 若要恢复精确计数，从这里改为调用它们即可。
 func (c *VertexAIClient) CountTokens(ctx context.Context, model string, contents []any) int {
 	return estimateTokens(contents)
 }

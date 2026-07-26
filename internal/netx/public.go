@@ -157,7 +157,7 @@ func isPublicAddr(addr netip.Addr) bool {
 	// Go's IsGlobalUnicast deliberately includes several special-purpose
 	// networks. Use a conservative allowlist for IPv6 and explicitly remove
 	// non-routable/special IPv4 ranges that can otherwise bypass SSRF checks.
-	blocked := []string{}
+	var blocked []string
 	if addr.Is4() {
 		blocked = []string{
 			"0.0.0.0/8",

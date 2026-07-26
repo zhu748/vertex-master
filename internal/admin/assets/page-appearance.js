@@ -758,11 +758,12 @@ function renderGradientStops(stealFocus = true) {
   const container = $('#gradientStops');
   if (!container) return;
   container.innerHTML = gradientColors.map((c, i) => `
-    <div class="gradient-stop-box ${activeColorTarget === 'gradient' && activeColorIndex === i ? 'active' : ''}" 
-         style="background-color: ${c}" 
-         onclick="setActiveColorTarget('gradient', ${i}, '${c}', event)"
+    <div class="gradient-stop-box ${activeColorTarget === 'gradient' && activeColorIndex === i ? 'active' : ''}"
+         style="background-color: ${esc(c)}"
+         data-click-action="color-target" data-target-kind="gradient"
+         data-stop-index="${i}" data-stop-color="${esc(c)}"
          title="点击编辑色标">
-      ${gradientColors.length > 2 ? `<button class="del-btn" onclick="removeGradientStop(event, ${i})">×</button>` : ''}
+      ${gradientColors.length > 2 ? `<button class="del-btn" data-click-action="remove-gradient-stop" data-stop-index="${i}">×</button>` : ''}
     </div>
   `).join('');
   
@@ -912,3 +913,30 @@ window.deletePreset = async function(val, event) {
     }
   }
 };
+
+registerActions({
+  applyBgUrl: function () { applyBgUrl(); },
+  resetBg: function () { resetBg(); },
+  addGradientStop: function () { addGradientStop(); },
+  applyGradient: function () { applyGradient(); },
+  activateEyeDropper: function () { activateEyeDropper(); },
+  resetColorTarget: function () { resetColorTarget(); },
+  updateFromHEX: function () { updateFromHEX(); },
+  updateFromRGB: function () { updateFromRGB(); },
+  updateFromHSB: function () { updateFromHSB(); },
+  'pick-bg-file': function () { document.getElementById('bgFile').click(); },
+  'upload-bg': function (el, e) { uploadBg(e); },
+  'font-size': function (el) { adjustFontSize(Number(el.dataset.delta)); },
+  'font-color-type': function (el) { setFontColorType(el.dataset.colorType); },
+  'save-preset': function (el) { saveCustomPreset(el.dataset.presetKind); },
+  'color-target': function (el, e) {
+    // 渐变色标带索引与颜色，背景/字体色块则用默认值。
+    var kind = el.dataset.targetKind;
+    if (kind === 'gradient') {
+      setActiveColorTarget('gradient', Number(el.dataset.stopIndex), el.dataset.stopColor, e);
+    } else {
+      setActiveColorTarget(kind, -1, null, e);
+    }
+  },
+  'remove-gradient-stop': function (el, e) { removeGradientStop(e, Number(el.dataset.stopIndex)); },
+});

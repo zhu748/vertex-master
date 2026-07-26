@@ -404,8 +404,7 @@ func scanStream(body io.Reader, onObject func(map[string]any) (bool, error)) err
 
 		if readErr != nil {
 			if errors.Is(readErr, context.Canceled) || errors.Is(readErr, context.DeadlineExceeded) {
-				return fmt.Errorf("error: %w", readErr)
-
+				return fmt.Errorf("读取上游流被中断: %w", readErr)
 			}
 			// EOF 或读错误：流结束（正常 EOF 直接返回 nil，上层会按 got_content 判定空响应）。
 			return nil

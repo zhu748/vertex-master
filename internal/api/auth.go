@@ -151,8 +151,7 @@ func (m *APIKeyManager) readEntries() ([]apiKeyEntry, error) {
 		if os.IsNotExist(err) {
 			return nil, nil // 文件不存在视为空列表
 		}
-		return nil, fmt.Errorf("error: %w", err)
-
+		return nil, fmt.Errorf("打开密钥文件 %s: %w", m.keysFile, err)
 	}
 	defer func() { _ = f.Close() }()
 
@@ -187,8 +186,7 @@ func (m *APIKeyManager) readEntries() ([]apiKeyEntry, error) {
 func (m *APIKeyManager) writeEntries(entries []apiKeyEntry) error {
 	if dir := filepath.Dir(m.keysFile); dir != "" {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return fmt.Errorf("error: %w", err)
-
+			return fmt.Errorf("创建密钥文件目录 %s: %w", dir, err)
 		}
 	}
 	var b strings.Builder
@@ -209,10 +207,13 @@ func (m *APIKeyManager) writeEntries(entries []apiKeyEntry) error {
 	}
 	tmp := m.keysFile + ".tmp"
 	if err := os.WriteFile(tmp, []byte(b.String()), 0o600); err != nil {
-		return fmt.Errorf("error: %w", err)
-
+		return fmt.Errorf("写入密钥临时文件 %s: %w", tmp, err)
 	}
-	return os.Rename(tmp, m.keysFile) //nolint:wrapcheck
+	if err := os.Rename(tmp, m.keysFile); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("提交密钥文件 %s: %w", m.keysFile, err)
+	}
+	return nil
 }
 
 // List 返回文件密钥与环境变量托管密钥。环境变量密钥只用于生成服务端脱敏值，
@@ -270,8 +271,8 @@ func (m *APIKeyManager) Add(name, key, description string) error {
 		}
 	}
 	kept = append(kept, apiKeyEntry{Name: name, Key: key, Description: description})
-	if errW := m.writeEntries(kept); errW != nil { //nolint:govet
-		return err
+	if errW := m.writeEntries(kept); errW != nil {
+		return errW
 	}
 	m.LoadKeys()
 	return nil
@@ -293,8 +294,8 @@ func (m *APIKeyManager) Delete(name string) (bool, error) {
 	if len(kept) == len(entries) {
 		return false, nil // 没删掉任何条目
 	}
-	if errW := m.writeEntries(kept); errW != nil { //nolint:govet
-		return false, err
+	if errW := m.writeEntries(kept); errW != nil {
+		return false, errW
 	}
 	m.LoadKeys()
 	return true, nil

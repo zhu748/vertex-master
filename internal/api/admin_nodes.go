@@ -674,7 +674,7 @@ func fetchSubscriptionDataDirect(ctx context.Context, rawURL string, allowPrivat
 	client := netx.NewRestrictedHTTPClient(30*time.Second, allowPrivate)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("error: %w", err)
+		return nil, fmt.Errorf("构造订阅拉取请求: %w", err)
 	}
 	req.Header.Set("User-Agent", subscriptionFetchUserAgent)
 	req.Header.Set("Accept", "*/*")
@@ -790,7 +790,7 @@ func readLimitedSubscriptionBody(body io.Reader, contentLength int64) ([]byte, e
 	}
 	data, err := io.ReadAll(io.LimitReader(body, maxSubscriptionResponseBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("error: %w", err)
+		return nil, fmt.Errorf("读取订阅响应体: %w", err)
 	}
 	if int64(len(data)) > maxSubscriptionResponseBytes {
 		return nil, fmt.Errorf("subscription response exceeds %d MiB limit", maxSubscriptionResponseBytes>>20)

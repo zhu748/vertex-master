@@ -102,3 +102,8 @@ async function delKey(name) {
   loadKeys();
   toast('\u5DF2\u5220\u9664');
 }
+
+registerActions({
+  generateKey: function () { generateKey(); },
+  addKey: function () { addKey(); },
+});

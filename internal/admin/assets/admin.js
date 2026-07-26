@@ -66,3 +66,10 @@ document.querySelectorAll('nav button').forEach(b => b.onclick = () => go(b.data
 document.querySelectorAll('nav button').forEach(b => b.addEventListener('click', closeMenu));
 
 (async () => { try { const r = await API.checkAuth(); if (r.authenticated) { showApp(); } else { showLogin(); } } catch (e) { showLogin(); } })();
+
+registerActions({
+  login: function () { login(); },
+  logout: function () { logout(); },
+  toggleMenu: function () { toggleMenu(); },
+  closeMenu: function () { closeMenu(); },
+});

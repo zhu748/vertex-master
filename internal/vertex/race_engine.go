@@ -314,7 +314,7 @@ func runRacePreferred[T any](
 			}
 			cancelCandidate(res.uri)
 
-			if res.err != context.Canceled && !errors.Is(res.err, context.Canceled) {
+			if !errors.Is(res.err, context.Canceled) {
 				if cfg.DebugMode() {
 					log.Printf("[Racing] 节点 %s 失败: %s", name, res.err.Error())
 				}

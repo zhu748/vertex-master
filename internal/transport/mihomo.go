@@ -68,8 +68,7 @@ func makeDialer(p constant.Proxy, debugMode bool) func(ctx context.Context, netw
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(addr)
 		if err != nil {
-			return nil, fmt.Errorf("error: %w", err)
-
+			return nil, fmt.Errorf("拆分目标地址 %q: %w", addr, err)
 		}
 
 		portInt, _ := strconv.Atoi(port)
@@ -85,14 +84,12 @@ func makeDialer(p constant.Proxy, debugMode bool) func(ctx context.Context, netw
 		if err != nil {
 			// 若是因为上下文取消导致拨号中止，属于并发竞速中的正常现象，直接退出，不打印误报
 			if ctx.Err() != nil || errors.Is(err, context.Canceled) {
-				return nil, fmt.Errorf("error: %w", err)
-
+				return nil, fmt.Errorf("mihomo 拨号 %s:%d 被取消: %w", host, portInt, err)
 			}
 			if debugMode {
 				log.Printf("[Transport] Mihomo 拨号失败 [%s:%d]: %v", host, portInt, err)
 			}
-			return nil, fmt.Errorf("error: %w", err)
-
+			return nil, fmt.Errorf("mihomo 拨号 %s:%d: %w", host, portInt, err)
 		}
 
 		return conn, nil

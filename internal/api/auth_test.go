@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -313,6 +314,52 @@ func TestExamplePlaceholderKeyIsRejectedAndHidden(t *testing.T) {
 	entries, err := m.List()
 	if err != nil || len(entries) != 1 || entries[0].Name != "real" {
 		t.Fatalf("placeholder should be hidden from admin list: entries=%#v err=%v", entries, err)
+	}
+}
+
+// TestAPIKeyManagerReportsWriteFailure 锁定一个曾经的静默失败：writeEntries 出错时
+// Add/Delete 返回的是上面已成功的 readEntries 的 nil error，导致管理面板提示
+// “操作成功”而磁盘上的密钥其实没变——吊销密钥时尤其危险。
+//
+// 用一个同名目录占住 api_keys.txt.tmp，使 os.WriteFile 必然失败，而 readEntries
+// 仍能正常读取原文件。
+func TestAPIKeyManagerReportsWriteFailure(t *testing.T) {
+	dir := t.TempDir()
+	keysFile := filepath.Join(dir, "api_keys.txt")
+	if err := os.WriteFile(keysFile, []byte("victim:sk-victim:to be revoked\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// 占位目录：os.WriteFile 无法写入同名目录，writeEntries 必失败。
+	if err := os.Mkdir(keysFile+".tmp", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("VPROXY_API_KEYS", keysFile)
+	t.Setenv("VPROXY_API_KEY", "")
+
+	m := NewAPIKeyManager()
+	if !m.LoadKeys() || !m.ValidateKey("sk-victim") {
+		t.Fatal("前置条件失败：victim 密钥应已加载")
+	}
+
+	if err := m.Add("newkey", "sk-new", ""); err == nil {
+		t.Fatal("写入失败时 Add 必须返回错误，否则面板会谎报添加成功")
+	}
+
+	ok, err := m.Delete("victim")
+	if err == nil {
+		t.Fatal("写入失败时 Delete 必须返回错误，否则面板会谎报密钥已吊销")
+	}
+	if ok {
+		t.Fatal("写入失败时 Delete 不应报告删除成功")
+	}
+
+	// 磁盘内容未变，密钥仍然有效——调用方据此才能正确告警。
+	data, readErr := os.ReadFile(keysFile)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !strings.Contains(string(data), "sk-victim") {
+		t.Fatalf("写入失败后原文件不应被破坏，got %q", data)
 	}
 }
 

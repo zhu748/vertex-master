@@ -3,6 +3,7 @@ package vertex
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -303,8 +304,12 @@ func deepCopyAny(v any) any {
 	}
 }
 
+// asVertexError 提取链上的 *VertexError，返回 nil 表示不是该类错误。
+// 用 errors.As 而非裸断言：上游错误一旦被 fmt.Errorf("%w") 包装，
+// 裸断言会静默失配，把 429/限流语义降级成通用内部错误，重试与冷却逻辑随之失效。
 func asVertexError(err error) *VertexError {
-	if ve, ok := err.(*VertexError); ok {
+	var ve *VertexError
+	if errors.As(err, &ve) {
 		return ve
 	}
 	return nil

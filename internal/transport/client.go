@@ -28,8 +28,7 @@ type Session struct {
 func (s *Session) Do(ctx context.Context, method, url string, header http.Header, body io.Reader) (*http.Response, error) {
 	req, err := http.NewRequest(method, url, body)
 	if err != nil {
-		return nil, fmt.Errorf("error: %w", err)
-
+		return nil, fmt.Errorf("构造 %s %s 请求: %w", method, url, err)
 	}
 	req = req.WithContext(ctx)
 	if header != nil {
@@ -46,8 +45,7 @@ func (s *Session) DoAndRead(ctx context.Context, method, url string, header http
 	defer func() { _ = resp.Body.Close() }()
 	data, readErr := io.ReadAll(resp.Body)
 	if readErr != nil {
-		return resp.StatusCode, nil, fmt.Errorf("error: %w", readErr)
-
+		return resp.StatusCode, nil, fmt.Errorf("读取响应体: %w", readErr)
 	}
 	return resp.StatusCode, data, nil
 }
@@ -148,8 +146,7 @@ func (c *NetworkClient) CreateSession(timeoutSec int, proxyURI string, reqID str
 
 	client, err := tls_client.NewHttpClient(tls_client.NewNoopLogger(), opts...)
 	if err != nil {
-		return nil, fmt.Errorf("error: %w", err)
-
+		return nil, fmt.Errorf("创建 TLS 客户端: %w", err)
 	}
 	return &Session{client: client, ProxyURI: proxyURI}, nil
 }

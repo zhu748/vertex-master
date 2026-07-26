@@ -146,6 +146,77 @@ func TestRequestIsHTTPSHandlesForwardedProtoList(t *testing.T) {
 	}
 }
 
+// TestAdminClientIPUsesRightmostForwardedEntry 锁定登录限流的 IP 归属规则。
+// X-Forwarded-For 最左侧由客户端自称，可逐请求伪造以绕过按 IP 的失败锁定；
+// 只有最右侧那跳是可信前置代理写入的，必须以它为准。
+func TestAdminClientIPUsesRightmostForwardedEntry(t *testing.T) {
+	t.Setenv("RENDER", "")
+	t.Setenv("VPROXY_TRUST_PROXY_HEADERS", "true")
+
+	tests := []struct {
+		name       string
+		forwarded  string
+		remoteAddr string
+		want       string
+	}{
+		{
+			name:       "客户端伪造的最左值必须被忽略",
+			forwarded:  "1.2.3.4, 203.0.113.9",
+			remoteAddr: "10.0.0.1:5555",
+			want:       "203.0.113.9",
+		},
+		{
+			name:       "单跳时取该值",
+			forwarded:  "203.0.113.9",
+			remoteAddr: "10.0.0.1:5555",
+			want:       "203.0.113.9",
+		},
+		{
+			name:       "尾部垃圾值跳过，回退到最近的合法 IP",
+			forwarded:  "1.2.3.4, 203.0.113.9, not-an-ip",
+			remoteAddr: "10.0.0.1:5555",
+			want:       "203.0.113.9",
+		},
+		{
+			name:       "全部非法时回退 RemoteAddr",
+			forwarded:  "garbage, junk",
+			remoteAddr: "10.0.0.1:5555",
+			want:       "10.0.0.1",
+		},
+		{
+			name:       "缺少该头时回退 RemoteAddr",
+			forwarded:  "",
+			remoteAddr: "10.0.0.1:5555",
+			want:       "10.0.0.1",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "http://app.example/api/admin/login", nil)
+			req.RemoteAddr = test.remoteAddr
+			if test.forwarded != "" {
+				req.Header.Set("X-Forwarded-For", test.forwarded)
+			}
+			if got := adminClientIP(req); got != test.want {
+				t.Fatalf("adminClientIP = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+// 未显式信任前置代理时，绝不能采信 X-Forwarded-For。
+func TestAdminClientIPIgnoresForwardedWhenUntrusted(t *testing.T) {
+	t.Setenv("RENDER", "")
+	t.Setenv("VPROXY_TRUST_PROXY_HEADERS", "")
+
+	req := httptest.NewRequest(http.MethodPost, "http://app.example/api/admin/login", nil)
+	req.RemoteAddr = "10.0.0.1:5555"
+	req.Header.Set("X-Forwarded-For", "203.0.113.9")
+	if got := adminClientIP(req); got != "10.0.0.1" {
+		t.Fatalf("未信任代理时应使用 RemoteAddr，got %q", got)
+	}
+}
+
 func TestAdminCORSAndCookieOriginProtection(t *testing.T) {
 	mw := &middleware{} //nolint:exhaustruct
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -224,6 +295,24 @@ func TestSecurityHeaders(t *testing.T) {
 	}
 	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
 		t.Fatalf("admin cache control = %q, want no-store", got)
+	}
+
+	// script-src 必须保持严格：面板已全面改用 data-*-action 事件委派，
+	// 不存在内联事件处理器或内联 <script>，放开 'unsafe-inline' 会白白
+	// 丢掉针对注入脚本的防护。
+	csp := rec.Header().Get("Content-Security-Policy")
+	scriptSrc := ""
+	for _, directive := range strings.Split(csp, ";") {
+		directive = strings.TrimSpace(directive)
+		if strings.HasPrefix(directive, "script-src") {
+			scriptSrc = directive
+		}
+	}
+	if scriptSrc == "" {
+		t.Fatalf("CSP 缺少 script-src 指令: %q", csp)
+	}
+	if strings.Contains(scriptSrc, "unsafe-inline") || strings.Contains(scriptSrc, "unsafe-eval") {
+		t.Errorf("script-src 不应放开 unsafe-inline/unsafe-eval，got %q", scriptSrc)
 	}
 }
 

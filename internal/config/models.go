@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -41,23 +42,27 @@ type modelsFile struct { //nolint:govet
 	AliasMap map[string]string `json:"alias_map"`
 }
 
+// modelsCacheEntry 是一份不可变的模型清单快照；发布后不再修改，读路径可无锁取用。
+type modelsCacheEntry struct {
+	mf       *modelsFile
+	loadedAt time.Time
+}
+
 var (
 	//nolint:gochecknoglobals // Global model cache
-	modelsMu sync.Mutex
+	//
+	// 与 config 缓存同理：ResolveModelName 等在请求路径上被反复调用，
+	// 用 atomic.Pointer 发布快照以避免高频读争抢互斥锁。
+	cachedModels atomic.Pointer[modelsCacheEntry]
+	//nolint:gochecknoglobals // Serializes cache refills so a burst of misses reads the file once.
+	modelsReloadMu sync.Mutex
 	//nolint:gochecknoglobals // Serializes atomic model file writes.
 	modelsWriteMu sync.Mutex
-	//nolint:gochecknoglobals // Global model cache
-	cachedModels *modelsFile
-	//nolint:gochecknoglobals // Global model cache
-	modelsCacheTime time.Time
 )
 
 // InvalidateModelsCache 强制清除 models.json 缓存（SIGHUP 立即热重载用）。
 func InvalidateModelsCache() {
-	modelsMu.Lock()
-	defer modelsMu.Unlock()
-	cachedModels = nil
-	modelsCacheTime = time.Time{}
+	cachedModels.Store(nil)
 }
 
 // modelsPath 解析 models.json 路径（环境变量 > exe 同级 config/ > 工作目录 config/）。
@@ -76,11 +81,16 @@ func modelsPath() string {
 
 // loadModelsFile 读 models.json（带 60 秒缓存）；文件缺失/损坏退回默认清单 + 空别名表。
 func loadModelsFile() *modelsFile {
-	modelsMu.Lock()
-	defer modelsMu.Unlock()
+	if entry := cachedModels.Load(); entry != nil && time.Since(entry.loadedAt) < cacheTTL {
+		return entry.mf
+	}
 
-	if cachedModels != nil && time.Since(modelsCacheTime) < cacheTTL {
-		return cachedModels
+	// 缓存过期：加锁重填，避免一批并发读同时去读盘。
+	modelsReloadMu.Lock()
+	defer modelsReloadMu.Unlock()
+	// 双重检查——可能已有其它 goroutine 在等锁期间填好了缓存。
+	if entry := cachedModels.Load(); entry != nil && time.Since(entry.loadedAt) < cacheTTL {
+		return entry.mf
 	}
 
 	mf := &modelsFile{Models: defaultModels, AliasMap: map[string]string{}}
@@ -98,8 +108,7 @@ func loadModelsFile() *modelsFile {
 	} else if !os.IsNotExist(err) {
 		log.Printf("[Config] 读取 models.json 失败: %v", err)
 	}
-	cachedModels = mf
-	modelsCacheTime = time.Now()
+	cachedModels.Store(&modelsCacheEntry{mf: mf, loadedAt: time.Now()})
 	return mf
 }
 

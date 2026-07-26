@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -102,15 +103,23 @@ func DefaultConfig() AppConfig {
 	}
 }
 
+// cacheEntry 是一份不可变的配置快照。发布后其字段不再修改，
+// 因此读路径可以无锁取用（见 Load）。
+type cacheEntry struct {
+	cfg      AppConfig
+	loadedAt time.Time
+}
+
 var (
 	//nolint:gochecknoglobals // Global configuration cache
-	mu sync.Mutex
+	//
+	// 读路径无锁：ConfigProvider 的每个 accessor 都会调 Load()，单次请求可达
+	// 数十次；用 atomic.Pointer 发布快照可避免这些高频读互相争抢互斥锁。
+	cached atomic.Pointer[cacheEntry]
+	//nolint:gochecknoglobals // Serializes cache refills so a burst of misses reads the file once.
+	reloadMu sync.Mutex
 	//nolint:gochecknoglobals // Serializes atomic config read-modify-write cycles.
 	settingsWriteMu sync.Mutex
-	//nolint:gochecknoglobals // Global configuration cache
-	cached *AppConfig
-	//nolint:gochecknoglobals // Global configuration cache
-	cacheTime time.Time
 )
 
 const cacheTTL = 60 * time.Second
@@ -191,22 +200,28 @@ func writeJSONFile(path string, v any) error {
 	}
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("error: %w", err)
-
+		return fmt.Errorf("写入配置临时文件 %s: %w", tmp, err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
-		return err //nolint:wrapcheck
+		return fmt.Errorf("提交配置文件 %s: %w", path, err)
 	}
 	return nil
 }
 
 func Load() AppConfig {
-	mu.Lock()
-	defer mu.Unlock()
-	if cached != nil && time.Since(cacheTime) < cacheTTL {
-		return *cached
+	if entry := cached.Load(); entry != nil && time.Since(entry.loadedAt) < cacheTTL {
+		return entry.cfg
 	}
+
+	// 缓存过期：加锁重填，避免一批并发读同时去读盘。
+	reloadMu.Lock()
+	defer reloadMu.Unlock()
+	// 双重检查——可能已有其它 goroutine 在等锁期间填好了缓存。
+	if entry := cached.Load(); entry != nil && time.Since(entry.loadedAt) < cacheTTL {
+		return entry.cfg
+	}
+
 	cfg := DefaultConfig()
 	if data, err := os.ReadFile(configPath()); err == nil {
 		if errUnm := json.Unmarshal(data, &cfg); errUnm != nil { //nolint:govet
@@ -274,8 +289,7 @@ func Load() AppConfig {
 		log.Printf("[Config] 读取 config.json 失败: %v", err)
 	}
 	applyEnvironmentOverrides(&cfg)
-	cached = &cfg
-	cacheTime = time.Now()
+	cached.Store(&cacheEntry{cfg: cfg, loadedAt: time.Now()})
 	return cfg
 }
 
@@ -402,9 +416,7 @@ func applyEnvBool(key string, target *bool) {
 }
 
 func InvalidateCache() {
-	mu.Lock()
-	defer mu.Unlock()
-	cached = nil
+	cached.Store(nil)
 }
 
 func (c AppConfig) ConfigDir() string  { return ConfigDir() }

@@ -59,8 +59,7 @@ func StreamParallel(ctx context.Context, cfg config.ConfigProvider,
 
 	winnerCh, err := RunRace(streamCtx, cfg, wrappedOp, WithNoCancelOnSuccess())
 	if err != nil {
-		vertexErr, ok := err.(*VertexError)
-		if ok {
+		if vertexErr := asVertexError(err); vertexErr != nil {
 			yield(StreamChunk{Err: vertexErr})
 		} else {
 			yield(StreamChunk{Err: NewInternalError(err.Error())})
