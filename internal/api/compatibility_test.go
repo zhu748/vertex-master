@@ -204,7 +204,7 @@ func TestCompatibilityEndpoints(t *testing.T) {
 		}
 	})
 
-	t.Run("gemini_native_passes_through_unspecified_prompt_block", func(t *testing.T) {
+	t.Run("gemini_native_strips_unspecified_prompt_block", func(t *testing.T) {
 		// 与 c6f6b65 行为对齐：上游返回 promptFeedback.blockReason=BLOCKED_REASON_UNSPECIFIED
 		// 时不再自动重试。匿名 Gemini 端点经常在正常响应里附带该字段，重试反而会
 		// 提前 abort 流、让客户端拿不到后续真正的内容 chunk。
@@ -247,13 +247,15 @@ func TestCompatibilityEndpoints(t *testing.T) {
 		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
-		feedback, _ := body["promptFeedback"].(map[string]any)
-		if feedback == nil || feedback["blockReason"] != "BLOCKED_REASON_UNSPECIFIED" {
-			t.Fatalf("expected pass-through promptFeedback, got %#v", body)
+		// 修复后：BLOCKED_REASON_UNSPECIFIED 应被删除，不出现在响应中。
+		if feedback, ok := body["promptFeedback"].(map[string]any); ok {
+			if reason, _ := feedback["blockReason"].(string); reason != "" {
+				t.Fatalf("expected blockReason stripped, got %q in %#v", reason, body)
+			}
 		}
 	})
 
-	t.Run("gemini_native_stream_passes_through_unspecified_prompt_block", func(t *testing.T) {
+	t.Run("gemini_native_stream_strips_unspecified_prompt_block", func(t *testing.T) {
 		// 流式同样不再做语义重试。上游发什么就透传什么 —— 匿名 Gemini 经常
 		// 先发一个只含 promptFeedback 的 metadata 帧，后面才是真正的内容帧；
 		// 之前的语义重试会在第一帧就 return false 中断流，导致后续内容拿不到。
@@ -293,13 +295,13 @@ func TestCompatibilityEndpoints(t *testing.T) {
 		if calls.Load() != 1 {
 			t.Fatalf("upstream calls=%d, want exactly one (no semantic retry)", calls.Load())
 		}
-		// 上游的 promptFeedback 帧应原样透传给客户端。
-		if !strings.Contains(stream, "BLOCKED_REASON_UNSPECIFIED") {
-			t.Fatalf("expected pass-through promptFeedback in stream: %s", stream)
+		// 修复后：BLOCKED_REASON_UNSPECIFIED 不应出现在流式输出中。
+		if strings.Contains(stream, "BLOCKED_REASON_UNSPECIFIED") {
+			t.Fatalf("expected blockReason stripped from stream, got: %s", stream)
 		}
 	})
 
-	t.Run("gemini_native_reports_persistent_unspecified_prompt_block_pass_through", func(t *testing.T) {
+	t.Run("gemini_native_strips_persistent_unspecified_prompt_block", func(t *testing.T) {
 		// 修复后：上游持续只返回 promptFeedback（无 candidates）时，直接透传给客户端，
 		// 不再 503，由客户端自行判断。这与 c6f6b65 行为一致。
 		fx := newTestServer(t)
@@ -341,13 +343,15 @@ func TestCompatibilityEndpoints(t *testing.T) {
 		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
-		feedback, _ := body["promptFeedback"].(map[string]any)
-		if feedback == nil || feedback["blockReason"] != "BLOCKED_REASON_UNSPECIFIED" {
-			t.Fatalf("expected pass-through promptFeedback, got %#v", body)
+		// 修复后：BLOCKED_REASON_UNSPECIFIED 应被删除，不出现在响应中。
+		if feedback, ok := body["promptFeedback"].(map[string]any); ok {
+			if reason, _ := feedback["blockReason"].(string); reason != "" {
+				t.Fatalf("expected blockReason stripped, got %q in %#v", reason, body)
+			}
 		}
 	})
 
-	t.Run("gemini_native_stream_reports_persistent_unspecified_prompt_block_pass_through", func(t *testing.T) {
+	t.Run("gemini_native_stream_strips_persistent_unspecified_prompt_block", func(t *testing.T) {
 		// 修复后：流式持续只有 promptFeedback 帧时，原样把帧透传给客户端，
 		// 不再插入 UNAVAILABLE 错误事件。这与 c6f6b65 行为一致。
 		fx := newTestServer(t)
@@ -386,8 +390,9 @@ func TestCompatibilityEndpoints(t *testing.T) {
 		if strings.Contains(stream, `"status":"UNAVAILABLE"`) {
 			t.Fatalf("should not emit UNAVAILABLE event after fix: %s", stream)
 		}
-		if !strings.Contains(stream, "BLOCKED_REASON_UNSPECIFIED") {
-			t.Fatalf("expected pass-through promptFeedback in stream: %s", stream)
+		// 修复后：BLOCKED_REASON_UNSPECIFIED 不应出现在流中。
+		if strings.Contains(stream, "BLOCKED_REASON_UNSPECIFIED") {
+			t.Fatalf("expected blockReason stripped from stream, got: %s", stream)
 		}
 	})
 }

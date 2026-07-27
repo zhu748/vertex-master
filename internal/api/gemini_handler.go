@@ -108,6 +108,7 @@ func (g *GeminiHandler) handleGeminiGenerate(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	cleanGeminiFinishReason(resp)
+	cleanGeminiPromptFeedback(resp)
 	rewriteGeminiIDs(resp, generateVPSuffix())
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -150,6 +151,7 @@ func (g *GeminiHandler) handleGeminiStreamGenerate(w http.ResponseWriter, r *htt
 		if fr := cleanGeminiFinishReason(ch.Data); fr != "" {
 			hasFinish = true
 		}
+		cleanGeminiPromptFeedback(ch.Data)
 		rewriteGeminiIDs(ch.Data, suffix)
 		return sw.write(g.geminiSSE(ch.Data))
 	})
@@ -279,6 +281,35 @@ func cleanGeminiFinishReason(data map[string]any) string {
 		}
 	}
 	return realFR
+}
+
+// cleanGeminiPromptFeedback 清理 promptFeedback 中的 protobuf 默认值占位符。
+//
+// 匿名 Gemini 上游经常在正常响应里附带
+//
+//	promptFeedback: { blockReason: "BLOCKED_REASON_UNSPECIFIED" }
+//
+// 这个值是 protobuf 枚举的默认值（0），并不是真拦截 —— candidates 里通常有实际内容。
+// 但很多 Gemini SDK 客户端（含 Google 官方 SDK）只要看到 blockReason 字段非空就判定为
+// 拦截，会丢弃 candidates 里的内容或报错。
+//
+// 这里在透传前删除这个无害的占位符；只有真正的拦截原因（SAFETY / RECITATION 等）才保留。
+// 真正被拦截时 vertex 层会走 isSafetyBlock 分支返回 geminiSafetyResponse，不会走到这里。
+func cleanGeminiPromptFeedback(data map[string]any) {
+	feedback, ok := data["promptFeedback"].(map[string]any)
+	if !ok {
+		return
+	}
+	reason, _ := feedback["blockReason"].(string)
+	if strings.EqualFold(reason, "BLOCKED_REASON_UNSPECIFIED") ||
+		strings.EqualFold(reason, "BLOCK_REASON_UNSPECIFIED") ||
+		reason == "" {
+		delete(feedback, "blockReason")
+		delete(feedback, "blockReasonMessage")
+	}
+	if len(feedback) == 0 {
+		delete(data, "promptFeedback")
+	}
 }
 
 func vertexErrorToGemini(e *vertex.VertexError) map[string]any {
