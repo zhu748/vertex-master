@@ -183,6 +183,7 @@ func (c *ChatHandler) streamChatCompletions(ctx context.Context, w http.Response
 	prefillFilter := transform.NewAssistantPrefillStreamFilter(
 		transform.AssistantPrefillFromPayload(geminiPayload),
 	)
+	var lastCandidate map[string]any
 
 	c.vc.StreamChat(ctx, model, geminiPayload, func(ch vertex.StreamChunk) bool {
 		if isFirst && ch.Err == nil {
@@ -194,8 +195,10 @@ func (c *ChatHandler) streamChatCompletions(ctx context.Context, w http.Response
 			streamErrWritten = true
 			return false
 		}
-		prefillFilter.FilterGeminiChunk(ch.Data)
-		events := c.respConv.StreamToSSE(ch.Data, model, requestID, isFirst)
+		data := cloneStringMap(ch.Data)
+		prefillFilter.FilterGeminiChunk(data)
+		normalizeStreamingGeminiUsage(data, &lastCandidate)
+		events := c.respConv.StreamToSSE(data, model, requestID, isFirst)
 		isFirst = false
 		for _, ev := range events {
 			if strings.Contains(ev, `"finish_reason"`) && !strings.Contains(ev, `"finish_reason":null`) {

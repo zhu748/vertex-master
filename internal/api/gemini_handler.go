@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/bsfdsagfadg/vertex/internal/jsonx"
+	"github.com/bsfdsagfadg/vertex/internal/transform"
 	"github.com/bsfdsagfadg/vertex/internal/vertex"
 )
 
@@ -135,6 +136,7 @@ func (g *GeminiHandler) handleGeminiStreamGenerate(w http.ResponseWriter, r *htt
 	hasFinish := false
 	streamErrWritten := false
 	suffix := generateVPSuffix()
+	var lastCandidate map[string]any
 	g.vc.StreamChat(r.Context(), actualModel, body, func(ch vertex.StreamChunk) bool {
 		if ch.Err != nil {
 			streamErrWritten = true
@@ -153,6 +155,7 @@ func (g *GeminiHandler) handleGeminiStreamGenerate(w http.ResponseWriter, r *htt
 		// 修改 map，直接在 ch.Data 上改会触发 data race。这里先递归复制一份独占
 		// 的副本再修改和写出。
 		data := cloneStringMap(ch.Data)
+		normalizeStreamingGeminiUsage(data, &lastCandidate)
 		if fr := cleanGeminiFinishReason(data); fr != "" {
 			hasFinish = true
 		}
@@ -181,6 +184,65 @@ func (g *GeminiHandler) handleGeminiStreamGenerate(w http.ResponseWriter, r *htt
 			}},
 		}))
 	}
+}
+
+func normalizeStreamingGeminiUsage(data map[string]any, lastCandidate *map[string]any) {
+	if candidate := firstGeminiCandidate(data); candidate != nil {
+		*lastCandidate = cloneStringMap(candidate)
+	}
+	ensureGeminiUsageCandidate(data, *lastCandidate)
+}
+
+// ensureGeminiUsageCandidate 兼容会忽略 metadata-only SSE 帧的 Gemini 客户端。
+// RikkaHub 的 GoogleProvider 只有在 candidates 非空时才继续解析 usageMetadata，
+// 因此对有真实 token 统计但无 candidates 的末帧补一个不含正文的空 candidate。
+func ensureGeminiUsageCandidate(data map[string]any, fallbackCandidate map[string]any) {
+	usage, ok := data["usageMetadata"].(map[string]any)
+	if !ok || len(usage) == 0 {
+		return
+	}
+	candidate := firstGeminiCandidate(data)
+	if candidate == nil {
+		candidate = fallbackCandidate
+	}
+	normalized := transform.ConvertUsageForCandidate(usage, candidate)
+	input := protocolIntValue(normalized["prompt_tokens"])
+	output := protocolIntValue(normalized["completion_tokens"])
+	total := protocolIntValue(normalized["total_tokens"])
+	if input == 0 && output == 0 && total == 0 {
+		return
+	}
+
+	// 补 canonical Gemini 汇总字段，让只读取顶层计数、不读取 modality details
+	// 的客户端也能获得输入/输出用量。
+	if protocolIntValue(usage["promptTokenCount"]) == 0 && input > 0 {
+		usage["promptTokenCount"] = input
+	}
+	if protocolIntValue(usage["candidatesTokenCount"])+protocolIntValue(usage["thoughtsTokenCount"]) == 0 && output > 0 {
+		usage["candidatesTokenCount"] = output
+	}
+	if protocolIntValue(usage["totalTokenCount"]) == 0 && total > 0 {
+		usage["totalTokenCount"] = total
+	}
+
+	if firstGeminiCandidate(data) == nil {
+		data["candidates"] = []any{map[string]any{
+			"index": 0,
+			"content": map[string]any{
+				"role":  "model",
+				"parts": []any{},
+			},
+		}}
+	}
+}
+
+func firstGeminiCandidate(data map[string]any) map[string]any {
+	candidates, ok := data["candidates"].([]any)
+	if !ok || len(candidates) == 0 {
+		return nil
+	}
+	candidate, _ := candidates[0].(map[string]any)
+	return candidate
 }
 
 func (g *GeminiHandler) geminiFakeStream(ctx context.Context, sw *sseWriter, model string, body map[string]any) {

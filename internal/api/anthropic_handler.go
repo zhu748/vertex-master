@@ -370,13 +370,16 @@ func (h *AnthropicHandler) streamMessages(
 		return
 	}
 	failed := false
+	var lastCandidate map[string]any
 	h.vc.StreamChat(ctx, model, payload, func(chunk vertex.StreamChunk) bool {
 		if chunk.Err != nil {
 			state.fail(chunk.Err)
 			failed = true
 			return false
 		}
-		state.consume(outputFromGeminiChunk(chunk.Data))
+		data := cloneStringMap(chunk.Data)
+		normalizeStreamingGeminiUsage(data, &lastCandidate)
+		state.consume(outputFromGeminiChunk(data))
 		return true
 	})
 	pingCancel()

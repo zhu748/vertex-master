@@ -3,6 +3,7 @@ package transform
 import (
 	cryptorand "crypto/rand"
 	"encoding/hex"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -103,7 +104,7 @@ func ConvertRealtimeChunk(chunk map[string]any, model, requestID string, isFirst
 	if usageMeta, ok := chunk["usageMetadata"].(map[string]any); ok && len(usageMeta) > 0 {
 		usageEvt := base()
 		usageEvt["choices"] = []any{}
-		usageEvt["usage"] = ConvertUsage(usageMeta)
+		usageEvt["usage"] = ConvertUsageForCandidate(usageMeta, candidate)
 		events = append(events, sseLine(usageEvt))
 	}
 
@@ -234,6 +235,12 @@ func numOf(v any) int {
 		return n
 	case int64:
 		return int(n)
+	case string:
+		parsed, err := strconv.Atoi(strings.TrimSpace(n))
+		if err == nil {
+			return parsed
+		}
+		return 0
 	default:
 		return 0
 	}

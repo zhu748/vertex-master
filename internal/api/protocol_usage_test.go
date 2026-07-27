@@ -22,6 +22,27 @@ func TestOutputFromGeminiChunkUsageOnly(t *testing.T) {
 	}
 }
 
+func TestNormalizeStreamingGeminiUsageForRikkaHub(t *testing.T) {
+	data := map[string]any{
+		"usageMetadata": map[string]any{"totalTokenCount": float64(84)},
+	}
+	lastCandidate := map[string]any{"tokenCount": "8"}
+	normalizeStreamingGeminiUsage(data, &lastCandidate)
+
+	candidates, ok := data["candidates"].([]any)
+	if !ok || len(candidates) != 1 {
+		t.Fatalf("metadata-only usage 帧没有补空 candidate: %#v", data)
+	}
+	usage := data["usageMetadata"].(map[string]any)
+	if usage["promptTokenCount"] != 76 || usage["candidatesTokenCount"] != 8 || usage["totalTokenCount"] != float64(84) {
+		t.Fatalf("Gemini usage 分项未补齐: %#v", usage)
+	}
+	content := candidates[0].(map[string]any)["content"].(map[string]any)
+	if parts := content["parts"].([]any); len(parts) != 0 {
+		t.Fatalf("兼容 candidate 不应重复正文: %#v", candidates[0])
+	}
+}
+
 func TestProtocolStreamStatesConsumeUsageOnlyFrame(t *testing.T) {
 	usage := protocolOutput{
 		Input: 10, Output: 25, Total: 35, CachedInputTokens: 4, ReasoningTokens: 5,

@@ -93,6 +93,27 @@ func TestConvertRealtimeChunk_UsageOnlyFrame(t *testing.T) {
 	}
 }
 
+func TestConvertRealtimeChunk_UsageDetailsFallback(t *testing.T) {
+	chunk := map[string]any{
+		"usageMetadata": map[string]any{
+			"totalTokenCount": "84",
+			"promptTokensDetails": []any{
+				map[string]any{"modality": "TEXT", "tokenCount": "76"},
+			},
+			"candidatesTokensDetails": []any{
+				map[string]any{"modality": "TEXT", "tokens": "8"},
+			},
+		},
+	}
+	events := ConvertRealtimeChunk(chunk, "m", "r", false)
+	if len(events) != 1 ||
+		!strings.Contains(events[0], `"prompt_tokens":76`) ||
+		!strings.Contains(events[0], `"completion_tokens":8`) ||
+		!strings.Contains(events[0], `"total_tokens":84`) {
+		t.Fatalf("usage details 未生成 RikkaHub 可识别的分项统计: %v", events)
+	}
+}
+
 // MAX_TOKENS → length。
 func TestConvertRealtimeChunk_MaxTokensLength(t *testing.T) {
 	chunk := map[string]any{"candidates": []any{map[string]any{

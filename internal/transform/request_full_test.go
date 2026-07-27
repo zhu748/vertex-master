@@ -528,6 +528,32 @@ func TestConvertUsage_Detailed(t *testing.T) {
 	}
 }
 
+func TestConvertUsage_DetailOnlyAndStringCounts(t *testing.T) {
+	meta := map[string]any{
+		"totalTokenCount": "84",
+		"promptTokensDetails": []any{
+			map[string]any{"modality": "text", "tokenCount": "76"},
+		},
+		"candidates_tokens_details": []any{
+			map[string]any{"modality": "TEXT", "tokens": float64(8)},
+		},
+	}
+	usage := ConvertUsage(meta)
+	if usage["prompt_tokens"] != 76 || usage["completion_tokens"] != 8 || usage["total_tokens"] != 84 {
+		t.Fatalf("detail-only usage 未正确归一化: %#v", usage)
+	}
+}
+
+func TestConvertUsage_TotalAndCandidateFallback(t *testing.T) {
+	usage := ConvertUsageForCandidate(
+		map[string]any{"totalTokenCount": float64(84)},
+		map[string]any{"tokenCount": "8"},
+	)
+	if usage["prompt_tokens"] != 76 || usage["completion_tokens"] != 8 || usage["total_tokens"] != 84 {
+		t.Fatalf("total + candidate fallback 未正确拆分: %#v", usage)
+	}
+}
+
 func TestGeminiResponsesToOAIJSON_NAggregation(t *testing.T) {
 	mk := func(text string, prompt, completion int) map[string]any {
 		return map[string]any{

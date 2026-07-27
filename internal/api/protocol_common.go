@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/bsfdsagfadg/vertex/internal/jsonx"
+	"github.com/bsfdsagfadg/vertex/internal/transform"
 )
 
 type protocolToolCall struct {
@@ -87,8 +88,9 @@ func outputFromOAI(resp map[string]any) protocolOutput {
 func outputFromGeminiChunk(chunk map[string]any) protocolOutput {
 	var out protocolOutput
 	candidates := anySlice(chunk["candidates"])
+	var candidate map[string]any
 	if len(candidates) > 0 {
-		candidate, _ := candidates[0].(map[string]any)
+		candidate, _ = candidates[0].(map[string]any)
 		out.Finish = stringValue(candidate["finishReason"])
 		content, _ := candidate["content"].(map[string]any)
 		for _, raw := range anySlice(content["parts"]) {
@@ -118,11 +120,16 @@ func outputFromGeminiChunk(chunk map[string]any) protocolOutput {
 		}
 	}
 	if usage, ok := chunk["usageMetadata"].(map[string]any); ok {
-		out.Input = protocolIntValue(usage["promptTokenCount"]) + protocolIntValue(usage["toolUsePromptTokenCount"])
-		out.Output = protocolIntValue(usage["candidatesTokenCount"]) + protocolIntValue(usage["thoughtsTokenCount"])
-		out.Total = protocolIntValue(usage["totalTokenCount"])
-		out.CachedInputTokens = protocolIntValue(usage["cachedContentTokenCount"])
-		out.ReasoningTokens = protocolIntValue(usage["thoughtsTokenCount"])
+		normalized := transform.ConvertUsageForCandidate(usage, candidate)
+		out.Input = protocolIntValue(normalized["prompt_tokens"])
+		out.Output = protocolIntValue(normalized["completion_tokens"])
+		out.Total = protocolIntValue(normalized["total_tokens"])
+		if details, ok := normalized["prompt_tokens_details"].(map[string]any); ok {
+			out.CachedInputTokens = protocolIntValue(details["cached_tokens"])
+		}
+		if details, ok := normalized["completion_tokens_details"].(map[string]any); ok {
+			out.ReasoningTokens = protocolIntValue(details["reasoning_tokens"])
+		}
 	}
 	if out.Total == 0 {
 		out.Total = out.Input + out.Output
