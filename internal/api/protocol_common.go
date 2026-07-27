@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 
 	"github.com/bsfdsagfadg/vertex/internal/jsonx"
@@ -65,7 +66,7 @@ func normalizeProtocolUsage(out protocolOutput) protocolOutput {
 	if out.Output == 0 && out.Total > out.Input && out.Input > 0 {
 		out.Output = out.Total - out.Input
 	}
-	if out.Total == 0 && (out.Input > 0 || out.Output > 0) {
+	if out.Total == 0 && out.Input > 0 && out.Output > 0 {
 		out.Total = out.Input + out.Output
 	}
 	return out
@@ -184,7 +185,7 @@ func outputFromOAI(resp map[string]any) protocolOutput {
 			out.ReasoningTokens = protocolIntValue(details["reasoning_tokens"])
 		}
 	}
-	if out.Total == 0 {
+	if out.Total == 0 && out.Input > 0 && out.Output > 0 {
 		out.Total = out.Input + out.Output
 	}
 	return out
@@ -196,6 +197,9 @@ func outputFromGeminiChunk(chunk map[string]any) protocolOutput {
 	var candidate map[string]any
 	if len(candidates) > 0 {
 		candidate, _ = candidates[0].(map[string]any)
+		// 匿名 Vertex 端点即使不返回 usageMetadata，也经常在最终候选中
+		// 返回真实的 tokenCount。该字段只代表候选输出，不能据此估算输入。
+		out.Output = protocolIntValue(candidate["tokenCount"])
 		out.Finish = stringValue(candidate["finishReason"])
 		content, _ := candidate["content"].(map[string]any)
 		for _, raw := range anySlice(content["parts"]) {
@@ -227,7 +231,9 @@ func outputFromGeminiChunk(chunk map[string]any) protocolOutput {
 	if usage, ok := chunk["usageMetadata"].(map[string]any); ok {
 		normalized := transform.ConvertUsageForCandidate(usage, candidate)
 		out.Input = protocolIntValue(normalized["prompt_tokens"])
-		out.Output = protocolIntValue(normalized["completion_tokens"])
+		if output := protocolIntValue(normalized["completion_tokens"]); output > 0 {
+			out.Output = output
+		}
 		out.Total = protocolIntValue(normalized["total_tokens"])
 		if details, ok := normalized["prompt_tokens_details"].(map[string]any); ok {
 			out.CachedInputTokens = protocolIntValue(details["cached_tokens"])
@@ -236,7 +242,7 @@ func outputFromGeminiChunk(chunk map[string]any) protocolOutput {
 			out.ReasoningTokens = protocolIntValue(details["reasoning_tokens"])
 		}
 	}
-	if out.Total == 0 {
+	if out.Total == 0 && out.Input > 0 && out.Output > 0 {
 		out.Total = out.Input + out.Output
 	}
 	return out
@@ -271,6 +277,12 @@ func protocolIntValue(v any) int {
 		return int(n)
 	case float64:
 		return int(n)
+	case string:
+		parsed, err := strconv.Atoi(strings.TrimSpace(n))
+		if err == nil {
+			return parsed
+		}
+		return 0
 	default:
 		return 0
 	}

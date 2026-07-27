@@ -22,6 +22,20 @@ func TestOutputFromGeminiChunkUsageOnly(t *testing.T) {
 	}
 }
 
+func TestOutputFromGeminiChunkUsesRealCandidateCountWithoutUsage(t *testing.T) {
+	out := outputFromGeminiChunk(map[string]any{
+		"candidates": []any{map[string]any{
+			"tokenCount": "8",
+			"content": map[string]any{
+				"role": "model", "parts": []any{map[string]any{"text": "hello"}},
+			},
+		}},
+	})
+	if out.Input != 0 || out.Output != 8 || out.Total != 0 {
+		t.Fatalf("candidate tokenCount 应只作为真实输出统计，不能估算输入或总量: %+v", out)
+	}
+}
+
 func TestNormalizeStreamingGeminiUsageForRikkaHub(t *testing.T) {
 	data := map[string]any{
 		"usageMetadata": map[string]any{"totalTokenCount": float64(84)},
