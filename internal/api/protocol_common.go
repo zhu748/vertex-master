@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,7 +8,6 @@ import (
 
 	"github.com/bsfdsagfadg/vertex/internal/jsonx"
 	"github.com/bsfdsagfadg/vertex/internal/transform"
-	"github.com/bsfdsagfadg/vertex/internal/vertex"
 )
 
 type protocolToolCall struct {
@@ -58,58 +56,29 @@ func mergeProtocolOutput(dst *protocolOutput, chunk protocolOutput) {
 	}
 }
 
-// completeProtocolUsage 只补齐上游缺失的 token 字段。匿名 Vertex 流有时完全
-// 不返回 usageMetadata；这时用项目已有的本地计数器生成近似值，使客户端至少能
-// 展示输入/输出用量。上游给出的非零统计始终优先，不会被估算值覆盖。
-func completeProtocolUsage(
-	ctx context.Context,
-	vc *vertex.VertexAIClient,
-	model string,
-	payload map[string]any,
-	out protocolOutput,
-) protocolOutput {
+// normalizeProtocolUsage 只根据上游已返回的字段补齐可确定的分项，不进行本地
+// token 估算。上游没有 usage 时保持为零，调用方不会向客户端伪造统计。
+func normalizeProtocolUsage(out protocolOutput) protocolOutput {
 	if out.Input == 0 && out.Total > out.Output && out.Output > 0 {
 		out.Input = out.Total - out.Output
 	}
 	if out.Output == 0 && out.Total > out.Input && out.Input > 0 {
 		out.Output = out.Total - out.Input
 	}
-
-	if out.Input == 0 && vc != nil {
-		contents := make([]any, 0, len(anySlice(payload["contents"]))+1)
-		if systemInstruction, ok := payload["systemInstruction"].(map[string]any); ok {
-			contents = append(contents, systemInstruction)
-		}
-		contents = append(contents, anySlice(payload["contents"])...)
-		out.Input = vc.CountTokens(ctx, model, contents)
-	}
-
-	if out.Output == 0 && vc != nil {
-		var generated strings.Builder
-		generated.WriteString(out.Reasoning)
-		generated.WriteString(out.Text)
-		for _, call := range out.ToolCalls {
-			generated.WriteString(call.Name)
-			generated.WriteString(call.Arguments)
-		}
-		if generated.Len() > 0 {
-			out.Output = vc.CountTokens(ctx, model, []any{map[string]any{
-				"role":  "model",
-				"parts": []any{map[string]any{"text": generated.String()}},
-			}})
-			if out.Output == 0 {
-				out.Output = 1
-			}
-		}
-	}
-
-	if out.Total == 0 || out.Total < out.Input+out.Output {
+	if out.Total == 0 && (out.Input > 0 || out.Output > 0) {
 		out.Total = out.Input + out.Output
 	}
 	return out
 }
 
+func hasProtocolUsage(out protocolOutput) bool {
+	return out.Input > 0 || out.Output > 0 || out.Total > 0
+}
+
 func applyOAIUsage(out protocolOutput, response map[string]any) {
+	if !hasProtocolUsage(out) {
+		return
+	}
 	usage, _ := response["usage"].(map[string]any)
 	if usage == nil {
 		usage = map[string]any{}
@@ -143,6 +112,9 @@ func applyOAIUsage(out protocolOutput, response map[string]any) {
 }
 
 func applyGeminiUsage(out protocolOutput, response map[string]any) {
+	if !hasProtocolUsage(out) {
+		return
+	}
 	usage, _ := response["usageMetadata"].(map[string]any)
 	if usage == nil {
 		usage = map[string]any{}

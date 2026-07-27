@@ -80,7 +80,7 @@ func (h *ResponsesHandler) handleResponses(w http.ResponseWriter, r *http.Reques
 	}
 	oaiResp := h.respConv.ToOAI(geminiResp, model)
 	out := outputFromOAI(oaiResp)
-	out = completeProtocolUsage(r.Context(), h.vc, model, payload, out)
+	out = normalizeProtocolUsage(out)
 	restoreResponsesToolNamespaces(&out, namespaceTools)
 	writeJSON(w, http.StatusOK, buildResponsesResponse(body, rawModel, "resp_"+reqID24(), out))
 }
@@ -449,7 +449,7 @@ func (h *ResponsesHandler) streamResponses(
 			return
 		}
 		out := outputFromOAI(h.respConv.ToOAI(resp, model))
-		out = completeProtocolUsage(ctx, h.vc, model, payload, out)
+		out = normalizeProtocolUsage(out)
 		restoreResponsesToolNamespaces(&out, namespaceTools)
 		state.consume(out)
 		state.finish()
@@ -470,7 +470,7 @@ func (h *ResponsesHandler) streamResponses(
 		return true
 	})
 	if !failed {
-		state.out = completeProtocolUsage(ctx, h.vc, model, payload, state.out)
+		state.out = normalizeProtocolUsage(state.out)
 		state.finish()
 	}
 }

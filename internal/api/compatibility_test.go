@@ -538,12 +538,13 @@ func TestCompatibilityEndpoints(t *testing.T) {
 		if oaiResp.StatusCode != http.StatusOK ||
 			!strings.Contains(oaiStream, `"prompt_tokens":76`) ||
 			!strings.Contains(oaiStream, `"completion_tokens":8`) ||
-			!strings.Contains(oaiStream, `"total_tokens":84`) {
+			!strings.Contains(oaiStream, `"total_tokens":84`) ||
+			!strings.Contains(oaiStream, `"choices":[{"delta":{},"finish_reason":null,"index":0}]`) {
 			t.Fatalf("OpenAI 流未生成 RikkaHub 可读取的分项 usage: %s", oaiStream)
 		}
 	})
 
-	t.Run("rikkahub_stream_usage_fallback_when_upstream_omits_metadata", func(t *testing.T) {
+	t.Run("stream_does_not_invent_usage_when_upstream_omits_metadata", func(t *testing.T) {
 		fx := newTestServer(t)
 		noUsageUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -571,12 +572,8 @@ func TestCompatibilityEndpoints(t *testing.T) {
 		nativeData, _ := io.ReadAll(nativeResp.Body)
 		nativeResp.Body.Close()
 		nativeStream := string(nativeData)
-		if nativeResp.StatusCode != http.StatusOK ||
-			!strings.Contains(nativeStream, `"promptTokenCount":2`) ||
-			!strings.Contains(nativeStream, `"candidatesTokenCount":2`) ||
-			!strings.Contains(nativeStream, `"totalTokenCount":4`) ||
-			!strings.Contains(nativeStream, `"parts":[]`) {
-			t.Fatalf("Gemini 原生流没有补发可显示的估算 usage: %s", nativeStream)
+		if nativeResp.StatusCode != http.StatusOK || strings.Contains(nativeStream, `"usageMetadata"`) {
+			t.Fatalf("Gemini 原生流不应伪造 usage: %s", nativeStream)
 		}
 
 		oaiResp := doPost(t, fx.server.URL+"/v1/chat/completions", "sk-test-key", map[string]any{
@@ -588,11 +585,10 @@ func TestCompatibilityEndpoints(t *testing.T) {
 		oaiResp.Body.Close()
 		oaiStream := string(oaiData)
 		if oaiResp.StatusCode != http.StatusOK ||
-			!strings.Contains(oaiStream, `"prompt_tokens":2`) ||
-			!strings.Contains(oaiStream, `"completion_tokens":2`) ||
-			!strings.Contains(oaiStream, `"total_tokens":4`) ||
-			!strings.Contains(oaiStream, `"choices":[{"delta":{},"finish_reason":null,"index":0}]`) {
-			t.Fatalf("OpenAI 流没有补发 RikkaHub 可合并的估算 usage: %s", oaiStream)
+			strings.Contains(oaiStream, `"prompt_tokens"`) ||
+			strings.Contains(oaiStream, `"completion_tokens"`) ||
+			strings.Contains(oaiStream, `"total_tokens"`) {
+			t.Fatalf("OpenAI 流不应伪造 usage: %s", oaiStream)
 		}
 	})
 }

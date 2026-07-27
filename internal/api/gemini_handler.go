@@ -111,7 +111,7 @@ func (g *GeminiHandler) handleGeminiGenerate(w http.ResponseWriter, r *http.Requ
 	cleanGeminiFinishReason(resp)
 	cleanGeminiPromptFeedback(resp)
 	applyGeminiUsage(
-		completeProtocolUsage(r.Context(), g.vc, actualModel, body, outputFromGeminiChunk(resp)),
+		normalizeProtocolUsage(outputFromGeminiChunk(resp)),
 		resp,
 	)
 	rewriteGeminiIDs(resp, generateVPSuffix())
@@ -181,18 +181,28 @@ func (g *GeminiHandler) handleGeminiStreamGenerate(w http.ResponseWriter, r *htt
 		}))
 		return
 	}
-	streamOutput = completeProtocolUsage(r.Context(), g.vc, actualModel, body, streamOutput)
-	usageChunk := map[string]any{
-		"candidates": []any{map[string]any{
-			"content": map[string]any{"parts": []any{}, "role": "model"},
-			"index":   0,
-		}},
+	streamOutput = normalizeProtocolUsage(streamOutput)
+	if hasProtocolUsage(streamOutput) {
+		usageChunk := map[string]any{
+			"candidates": []any{map[string]any{
+				"content": map[string]any{"parts": []any{}, "role": "model"},
+				"index":   0,
+			}},
+		}
+		if !hasFinish {
+			usageChunk["candidates"].([]any)[0].(map[string]any)["finishReason"] = "STOP"
+		}
+		applyGeminiUsage(streamOutput, usageChunk)
+		_ = sw.write(g.geminiSSE(usageChunk))
+	} else if !hasFinish {
+		_ = sw.write(g.geminiSSE(map[string]any{
+			"candidates": []any{map[string]any{
+				"content":      map[string]any{"parts": []any{}, "role": "model"},
+				"finishReason": "STOP",
+				"index":        0,
+			}},
+		}))
 	}
-	if !hasFinish {
-		usageChunk["candidates"].([]any)[0].(map[string]any)["finishReason"] = "STOP"
-	}
-	applyGeminiUsage(streamOutput, usageChunk)
-	_ = sw.write(g.geminiSSE(usageChunk))
 }
 
 func normalizeStreamingGeminiUsage(data map[string]any, lastCandidate *map[string]any) {
@@ -269,7 +279,7 @@ func (g *GeminiHandler) geminiFakeStream(ctx context.Context, sw *sseWriter, mod
 	}
 
 	text := geminiResponseText(resp)
-	out := completeProtocolUsage(ctx, g.vc, model, body, outputFromGeminiChunk(resp))
+	out := normalizeProtocolUsage(outputFromGeminiChunk(resp))
 	chunks := splitIntoRuneChunks(text)
 	for i, piece := range chunks {
 		cand := map[string]any{"index": 0, "content": map[string]any{"role": "model", "parts": []any{map[string]any{"text": piece}}}}
@@ -281,11 +291,13 @@ func (g *GeminiHandler) geminiFakeStream(ctx context.Context, sw *sseWriter, mod
 			return
 		}
 	}
-	usageChunk := map[string]any{"candidates": []any{map[string]any{
-		"index": 0, "content": map[string]any{"role": "model", "parts": []any{}},
-	}}}
-	applyGeminiUsage(out, usageChunk)
-	_ = sw.write(g.geminiSSE(usageChunk))
+	if hasProtocolUsage(out) {
+		usageChunk := map[string]any{"candidates": []any{map[string]any{
+			"index": 0, "content": map[string]any{"role": "model", "parts": []any{}},
+		}}}
+		applyGeminiUsage(out, usageChunk)
+		_ = sw.write(g.geminiSSE(usageChunk))
+	}
 }
 
 func (g *GeminiHandler) handleCountTokens(w http.ResponseWriter, r *http.Request, model string) {
