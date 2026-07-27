@@ -204,25 +204,22 @@ func TestCompatibilityEndpoints(t *testing.T) {
 		}
 	})
 
-	t.Run("gemini_native_retries_unspecified_prompt_block", func(t *testing.T) {
+	t.Run("gemini_native_passes_through_unspecified_prompt_block", func(t *testing.T) {
+		// 与 c6f6b65 行为对齐：上游返回 promptFeedback.blockReason=BLOCKED_REASON_UNSPECIFIED
+		// 时不再自动重试。匿名 Gemini 端点经常在正常响应里附带该字段，重试反而会
+		// 提前 abort 流、让客户端拿不到后续真正的内容 chunk。
 		fx := newTestServer(t)
 		var calls atomic.Int32
-		retryUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		blockedUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			calls.Add(1)
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
-			if calls.Add(1) == 1 {
-				_, _ = w.Write([]byte(
-					`[{"results":[{"data":{"ui":{"streamGenerateContentAnonymous":` +
-						`{"promptFeedback":{"blockReason":"BLOCKED_REASON_UNSPECIFIED"}}}}}]}]`,
-				))
-				return
-			}
 			_, _ = w.Write([]byte(
 				`[{"results":[{"data":{"ui":{"streamGenerateContentAnonymous":` +
-					geminiNonStreamingResponse() + `}}}]}]`,
+					`{"promptFeedback":{"blockReason":"BLOCKED_REASON_UNSPECIFIED"}}}}}]}]`,
 			))
 		}))
-		defer retryUpstream.Close()
-		vertex.SetBatchGraphqlURL(retryUpstream.URL + "/batchGraphql?key=test&prettyPrint=false")
+		defer blockedUpstream.Close()
+		vertex.SetBatchGraphqlURL(blockedUpstream.URL + "/batchGraphql?key=test&prettyPrint=false")
 		t.Cleanup(func() {
 			vertex.SetBatchGraphqlURL(fx.mockUpstream.URL + "/batchGraphql?key=test&prettyPrint=false")
 		})
@@ -243,37 +240,35 @@ func TestCompatibilityEndpoints(t *testing.T) {
 			data, _ := io.ReadAll(resp.Body)
 			t.Fatalf("status=%d body=%s", resp.StatusCode, data)
 		}
+		if calls.Load() != 1 {
+			t.Fatalf("upstream calls=%d, want exactly one (no semantic retry)", calls.Load())
+		}
 		var body map[string]any
 		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
-		if calls.Load() != 2 {
-			t.Fatalf("upstream calls=%d, want one automatic retry", calls.Load())
-		}
-		if _, blocked := body["promptFeedback"]; blocked {
-			t.Fatalf("successful retry must not return stale promptFeedback: %#v", body)
+		feedback, _ := body["promptFeedback"].(map[string]any)
+		if feedback == nil || feedback["blockReason"] != "BLOCKED_REASON_UNSPECIFIED" {
+			t.Fatalf("expected pass-through promptFeedback, got %#v", body)
 		}
 	})
 
-	t.Run("gemini_native_stream_retries_unspecified_prompt_block", func(t *testing.T) {
+	t.Run("gemini_native_stream_passes_through_unspecified_prompt_block", func(t *testing.T) {
+		// 流式同样不再做语义重试。上游发什么就透传什么 —— 匿名 Gemini 经常
+		// 先发一个只含 promptFeedback 的 metadata 帧，后面才是真正的内容帧；
+		// 之前的语义重试会在第一帧就 return false 中断流，导致后续内容拿不到。
 		fx := newTestServer(t)
 		var calls atomic.Int32
-		retryUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		blockedUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			calls.Add(1)
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
-			if calls.Add(1) == 1 {
-				_, _ = w.Write([]byte(
-					`[{"results":[{"data":{"ui":{"streamGenerateContentAnonymous":` +
-						`{"promptFeedback":{"blockReason":"BLOCKED_REASON_UNSPECIFIED"}}}}}]}]`,
-				))
-				return
-			}
 			_, _ = w.Write([]byte(
 				`[{"results":[{"data":{"ui":{"streamGenerateContentAnonymous":` +
-					geminiNonStreamingResponse() + `}}}]}]`,
+					`{"promptFeedback":{"blockReason":"BLOCKED_REASON_UNSPECIFIED"}}}}}]}]`,
 			))
 		}))
-		defer retryUpstream.Close()
-		vertex.SetBatchGraphqlURL(retryUpstream.URL + "/batchGraphql?key=test&prettyPrint=false")
+		defer blockedUpstream.Close()
+		vertex.SetBatchGraphqlURL(blockedUpstream.URL + "/batchGraphql?key=test&prettyPrint=false")
 		t.Cleanup(func() {
 			vertex.SetBatchGraphqlURL(fx.mockUpstream.URL + "/batchGraphql?key=test&prettyPrint=false")
 		})
@@ -295,18 +290,18 @@ func TestCompatibilityEndpoints(t *testing.T) {
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("status=%d body=%s", resp.StatusCode, stream)
 		}
-		if calls.Load() != 2 {
-			t.Fatalf("upstream calls=%d, want one automatic retry", calls.Load())
+		if calls.Load() != 1 {
+			t.Fatalf("upstream calls=%d, want exactly one (no semantic retry)", calls.Load())
 		}
-		if !strings.Contains(stream, "Hello") {
-			t.Fatalf("successful retry content missing: %s", stream)
-		}
-		if strings.Contains(stream, "BLOCKED_REASON_UNSPECIFIED") {
-			t.Fatalf("stream leaked stale promptFeedback: %s", stream)
+		// 上游的 promptFeedback 帧应原样透传给客户端。
+		if !strings.Contains(stream, "BLOCKED_REASON_UNSPECIFIED") {
+			t.Fatalf("expected pass-through promptFeedback in stream: %s", stream)
 		}
 	})
 
-	t.Run("gemini_native_reports_persistent_unspecified_prompt_block", func(t *testing.T) {
+	t.Run("gemini_native_reports_persistent_unspecified_prompt_block_pass_through", func(t *testing.T) {
+		// 修复后：上游持续只返回 promptFeedback（无 candidates）时，直接透传给客户端，
+		// 不再 503，由客户端自行判断。这与 c6f6b65 行为一致。
 		fx := newTestServer(t)
 		var calls atomic.Int32
 		blockedUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -335,24 +330,26 @@ func TestCompatibilityEndpoints(t *testing.T) {
 			},
 		)
 		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusServiceUnavailable {
+		if resp.StatusCode != http.StatusOK {
 			data, _ := io.ReadAll(resp.Body)
-			t.Fatalf("status=%d, want 503, body=%s", resp.StatusCode, data)
+			t.Fatalf("status=%d, want 200 (pass-through), body=%s", resp.StatusCode, data)
 		}
-		if calls.Load() != 2 {
-			t.Fatalf("upstream calls=%d, want exactly two attempts", calls.Load())
+		if calls.Load() != 1 {
+			t.Fatalf("upstream calls=%d, want exactly one (no semantic retry)", calls.Load())
 		}
 		var body map[string]any
 		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
-		errBody, _ := body["error"].(map[string]any)
-		if errBody["status"] != "UNAVAILABLE" {
-			t.Fatalf("unexpected error body: %#v", body)
+		feedback, _ := body["promptFeedback"].(map[string]any)
+		if feedback == nil || feedback["blockReason"] != "BLOCKED_REASON_UNSPECIFIED" {
+			t.Fatalf("expected pass-through promptFeedback, got %#v", body)
 		}
 	})
 
-	t.Run("gemini_native_stream_reports_persistent_unspecified_prompt_block_once", func(t *testing.T) {
+	t.Run("gemini_native_stream_reports_persistent_unspecified_prompt_block_pass_through", func(t *testing.T) {
+		// 修复后：流式持续只有 promptFeedback 帧时，原样把帧透传给客户端，
+		// 不再插入 UNAVAILABLE 错误事件。这与 c6f6b65 行为一致。
 		fx := newTestServer(t)
 		var calls atomic.Int32
 		blockedUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -383,14 +380,14 @@ func TestCompatibilityEndpoints(t *testing.T) {
 		defer resp.Body.Close()
 		data, _ := io.ReadAll(resp.Body)
 		stream := string(data)
-		if calls.Load() != 2 {
-			t.Fatalf("upstream calls=%d, want exactly two attempts", calls.Load())
+		if calls.Load() != 1 {
+			t.Fatalf("upstream calls=%d, want exactly one (no semantic retry)", calls.Load())
 		}
-		if strings.Count(stream, `"status":"UNAVAILABLE"`) != 1 {
-			t.Fatalf("expected one UNAVAILABLE event: %s", stream)
+		if strings.Contains(stream, `"status":"UNAVAILABLE"`) {
+			t.Fatalf("should not emit UNAVAILABLE event after fix: %s", stream)
 		}
-		if strings.Contains(stream, "Upstream returned empty response") {
-			t.Fatalf("stream emitted duplicate empty-response error: %s", stream)
+		if !strings.Contains(stream, "BLOCKED_REASON_UNSPECIFIED") {
+			t.Fatalf("expected pass-through promptFeedback in stream: %s", stream)
 		}
 	})
 }
