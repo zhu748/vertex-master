@@ -68,6 +68,7 @@ func (h *AnthropicHandler) handleMessages(w http.ResponseWriter, r *http.Request
 		return
 	}
 	out := outputFromOAI(h.respConv.ToOAI(resp, model))
+	out = completeProtocolUsage(r.Context(), h.vc, model, payload, out)
 	writeJSON(w, http.StatusOK, anthropicMessage(rawModel, "msg_"+reqID24(), out))
 }
 
@@ -363,7 +364,8 @@ func (h *AnthropicHandler) streamMessages(
 			state.fail(toVertexError(err))
 			return
 		}
-		state.consume(outputFromOAI(h.respConv.ToOAI(resp, model)))
+		out := completeProtocolUsage(ctx, h.vc, model, payload, outputFromOAI(h.respConv.ToOAI(resp, model)))
+		state.consume(out)
 		pingCancel()
 		pingWg.Wait()
 		state.finish()
@@ -385,6 +387,7 @@ func (h *AnthropicHandler) streamMessages(
 	pingCancel()
 	pingWg.Wait()
 	if !failed {
+		state.out = completeProtocolUsage(ctx, h.vc, model, payload, state.out)
 		state.finish()
 	}
 }

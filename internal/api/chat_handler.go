@@ -151,6 +151,10 @@ func (c *ChatHandler) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 		oaiResp,
 		transform.AssistantPrefillFromPayload(geminiPayload),
 	)
+	applyOAIUsage(
+		completeProtocolUsage(r.Context(), c.vc, model, geminiPayload, outputFromOAI(oaiResp)),
+		oaiResp,
+	)
 	writeJSON(w, http.StatusOK, oaiResp)
 }
 
@@ -184,6 +188,7 @@ func (c *ChatHandler) streamChatCompletions(ctx context.Context, w http.Response
 		transform.AssistantPrefillFromPayload(geminiPayload),
 	)
 	var lastCandidate map[string]any
+	var streamOutput protocolOutput
 
 	c.vc.StreamChat(ctx, model, geminiPayload, func(ch vertex.StreamChunk) bool {
 		if isFirst && ch.Err == nil {
@@ -198,6 +203,7 @@ func (c *ChatHandler) streamChatCompletions(ctx context.Context, w http.Response
 		data := cloneStringMap(ch.Data)
 		prefillFilter.FilterGeminiChunk(data)
 		normalizeStreamingGeminiUsage(data, &lastCandidate)
+		mergeProtocolOutput(&streamOutput, outputFromGeminiChunk(data))
 		events := c.respConv.StreamToSSE(data, model, requestID, isFirst)
 		isFirst = false
 		for _, ev := range events {
@@ -238,6 +244,7 @@ func (c *ChatHandler) streamChatCompletions(ctx context.Context, w http.Response
 			return
 		}
 		gotContent = true
+		streamOutput.Text += tail
 	}
 	if !gotContent && !prefillFilter.SawText() {
 		ee := vertex.NewEmptyResponseError("Upstream returned empty response (no content)")
@@ -247,7 +254,13 @@ func (c *ChatHandler) streamChatCompletions(ctx context.Context, w http.Response
 	if !hasFinish {
 		base := streamChunkBase(model, requestID)
 		base["choices"] = []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "length"}}
-		writeSilent(sseEvent(base))
+		if !writeSilent(sseEvent(base)) {
+			return
+		}
+	}
+	streamOutput = completeProtocolUsage(ctx, c.vc, model, geminiPayload, streamOutput)
+	if !writeOAIStreamUsageValues(writeSilent, streamOutput, model, requestID, time.Now().Unix(), true) {
+		return
 	}
 	writeSilent("data: [DONE]\n\n")
 }
@@ -279,6 +292,7 @@ func (c *ChatHandler) oaiFakeStream(ctx context.Context, w http.ResponseWriter, 
 		firstChoiceContent(oai),
 		transform.AssistantPrefillFromPayload(geminiPayload),
 	)
+	applyOAIUsage(completeProtocolUsage(ctx, c.vc, model, geminiPayload, outputFromOAI(oai)), oai)
 
 	createdTS := time.Now().Unix()
 	chunks := splitIntoRuneChunks(contentText)
@@ -339,6 +353,7 @@ func (c *ChatHandler) oaiAggregateStream(ctx context.Context, w http.ResponseWri
 		firstChoiceContent(oai),
 		transform.AssistantPrefillFromPayload(geminiPayload),
 	)
+	applyOAIUsage(completeProtocolUsage(ctx, c.vc, model, geminiPayload, outputFromOAI(oai)), oai)
 
 	createdTS := time.Now().Unix()
 	base := streamChunkBase(model, requestID)
@@ -383,10 +398,33 @@ func writeOAIStreamUsage(
 	if !ok || len(usage) == 0 {
 		return true
 	}
+	out := outputFromOAI(map[string]any{"usage": usage})
+	return writeOAIStreamUsageValues(write, out, model, requestID, created, false)
+}
+
+func writeOAIStreamUsageValues(
+	write func(string) bool,
+	out protocolOutput,
+	model, requestID string,
+	created int64,
+	compatChoice bool,
+) bool {
+	if out.Input == 0 && out.Output == 0 && out.Total == 0 {
+		return true
+	}
 	chunk := streamChunkBase(model, requestID)
 	chunk["created"] = created
 	chunk["choices"] = []any{}
-	chunk["usage"] = usage
+	if compatChoice {
+		// RikkaHub 等客户端在 choices 非空时一定会进入消息处理流程，再合并 usage。
+		// 空 delta 不会生成或重复任何正文。
+		chunk["choices"] = []any{map[string]any{
+			"index": 0, "delta": map[string]any{}, "finish_reason": nil,
+		}}
+	}
+	chunk["usage"] = map[string]any{
+		"prompt_tokens": out.Input, "completion_tokens": out.Output, "total_tokens": out.Total,
+	}
 	return write(sseEvent(chunk))
 }
 

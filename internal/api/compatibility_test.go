@@ -542,6 +542,59 @@ func TestCompatibilityEndpoints(t *testing.T) {
 			t.Fatalf("OpenAI 流未生成 RikkaHub 可读取的分项 usage: %s", oaiStream)
 		}
 	})
+
+	t.Run("rikkahub_stream_usage_fallback_when_upstream_omits_metadata", func(t *testing.T) {
+		fx := newTestServer(t)
+		noUsageUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			_, _ = w.Write([]byte(
+				`[{"results":[{"data":{"ui":{"streamGenerateContentAnonymous":` +
+					`{"candidates":[{"content":{"parts":[{"text":"hello"}],"role":"model"},` +
+					`"finishReason":"STOP"}]}}}}]}]`,
+			))
+		}))
+		defer noUsageUpstream.Close()
+		vertex.SetBatchGraphqlURL(noUsageUpstream.URL + "/batchGraphql?key=test&prettyPrint=false")
+		t.Cleanup(func() {
+			vertex.SetBatchGraphqlURL(fx.mockUpstream.URL + "/batchGraphql?key=test&prettyPrint=false")
+		})
+
+		nativeResp := postWithHeader(
+			t,
+			fx.server.URL+"/v1beta/models/gemini-3.6-flash:streamGenerateContent?alt=sse",
+			"x-goog-api-key",
+			"sk-test-key",
+			map[string]any{"contents": []any{map[string]any{
+				"role": "user", "parts": []any{map[string]any{"text": "hello"}},
+			}}},
+		)
+		nativeData, _ := io.ReadAll(nativeResp.Body)
+		nativeResp.Body.Close()
+		nativeStream := string(nativeData)
+		if nativeResp.StatusCode != http.StatusOK ||
+			!strings.Contains(nativeStream, `"promptTokenCount":2`) ||
+			!strings.Contains(nativeStream, `"candidatesTokenCount":2`) ||
+			!strings.Contains(nativeStream, `"totalTokenCount":4`) ||
+			!strings.Contains(nativeStream, `"parts":[]`) {
+			t.Fatalf("Gemini 原生流没有补发可显示的估算 usage: %s", nativeStream)
+		}
+
+		oaiResp := doPost(t, fx.server.URL+"/v1/chat/completions", "sk-test-key", map[string]any{
+			"model": "gemini-3.6-flash", "stream": true,
+			"stream_options": map[string]any{"include_usage": true},
+			"messages":       []any{map[string]any{"role": "user", "content": "hello"}},
+		})
+		oaiData, _ := io.ReadAll(oaiResp.Body)
+		oaiResp.Body.Close()
+		oaiStream := string(oaiData)
+		if oaiResp.StatusCode != http.StatusOK ||
+			!strings.Contains(oaiStream, `"prompt_tokens":2`) ||
+			!strings.Contains(oaiStream, `"completion_tokens":2`) ||
+			!strings.Contains(oaiStream, `"total_tokens":4`) ||
+			!strings.Contains(oaiStream, `"choices":[{"delta":{},"finish_reason":null,"index":0}]`) {
+			t.Fatalf("OpenAI 流没有补发 RikkaHub 可合并的估算 usage: %s", oaiStream)
+		}
+	})
 }
 
 func postWithHeader(t *testing.T, url, header, key string, body any) *http.Response {
