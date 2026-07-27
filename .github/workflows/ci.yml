@@ -40,4 +40,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Build production image
-        run: docker build --tag vertex-ai-proxy:ci .
+        # Docker Hub 在 GitHub Actions runner 上经常抖动（i/o timeout / rate limit），
+        # 失败时重试最多 3 次，每次间隔 30 秒。
+        uses: nick-fields/retry@v3
+        with:
+          max_attempts: 3
+          timeout_minutes: 15
+          retry_wait_seconds: 30
+          command: docker build --tag vertex-ai-proxy:ci .
+          on_retry_command: docker system prune -f || true
