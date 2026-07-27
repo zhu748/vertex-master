@@ -313,8 +313,10 @@ func TestRefactor(t *testing.T) {
 		streamBody := string(data)
 		if !strings.Contains(streamBody, `"role":"assistant"`) ||
 			!strings.Contains(streamBody, `"finish_reason":"stop"`) ||
+			!strings.Contains(streamBody, `"choices":[],"created"`) ||
+			!strings.Contains(streamBody, `"total_tokens":30`) ||
 			!strings.Contains(streamBody, "data: [DONE]") {
-			t.Fatalf("空续写也必须返回完整 SSE assistant/finish/DONE，got %q", streamBody)
+			t.Fatalf("空续写也必须返回完整 SSE assistant/finish/usage/DONE，got %q", streamBody)
 		}
 	})
 

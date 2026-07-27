@@ -12,17 +12,20 @@ import (
 type protocolToolCall struct {
 	ID        string
 	Name      string
+	Namespace string
 	Arguments string
 }
 
 type protocolOutput struct {
-	Text      string
-	Reasoning string
-	ToolCalls []protocolToolCall
-	Finish    string
-	Input     int
-	Output    int
-	Total     int
+	Text              string
+	Reasoning         string
+	ToolCalls         []protocolToolCall
+	Finish            string
+	Input             int
+	Output            int
+	Total             int
+	CachedInputTokens int
+	ReasoningTokens   int
 }
 
 func decodeJSONObject(r io.Reader) (map[string]any, error) {
@@ -68,6 +71,12 @@ func outputFromOAI(resp map[string]any) protocolOutput {
 		out.Input = protocolIntValue(usage["prompt_tokens"])
 		out.Output = protocolIntValue(usage["completion_tokens"])
 		out.Total = protocolIntValue(usage["total_tokens"])
+		if details, ok := usage["prompt_tokens_details"].(map[string]any); ok {
+			out.CachedInputTokens = protocolIntValue(details["cached_tokens"])
+		}
+		if details, ok := usage["completion_tokens_details"].(map[string]any); ok {
+			out.ReasoningTokens = protocolIntValue(details["reasoning_tokens"])
+		}
 	}
 	if out.Total == 0 {
 		out.Total = out.Input + out.Output
@@ -112,6 +121,8 @@ func outputFromGeminiChunk(chunk map[string]any) protocolOutput {
 		out.Input = protocolIntValue(usage["promptTokenCount"]) + protocolIntValue(usage["toolUsePromptTokenCount"])
 		out.Output = protocolIntValue(usage["candidatesTokenCount"]) + protocolIntValue(usage["thoughtsTokenCount"])
 		out.Total = protocolIntValue(usage["totalTokenCount"])
+		out.CachedInputTokens = protocolIntValue(usage["cachedContentTokenCount"])
+		out.ReasoningTokens = protocolIntValue(usage["thoughtsTokenCount"])
 	}
 	if out.Total == 0 {
 		out.Total = out.Input + out.Output

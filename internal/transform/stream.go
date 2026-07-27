@@ -94,10 +94,17 @@ func ConvertRealtimeChunk(chunk map[string]any, model, requestID string, isFirst
 		finishEvt := base()
 		choice := map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": oaiFinish}
 		finishEvt["choices"] = []any{choice}
-		if usageMeta, ok := chunk["usageMetadata"].(map[string]any); ok && len(usageMeta) > 0 {
-			finishEvt["usage"] = ConvertUsage(usageMeta)
-		}
 		events = append(events, sseLine(finishEvt))
+	}
+
+	// Gemini 经常把 usageMetadata 放在没有 candidates/finishReason 的独立末帧。
+	// OpenAI 兼容客户端期望它是 [DONE] 前 choices=[] 的独立统计块；不要把
+	// usage 绑定到 finish 帧，否则 ChatBox、SillyTavern 等客户端可能看不到用量。
+	if usageMeta, ok := chunk["usageMetadata"].(map[string]any); ok && len(usageMeta) > 0 {
+		usageEvt := base()
+		usageEvt["choices"] = []any{}
+		usageEvt["usage"] = ConvertUsage(usageMeta)
+		events = append(events, sseLine(usageEvt))
 	}
 
 	return events

@@ -65,6 +65,49 @@ curl http://127.0.0.1:2156/v1/messages \
 
 Responses 当前实现面向无状态生成：支持 `input`、`instructions`、图片、函数工具、结构化输出和 SSE；`previous_response_id`、Conversations 及 OpenAI 托管工具不会在本地持久化或执行。
 
+## 🧑‍💻 Codex CLI / Claude Code
+
+### Codex CLI
+
+Codex CLI 应使用 Responses API。先把 API Key 放进环境变量：
+
+```powershell
+$env:VPROXY_API_KEY = "mykey123"
+```
+
+在 `%USERPROFILE%\.codex\config.toml` 中添加：
+
+```toml
+model = "gemini-3.6-flash"
+model_provider = "vertex_proxy"
+model_reasoning_summary = "none"
+model_supports_reasoning_summaries = false
+
+[model_providers.vertex_proxy]
+name = "Vertex AI Proxy"
+base_url = "http://127.0.0.1:2156/v1"
+env_key = "VPROXY_API_KEY"
+wire_api = "responses"
+supports_websockets = false
+```
+
+然后直接运行 `codex`。当前兼容文本、图片、SSE、并行函数工具调用、工具结果回传和细分 token 统计。Responses reasoning summary、`reasoning.encrypted_content`、OpenAI 托管工具及 `previous_response_id` 服务端续接暂不实现；上面的配置会关闭 CLI 对 reasoning summary 的期待。
+
+### Claude Code
+
+按 Anthropic LLM gateway 方式设置环境变量，并显式选择代理中存在的模型：
+
+```powershell
+$env:ANTHROPIC_BASE_URL = "http://127.0.0.1:2156"
+$env:ANTHROPIC_AUTH_TOKEN = "mykey123"
+$env:DISABLE_PROMPT_CACHING = "1"
+claude --model gemini-3.6-flash
+```
+
+当前兼容 Messages 流式/非流式、系统提示、多模态输入、并行 Tool Use / Tool Result、Extended Thinking 事件、ping 保活、token 统计和 `/v1/messages/count_tokens`。其中 count_tokens 为本地近似估算；Anthropic Prompt Caching 不会产生真实缓存收益，因此建议禁用。
+
+> 两种 CLI 的本地工具均由 CLI 自己执行，本项目只负责模型协议转换。OpenAI/Anthropic 的服务端托管工具不在支持范围内。
+
 **完整的分平台部署教程**（包括开机自启、代理配置、手机部署、常见问题解答）见 **[部署指南](部署指南.md)**。
 
 ## 🛠 自己编译（可选）
@@ -92,6 +135,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ver
 | `admin_password` | 自动生成 | 管理面板登录密码 |
 | `max_retries` | 1 | 请求失败重试次数 |
 | `max_request_mb` | 64 | 单次 HTTP 请求体上限（MiB，面板修改即时生效） |
+| `drop_max_tokens` | false | 移除客户端附带的输出 token 上限，避免思考 token 挤占正文；默认严格遵守客户端上限 |
 | `proxy_url` | 空 | 出站代理地址 (如 `http://127.0.0.1:7890`) |
 | `parallel_pool_enabled` | true | 是否开启并发竞速节点池 |
 | `parallel_pool_retry_enabled` | true | 并发池节点遇到 429 等可重试错误时是否在节点内自动重试 |

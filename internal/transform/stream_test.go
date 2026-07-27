@@ -50,7 +50,7 @@ func TestConvertRealtimeChunk_UnspecifiedNoFinishEvent(t *testing.T) {
 	}
 }
 
-// 真实 finishReason（STOP）发 finish 事件，并带上 usage。
+// 真实 finishReason（STOP）发 finish 事件，usage 使用独立空 choices 统计帧。
 func TestConvertRealtimeChunk_RealFinishWithUsage(t *testing.T) {
 	chunk := map[string]any{
 		"candidates": []any{map[string]any{
@@ -62,16 +62,34 @@ func TestConvertRealtimeChunk_RealFinishWithUsage(t *testing.T) {
 		},
 	}
 	events := ConvertRealtimeChunk(chunk, "m", "r", false)
-	// content 事件 + finish 事件。
-	if len(events) != 2 {
-		t.Fatalf("events=%d, want 2\n%v", len(events), events)
+	// content 事件 + finish 事件 + usage 事件。
+	if len(events) != 3 {
+		t.Fatalf("events=%d, want 3\n%v", len(events), events)
 	}
 	finishEvt := events[1]
 	if !strings.Contains(finishEvt, `"finish_reason":"stop"`) {
 		t.Errorf("应发 finish_reason=stop: %s", finishEvt)
 	}
-	if !strings.Contains(finishEvt, `"usage"`) || !strings.Contains(finishEvt, `"total_tokens":15`) {
-		t.Errorf("finish 事件应带 usage: %s", finishEvt)
+	usageEvt := events[2]
+	if !strings.Contains(usageEvt, `"choices":[]`) ||
+		!strings.Contains(usageEvt, `"usage"`) ||
+		!strings.Contains(usageEvt, `"total_tokens":15`) {
+		t.Errorf("应发送独立 usage 统计帧: %s", usageEvt)
+	}
+}
+
+func TestConvertRealtimeChunk_UsageOnlyFrame(t *testing.T) {
+	chunk := map[string]any{
+		"usageMetadata": map[string]any{
+			"promptTokenCount": float64(11), "candidatesTokenCount": float64(7), "totalTokenCount": float64(18),
+		},
+	}
+	events := ConvertRealtimeChunk(chunk, "m", "r", false)
+	if len(events) != 1 {
+		t.Fatalf("usage-only frame events=%d, want 1: %v", len(events), events)
+	}
+	if !strings.Contains(events[0], `"choices":[]`) || !strings.Contains(events[0], `"total_tokens":18`) {
+		t.Fatalf("usage-only frame 未转换成 OpenAI 统计帧: %s", events[0])
 	}
 }
 

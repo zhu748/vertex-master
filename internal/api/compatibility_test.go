@@ -55,6 +55,88 @@ func TestResponsesRequestConversion(t *testing.T) {
 	}
 }
 
+func TestResponsesRequestConversionGroupsParallelFunctionCalls(t *testing.T) {
+	body := map[string]any{
+		"input": []any{
+			map[string]any{"type": "message", "role": "user", "content": "run both"},
+			map[string]any{"type": "reasoning", "id": "rs_1", "summary": []any{}},
+			map[string]any{
+				"type": "function_call", "call_id": "call_1", "name": "read_file", "arguments": `{"path":"a"}`,
+			},
+			map[string]any{
+				"type": "function_call", "call_id": "call_2", "name": "read_file", "arguments": `{"path":"b"}`,
+			},
+			map[string]any{"type": "function_call_output", "call_id": "call_1", "output": "A"},
+			map[string]any{"type": "function_call_output", "call_id": "call_2", "output": "B"},
+		},
+	}
+	chat, err := responsesToChatRequest(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages := chat["messages"].([]any)
+	if len(messages) != 4 {
+		t.Fatalf("并行调用应转换为 user + assistant(2 calls) + 2 tool，got %#v", messages)
+	}
+	assistant := messages[1].(map[string]any)
+	toolCalls, _ := assistant["tool_calls"].([]any)
+	if assistant["role"] != "assistant" || len(toolCalls) != 2 {
+		t.Fatalf("并行 function_call 未合并: %#v", assistant)
+	}
+}
+
+func TestResponsesRequestConversionSupportsCodexNamespaceAndHostedTools(t *testing.T) {
+	body := map[string]any{
+		"input": "hello",
+		"tools": []any{
+			map[string]any{
+				"type": "namespace", "name": "mcp__demo", "description": "Demo tools",
+				"tools": []any{map[string]any{
+					"type": "function", "name": "lookup", "description": "Lookup",
+					"parameters": map[string]any{"type": "object"},
+				}},
+			},
+			map[string]any{"type": "namespace", "name": "collaboration"},
+			map[string]any{"type": "web_search"},
+		},
+	}
+	chat, err := responsesToChatRequest(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools := chat["tools"].([]any)
+	if len(tools) != 1 {
+		t.Fatalf("应只保留展平后的 namespace 子工具: %#v", tools)
+	}
+	fn := tools[0].(map[string]any)["function"].(map[string]any)
+	if fn["name"] != "mcp__demo__lookup" {
+		t.Fatalf("namespace 工具名未展平: %#v", fn)
+	}
+	mappings := chat[responsesNamespaceToolsKey].(map[string]responsesNamespacedTool)
+	out := protocolOutput{ToolCalls: []protocolToolCall{{Name: "mcp__demo__lookup"}}}
+	restoreResponsesToolNamespaces(&out, mappings)
+	if out.ToolCalls[0].Namespace != "mcp__demo" || out.ToolCalls[0].Name != "lookup" {
+		t.Fatalf("namespace 工具回调未还原: %+v", out.ToolCalls[0])
+	}
+}
+
+func TestAnthropicMessagesAcceptsClaudeCodeSystemRole(t *testing.T) {
+	chat, err := anthropicToChatRequest(map[string]any{
+		"max_tokens": float64(128),
+		"messages": []any{
+			map[string]any{"role": "system", "content": "CLI context"},
+			map[string]any{"role": "user", "content": "hello"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages := chat["messages"].([]any)
+	if len(messages) != 2 || messages[0].(map[string]any)["role"] != "system" {
+		t.Fatalf("Claude Code system role 未保留: %#v", messages)
+	}
+}
+
 func TestAnthropicRequestConversion(t *testing.T) {
 	body := map[string]any{
 		"system":     []any{map[string]any{"type": "text", "text": "Be concise."}},
@@ -120,6 +202,12 @@ func TestCompatibilityEndpoints(t *testing.T) {
 		if len(output) == 0 {
 			t.Fatal("missing response output")
 		}
+		usage, _ := body["usage"].(map[string]any)
+		if usage["input_tokens"] != float64(10) ||
+			usage["output_tokens"] != float64(20) ||
+			usage["total_tokens"] != float64(30) {
+			t.Fatalf("Responses 非流式 usage 不正确: %#v", usage)
+		}
 	})
 
 	t.Run("responses_fake_stream", func(t *testing.T) {
@@ -132,6 +220,7 @@ func TestCompatibilityEndpoints(t *testing.T) {
 		stream := string(data)
 		for _, want := range []string{
 			"event: response.created", "event: response.output_text.delta", "event: response.completed",
+			`"input_tokens":10`, `"output_tokens":20`, `"total_tokens":30`,
 		} {
 			if !strings.Contains(stream, want) {
 				t.Fatalf("missing %q in stream: %s", want, stream)
@@ -157,6 +246,10 @@ func TestCompatibilityEndpoints(t *testing.T) {
 		if body["type"] != "message" || body["role"] != "assistant" {
 			t.Fatalf("unexpected message: %#v", body)
 		}
+		usage, _ := body["usage"].(map[string]any)
+		if usage["input_tokens"] != float64(10) || usage["output_tokens"] != float64(20) {
+			t.Fatalf("Anthropic 非流式 usage 不正确: %#v", usage)
+		}
 	})
 
 	t.Run("anthropic_fake_stream", func(t *testing.T) {
@@ -169,7 +262,8 @@ func TestCompatibilityEndpoints(t *testing.T) {
 		data, _ := io.ReadAll(resp.Body)
 		stream := string(data)
 		for _, want := range []string{
-			"event: message_start", "event: content_block_delta", "event: message_stop",
+			"event: message_start", "event: content_block_delta", "event: message_delta", "event: message_stop",
+			`"input_tokens":10`, `"output_tokens":20`,
 		} {
 			if !strings.Contains(stream, want) {
 				t.Fatalf("missing %q in stream: %s", want, stream)

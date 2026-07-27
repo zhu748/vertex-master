@@ -86,6 +86,30 @@ func TestConvertChatRequest_PlainText(t *testing.T) {
 	}
 }
 
+func TestBuildVertexVariables_DropsNativeGeminiMaxOutputTokens(t *testing.T) {
+	payload := map[string]any{
+		"contents": []any{map[string]any{
+			"role": "user", "parts": []any{map[string]any{"text": "你好"}},
+		}},
+		"generationConfig": map[string]any{"maxOutputTokens": float64(64)},
+	}
+	appCfg := config.DefaultConfig()
+	appCfg.DropMaxTokens = true
+	vars := BuildVertexVariables("gemini-3.1-flash", payload, config.StaticProvider(appCfg))
+	if gc, ok := vars["generationConfig"].(map[string]any); ok {
+		if _, exists := gc["maxOutputTokens"]; exists {
+			t.Fatalf("Gemini 原生请求也应移除 maxOutputTokens: %v", gc)
+		}
+	}
+
+	appCfg.DropMaxTokens = false
+	vars = BuildVertexVariables("gemini-3.1-flash", payload, config.StaticProvider(appCfg))
+	gc, ok := vars["generationConfig"].(map[string]any)
+	if !ok || gc["maxOutputTokens"] != float64(64) {
+		t.Fatalf("关闭开关后应保留 maxOutputTokens: %v", vars["generationConfig"])
+	}
+}
+
 func TestConvertChatRequest_EmptyMessages(t *testing.T) {
 	_, _, err := ConvertChatRequest(map[string]any{"model": "m", "messages": []any{}}, config.StaticProvider(config.DefaultConfig()))
 	if err == nil {

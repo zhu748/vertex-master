@@ -191,7 +191,9 @@ func isUpstreamWorkloadPath(path string) bool {
 }
 
 func (m *middleware) withMetrics(next http.Handler) http.Handler {
-	skip := map[string]bool{"/": true, "/health": true, "/healthz": true, "/readyz": true}
+	skip := map[string]bool{
+		"/": true, "/health": true, "/healthz": true, "/readyz": true, "/api/hello": true,
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if skip[r.URL.Path] || isAdminPath(r.URL.Path) {
 			next.ServeHTTP(w, r)
@@ -211,7 +213,10 @@ func (m *middleware) withMetrics(next http.Handler) http.Handler {
 }
 
 func (m *middleware) withAPIKey(next http.Handler) http.Handler {
-	excluded := map[string]bool{"/": true, "/health": true, "/healthz": true, "/readyz": true, "/favicon.ico": true}
+	excluded := map[string]bool{
+		"/": true, "/health": true, "/healthz": true, "/readyz": true,
+		"/api/hello": true, "/favicon.ico": true,
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if excluded[r.URL.Path] || isAdminPath(r.URL.Path) {
 			next.ServeHTTP(w, r)

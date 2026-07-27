@@ -48,6 +48,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc("/readyz", s.handleReady)
+	mux.HandleFunc("/api/hello", s.handleAnthropicHello)
 	mux.HandleFunc("/v1/models", s.handleModelsOAI)
 	mux.HandleFunc("/v1beta/models", s.handleModelsGemini)
 	mux.HandleFunc("/v1/chat/completions", s.chat.handleChatCompletions)
@@ -94,6 +95,20 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) handleFavicon(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleAnthropicHello 兼容 Claude Code 启动时对自定义 LLM gateway 的轻量探测。
+// 该端点不暴露配置或密钥，仅表明 HTTP 服务可达。
+func (s *Server) handleAnthropicHello(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodHead && r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if r.Method == http.MethodHead {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
 }
 
 func (s *Server) handleAssets(w http.ResponseWriter, r *http.Request) {

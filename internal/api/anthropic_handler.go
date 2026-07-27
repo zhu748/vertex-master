@@ -142,8 +142,14 @@ func anthropicToChatRequest(body map[string]any) (map[string]any, error) {
 			continue
 		}
 		role := stringValue(message["role"])
+		if role == "system" || role == "developer" {
+			if content := anthropicText(message["content"]); content != "" {
+				messages = append(messages, map[string]any{"role": "system", "content": content})
+			}
+			continue
+		}
 		if role != "user" && role != "assistant" {
-			return nil, fmt.Errorf("message role must be 'user' or 'assistant'")
+			return nil, fmt.Errorf("message role %q must be 'user' or 'assistant'", role)
 		}
 		converted, err := anthropicMessageToChat(role, message["content"])
 		if err != nil {
@@ -381,14 +387,15 @@ func (h *AnthropicHandler) streamMessages(
 }
 
 type anthropicStreamState struct {
-	sw       *sseWriter
-	id       string
-	model    string
-	index    int
-	openType string
-	text     string
-	out      protocolOutput
-	mu       sync.Mutex // 保护 sw 的并发写（ping goroutine 与主回调可能竞争）
+	sw            *sseWriter
+	id            string
+	model         string
+	index         int
+	openType      string
+	text          string
+	blockThinking string
+	out           protocolOutput
+	mu            sync.Mutex // 保护 sw 的并发写（ping goroutine 与主回调可能竞争）
 }
 
 func (s *anthropicStreamState) emit(event string, fields map[string]any) {
@@ -430,23 +437,18 @@ func (s *anthropicStreamState) consume(chunk protocolOutput) {
 		s.out.Finish = chunk.Finish
 	}
 	if chunk.Reasoning != "" {
-		s.closeBlock()
-		s.emit("content_block_start", map[string]any{
-			"index": s.index, "content_block": map[string]any{"type": "thinking", "thinking": "", "signature": ""},
-		})
+		if s.openType != "thinking" {
+			s.closeBlock()
+			s.openType = "thinking"
+			s.blockThinking = ""
+			s.emit("content_block_start", map[string]any{
+				"index": s.index, "content_block": map[string]any{"type": "thinking", "thinking": "", "signature": ""},
+			})
+		}
 		s.emit("content_block_delta", map[string]any{
 			"index": s.index, "delta": map[string]any{"type": "thinking_delta", "thinking": chunk.Reasoning},
 		})
-		// Claude Code SDK 要求 thinking 块在 content_block_stop 前必须有 signature_delta。
-		// 没有 signature 的 thinking 块在下一轮对话历史中会被 SDK 拒绝。
-		// 这里用 thinking 内容的 SHA-256 摘要作为伪签名（Anthropic 原生签名是加密的，
-		// 但 Claude Code 只校验字段存在且非空，不验签内容）。
-		signature := thinkingSignature(chunk.Reasoning)
-		s.emit("content_block_delta", map[string]any{
-			"index": s.index, "delta": map[string]any{"type": "signature_delta", "signature": signature},
-		})
-		s.emit("content_block_stop", map[string]any{"index": s.index})
-		s.index++
+		s.blockThinking += chunk.Reasoning
 		s.out.Reasoning += chunk.Reasoning
 	}
 	if chunk.Text != "" {
@@ -485,6 +487,17 @@ func (s *anthropicStreamState) consume(chunk protocolOutput) {
 func (s *anthropicStreamState) closeBlock() {
 	if s.openType == "" {
 		return
+	}
+	if s.openType == "thinking" {
+		// Claude Code SDK 要求 thinking 块在 content_block_stop 前必须有非空
+		// signature_delta。连续思考增量必须共享同一个块，并对完整块签名。
+		s.emit("content_block_delta", map[string]any{
+			"index": s.index,
+			"delta": map[string]any{
+				"type": "signature_delta", "signature": thinkingSignature(s.blockThinking),
+			},
+		})
+		s.blockThinking = ""
 	}
 	s.emit("content_block_stop", map[string]any{"index": s.index})
 	s.index++

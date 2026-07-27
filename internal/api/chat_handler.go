@@ -290,6 +290,9 @@ func (c *ChatHandler) oaiFakeStream(ctx context.Context, w http.ResponseWriter, 
 		if !sw.write(sseEvent(base)) {
 			return
 		}
+		if !writeOAIStreamUsage(sw.write, oai, model, requestID, createdTS) {
+			return
+		}
 		_ = sw.write("data: [DONE]\n\n")
 		return
 	}
@@ -310,6 +313,9 @@ func (c *ChatHandler) oaiFakeStream(ctx context.Context, w http.ResponseWriter, 
 		if !sw.write(sseEvent(base)) {
 			return
 		}
+	}
+	if !writeOAIStreamUsage(sw.write, oai, model, requestID, createdTS) {
+		return
 	}
 	_ = sw.write("data: [DONE]\n\n")
 }
@@ -353,8 +359,32 @@ func (c *ChatHandler) oaiAggregateStream(ctx context.Context, w http.ResponseWri
 		"finish_reason": "stop",
 	}
 	baseEnd["choices"] = []any{choiceEnd}
-	sw.write(sseEvent(baseEnd))
+	if !sw.write(sseEvent(baseEnd)) {
+		return
+	}
+	if !writeOAIStreamUsage(sw.write, oai, model, requestID, createdTS) {
+		return
+	}
 	_ = sw.write("data: [DONE]\n\n")
+}
+
+// writeOAIStreamUsage 按 OpenAI 流式协议写出独立 usage 块。choices 必须为空，
+// 这样 ChatBox、SillyTavern 等客户端能把它识别为统计帧而不是普通内容帧。
+func writeOAIStreamUsage(
+	write func(string) bool,
+	oai map[string]any,
+	model, requestID string,
+	created int64,
+) bool {
+	usage, ok := oai["usage"].(map[string]any)
+	if !ok || len(usage) == 0 {
+		return true
+	}
+	chunk := streamChunkBase(model, requestID)
+	chunk["created"] = created
+	chunk["choices"] = []any{}
+	chunk["usage"] = usage
+	return write(sseEvent(chunk))
 }
 
 func firstChoiceContent(oai map[string]any) string {

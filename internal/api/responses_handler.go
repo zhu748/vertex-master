@@ -20,6 +20,13 @@ type ResponsesHandler struct {
 	respConv transform.ResponseConverter
 }
 
+const responsesNamespaceToolsKey = "__responses_namespace_tools"
+
+type responsesNamespacedTool struct {
+	Namespace string
+	Name      string
+}
+
 func (h *ResponsesHandler) handleResponses(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		oaiError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error")
@@ -55,9 +62,13 @@ func (h *ResponsesHandler) handleResponses(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	transform.ApplyImageConfig(payload, chatBody)
+	namespaceTools, _ := chatBody[responsesNamespaceToolsKey].(map[string]responsesNamespacedTool)
 
 	if protocolBoolValue(body["stream"]) {
-		h.streamResponses(r.Context(), w, rawModel, model, payload, body, useFake || h.cfg.AggregateStream())
+		h.streamResponses(
+			r.Context(), w, rawModel, model, payload, body, namespaceTools,
+			useFake || h.cfg.AggregateStream(),
+		)
 		return
 	}
 
@@ -69,6 +80,7 @@ func (h *ResponsesHandler) handleResponses(w http.ResponseWriter, r *http.Reques
 	}
 	oaiResp := h.respConv.ToOAI(geminiResp, model)
 	out := outputFromOAI(oaiResp)
+	restoreResponsesToolNamespaces(&out, namespaceTools)
 	writeJSON(w, http.StatusOK, buildResponsesResponse(body, rawModel, "resp_"+reqID24(), out))
 }
 
@@ -106,6 +118,17 @@ func responsesToChatRequest(body map[string]any) (map[string]any, error) {
 		}
 	}
 
+	convertedTools, namespaceTools, err := convertResponsesTools(body["tools"])
+	if err != nil {
+		return nil, err
+	}
+	if len(convertedTools) > 0 {
+		chat["tools"] = convertedTools
+	}
+	if len(namespaceTools) > 0 {
+		chat[responsesNamespaceToolsKey] = namespaceTools
+	}
+
 	messages := []any{}
 	if instructions := responseInstructions(body["instructions"]); instructions != "" {
 		messages = append(messages, map[string]any{"role": "system", "content": instructions})
@@ -124,6 +147,16 @@ func responsesToChatRequest(body map[string]any) (map[string]any, error) {
 		if len(value) == 0 {
 			return nil, fmt.Errorf("'input' must not be empty")
 		}
+		pendingToolCalls := []any{}
+		flushToolCalls := func() {
+			if len(pendingToolCalls) == 0 {
+				return
+			}
+			messages = append(messages, map[string]any{
+				"role": "assistant", "content": "", "tool_calls": pendingToolCalls,
+			})
+			pendingToolCalls = nil
+		}
 		for _, raw := range value {
 			item, ok := raw.(map[string]any)
 			if !ok {
@@ -136,20 +169,23 @@ func responsesToChatRequest(body map[string]any) (map[string]any, error) {
 				if id == "" {
 					id = stringValue(item["id"])
 				}
-				messages = append(messages, map[string]any{
-					"role": "assistant",
-					"tool_calls": []any{map[string]any{
-						"id": id, "type": "function",
-						"function": map[string]any{
-							"name": item["name"], "arguments": jsonString(item["arguments"]),
-						},
-					}},
+				name := stringValue(item["name"])
+				if namespace := stringValue(item["namespace"]); namespace != "" {
+					name = flattenResponsesToolName(namespace, name)
+				}
+				pendingToolCalls = append(pendingToolCalls, map[string]any{
+					"id": id, "type": "function",
+					"function": map[string]any{
+						"name": name, "arguments": jsonString(item["arguments"]),
+					},
 				})
 			case "function_call_output":
+				flushToolCalls()
 				messages = append(messages, map[string]any{
 					"role": "tool", "tool_call_id": item["call_id"], "content": jsonString(item["output"]),
 				})
 			case "message", "":
+				flushToolCalls()
 				role := stringValue(item["role"])
 				if role == "" {
 					role = "user"
@@ -165,8 +201,12 @@ func responsesToChatRequest(body map[string]any) (map[string]any, error) {
 					}
 				}
 				messages = append(messages, map[string]any{"role": role, "content": content})
+			case "reasoning":
+				// Codex 会把上一轮 reasoning item 放回 input。Gemini 不接受该
+				// Responses 专用项，但它不应打断相邻的并行 function_call 分组。
 			}
 		}
+		flushToolCalls()
 	default:
 		return nil, fmt.Errorf("'input' must be a string or array")
 	}
@@ -175,31 +215,6 @@ func responsesToChatRequest(body map[string]any) (map[string]any, error) {
 	}
 	chat["messages"] = messages
 
-	if rawTools, ok := body["tools"].([]any); ok {
-		tools := make([]any, 0, len(rawTools))
-		for _, raw := range rawTools {
-			t, _ := raw.(map[string]any)
-			if t == nil {
-				continue
-			}
-			if stringValue(t["type"]) != "function" {
-				return nil, fmt.Errorf("unsupported Responses tool type %q; only function tools are available", stringValue(t["type"]))
-			}
-			if stringValue(t["name"]) == "" {
-				return nil, fmt.Errorf("function tool is missing required field 'name'")
-			}
-			fn := map[string]any{"name": t["name"]}
-			for _, key := range []string{"description", "parameters", "strict"} {
-				if v, exists := t[key]; exists {
-					fn[key] = v
-				}
-			}
-			tools = append(tools, map[string]any{"type": "function", "function": fn})
-		}
-		if len(tools) > 0 {
-			chat["tools"] = tools
-		}
-	}
 	if choice, ok := body["tool_choice"]; ok {
 		if m, isMap := choice.(map[string]any); isMap && stringValue(m["type"]) == "function" {
 			chat["tool_choice"] = map[string]any{"type": "function", "function": map[string]any{"name": m["name"]}}
@@ -208,6 +223,87 @@ func responsesToChatRequest(body map[string]any) (map[string]any, error) {
 		}
 	}
 	return chat, nil
+}
+
+func convertResponsesTools(raw any) ([]any, map[string]responsesNamespacedTool, error) {
+	converted := []any{}
+	namespaced := map[string]responsesNamespacedTool{}
+	seenNames := map[string]bool{}
+	appendFunction := func(tool map[string]any, name string) error {
+		if name == "" {
+			return fmt.Errorf("function tool is missing required field 'name'")
+		}
+		if seenNames[name] {
+			return fmt.Errorf("duplicate Responses function tool name %q", name)
+		}
+		seenNames[name] = true
+		fn := map[string]any{"name": name}
+		for _, key := range []string{"description", "parameters", "strict"} {
+			if value, exists := tool[key]; exists {
+				fn[key] = value
+			}
+		}
+		converted = append(converted, map[string]any{"type": "function", "function": fn})
+		return nil
+	}
+
+	for _, rawTool := range anySlice(raw) {
+		tool, _ := rawTool.(map[string]any)
+		if tool == nil {
+			continue
+		}
+		switch typ := stringValue(tool["type"]); typ {
+		case "function":
+			if err := appendFunction(tool, stringValue(tool["name"])); err != nil {
+				return nil, nil, err
+			}
+		case "namespace":
+			namespace := stringValue(tool["name"])
+			if namespace == "" {
+				return nil, nil, fmt.Errorf("namespace tool is missing required field 'name'")
+			}
+			// Codex 可能只发送 namespace 声明而不附带子工具（例如内置
+			// collaboration）。这种声明无法由 Gemini 调用，安全忽略即可。
+			for _, rawNested := range anySlice(tool["tools"]) {
+				nested, _ := rawNested.(map[string]any)
+				if nested == nil {
+					continue
+				}
+				name := stringValue(nested["name"])
+				flatName := flattenResponsesToolName(namespace, name)
+				if err := appendFunction(nested, flatName); err != nil {
+					return nil, nil, err
+				}
+				namespaced[flatName] = responsesNamespacedTool{Namespace: namespace, Name: name}
+			}
+		case "web_search", "web_search_preview", "image_generation", "file_search", "computer", "code_interpreter":
+			// 这些工具由 OpenAI 服务端执行，当前 Gemini 匿名端点无法代为
+			// 执行。Codex 会在自定义 provider 请求中自动附带其中一部分；
+			// 忽略声明可保留本地 function tools，避免整个编码会话 400。
+			continue
+		default:
+			return nil, nil, fmt.Errorf(
+				"unsupported Responses tool type %q; function and namespace tools are available", typ,
+			)
+		}
+	}
+	return converted, namespaced, nil
+}
+
+func flattenResponsesToolName(namespace, name string) string {
+	return namespace + "__" + name
+}
+
+func restoreResponsesToolNamespaces(out *protocolOutput, mappings map[string]responsesNamespacedTool) {
+	if out == nil || len(mappings) == 0 {
+		return
+	}
+	for i := range out.ToolCalls {
+		if mapped, ok := mappings[out.ToolCalls[i].Name]; ok {
+			out.ToolCalls[i].Name = mapped.Name
+			out.ToolCalls[i].Namespace = mapped.Namespace
+		}
+	}
 }
 
 func responseInstructions(v any) string {
@@ -281,8 +377,8 @@ func buildResponsesResponse(request map[string]any, model, id string, out protoc
 		"tools": defaultAny(request["tools"], []any{}), "top_p": request["top_p"],
 		"truncation": defaultAny(request["truncation"], "disabled"), "metadata": defaultAny(request["metadata"], map[string]any{}),
 		"usage": map[string]any{
-			"input_tokens": out.Input, "input_tokens_details": map[string]any{"cached_tokens": 0},
-			"output_tokens": out.Output, "output_tokens_details": map[string]any{"reasoning_tokens": 0},
+			"input_tokens": out.Input, "input_tokens_details": map[string]any{"cached_tokens": out.CachedInputTokens},
+			"output_tokens": out.Output, "output_tokens_details": map[string]any{"reasoning_tokens": out.ReasoningTokens},
 			"total_tokens": out.Total,
 		},
 	}
@@ -299,10 +395,14 @@ func responseOutputItems(out protocolOutput) []any {
 		})
 	}
 	for _, tc := range out.ToolCalls {
-		items = append(items, map[string]any{
+		item := map[string]any{
 			"id": "fc_" + reqID24(), "type": "function_call", "status": "completed",
 			"call_id": tc.ID, "name": tc.Name, "arguments": tc.Arguments,
-		})
+		}
+		if tc.Namespace != "" {
+			item["namespace"] = tc.Namespace
+		}
+		items = append(items, item)
 	}
 	return items
 }
@@ -326,12 +426,13 @@ func (h *ResponsesHandler) streamResponses(
 	w http.ResponseWriter,
 	displayModel, model string,
 	payload, request map[string]any,
+	namespaceTools map[string]responsesNamespacedTool,
 	aggregate bool,
 ) {
 	sw := newSSEWriter(w, "text/event-stream")
 	id := "resp_" + reqID24()
 	state := &responsesStreamState{
-		sw: sw, id: id, model: displayModel, request: request,
+		sw: sw, id: id, model: displayModel, request: request, namespaceTools: namespaceTools,
 	}
 	state.emit("response.created", map[string]any{
 		"response": state.responseObject("in_progress", protocolOutput{}),
@@ -346,7 +447,9 @@ func (h *ResponsesHandler) streamResponses(
 			state.fail(toVertexError(err))
 			return
 		}
-		state.consume(outputFromOAI(h.respConv.ToOAI(resp, model)))
+		out := outputFromOAI(h.respConv.ToOAI(resp, model))
+		restoreResponsesToolNamespaces(&out, namespaceTools)
+		state.consume(out)
 		state.finish()
 		return
 	}
@@ -367,17 +470,18 @@ func (h *ResponsesHandler) streamResponses(
 }
 
 type responsesStreamState struct {
-	sw          *sseWriter
-	id          string
-	model       string
-	request     map[string]any
-	sequence    int
-	outputIndex int
-	textID      string
-	text        string
-	textOpen    bool
-	items       []any
-	out         protocolOutput
+	sw             *sseWriter
+	id             string
+	model          string
+	request        map[string]any
+	namespaceTools map[string]responsesNamespacedTool
+	sequence       int
+	outputIndex    int
+	textID         string
+	text           string
+	textOpen       bool
+	items          []any
+	out            protocolOutput
 }
 
 func (s *responsesStreamState) emit(event string, fields map[string]any) {
@@ -399,6 +503,7 @@ func (s *responsesStreamState) responseObject(status string, out protocolOutput)
 }
 
 func (s *responsesStreamState) consume(chunk protocolOutput) {
+	restoreResponsesToolNamespaces(&chunk, s.namespaceTools)
 	if chunk.Input > 0 {
 		s.out.Input = chunk.Input
 	}
@@ -407,6 +512,12 @@ func (s *responsesStreamState) consume(chunk protocolOutput) {
 	}
 	if chunk.Total > 0 {
 		s.out.Total = chunk.Total
+	}
+	if chunk.CachedInputTokens > 0 {
+		s.out.CachedInputTokens = chunk.CachedInputTokens
+	}
+	if chunk.ReasoningTokens > 0 {
+		s.out.ReasoningTokens = chunk.ReasoningTokens
 	}
 	if chunk.Finish != "" {
 		switch strings.ToLower(chunk.Finish) {
@@ -446,6 +557,9 @@ func (s *responsesStreamState) consume(chunk protocolOutput) {
 		item := map[string]any{
 			"id": itemID, "type": "function_call", "status": "in_progress",
 			"call_id": tc.ID, "name": tc.Name, "arguments": "",
+		}
+		if tc.Namespace != "" {
+			item["namespace"] = tc.Namespace
 		}
 		s.emit("response.output_item.added", map[string]any{"output_index": s.outputIndex, "item": item})
 		s.emit("response.function_call_arguments.delta", map[string]any{
