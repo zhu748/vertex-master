@@ -468,9 +468,10 @@ func (s *responsesStreamState) closeText() {
 		return
 	}
 	part := map[string]any{"type": "output_text", "text": s.text, "annotations": []any{}, "logprobs": []any{}}
+	// Codex CLI SDK 严格解析 output_text.done 事件，期望 logprobs 和 annotations 字段都存在。
 	s.emit("response.output_text.done", map[string]any{
 		"item_id": s.textID, "output_index": s.outputIndex, "content_index": 0,
-		"text": s.text, "logprobs": []any{},
+		"text": s.text, "annotations": []any{}, "logprobs": []any{},
 	})
 	s.emit("response.content_part.done", map[string]any{
 		"item_id": s.textID, "output_index": s.outputIndex, "content_index": 0, "part": part,

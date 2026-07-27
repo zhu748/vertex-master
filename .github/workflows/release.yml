@@ -2,6 +2,9 @@ name: Release
 
 # 推送 v* 标签时构建多平台产物并发布 Release；
 # 也可在 Actions 页面手动触发（workflow_dispatch）指定版本号试跑。
+#
+# 架构：verify → build(matrix, 并行) → publish(汇总发布)
+# 9 个平台拆成 4 组并行编译，总耗时从 ~15 分钟降到 ~4-5 分钟。
 on:
   push:
     tags:
@@ -42,13 +45,30 @@ jobs:
         run: go vet ./...
       - name: Test
         run: go test ./... -count=1
+      # Race detector 只在 linux/amd64 上跑一次（最快），避免在每个平台重复跑拖慢 CI。
       - name: Race detector
         run: go test -race ./... -count=1
 
+  # 矩阵构建：4 组平台并行编译。
+  # 每组只构建自己负责的平台，产物上传到各自的 artifact。
+  # 后续 publish job 下载所有 artifact 汇总发布。
   build:
-    name: 交叉编译与打包
+    name: 编译 ${{ matrix.group }}
     needs: verify
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - group: windows
+            platforms: 'windows/amd64 windows/386'
+          - group: linux
+            platforms: 'linux/amd64 linux/386 linux/arm64 linux/arm'
+          - group: darwin
+            platforms: 'darwin/amd64 darwin/arm64'
+          - group: android
+            platforms: 'android/arm64'
+            needs_ndk: 'true'
     steps:
       - uses: actions/checkout@v7
 
@@ -57,16 +77,17 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # Android 需要 CGO + NDK；ubuntu runner 自带，路径写入 ANDROID_NDK_HOME
-      # 供 scripts/build-release.sh 使用。
+      # Android 需要 CGO + NDK；ubuntu runner 自带，路径写入 ANDROID_NDK_HOME。
       - name: Resolve Android NDK
+        if: matrix.needs_ndk == 'true'
         run: |
           if [ -n "${ANDROID_NDK_LATEST_HOME:-}" ]; then
             echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
           elif [ -n "${ANDROID_NDK_ROOT:-}" ]; then
             echo "ANDROID_NDK_HOME=$ANDROID_NDK_ROOT" >> "$GITHUB_ENV"
           else
-            echo "未找到 Android NDK，将跳过 android/arm64 产物" >&2
+            echo "未找到 Android NDK，android/arm64 产物将失败" >&2
+            exit 1
           fi
 
       - name: Resolve version
@@ -80,22 +101,52 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "构建版本: $VERSION"
 
-      - name: Build release packages
-        run: bash scripts/build-release.sh "${{ steps.version.outputs.version }}"
-
-      # 产物较多，附一份 SHA256 清单便于用户校验下载完整性。
-      - name: Generate checksums
-        working-directory: dist
+      - name: Build ${{ matrix.group }} packages
+        env:
+          TARGET_PLATFORMS: ${{ matrix.platforms }}
         run: |
-          sha256sum *.zip > SHA256SUMS.txt
-          cat SHA256SUMS.txt
+          # 逐个平台编译，复用 scripts/build-release.sh 里的 build() 函数。
+          # 通过环境变量 TARGET_PLATFORMS 指定只构建哪些平台。
+          bash scripts/build-release-targets.sh "${{ steps.version.outputs.version }}" "$TARGET_PLATFORMS"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: release-packages
+          name: release-packages-${{ matrix.group }}
           path: dist/*
           retention-days: 7
+          if-no-files-found: error
+
+  # 汇总所有平台的产物，生成 SHA256 校验清单，发布 GitHub Release。
+  publish:
+    name: 汇总并发布
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      # 下载所有矩阵 job 的产物到 dist/ 目录（upload-artifact v4 会按 artifact name 分子目录）。
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-packages-*
+          merge-multiple: true
+          path: dist
+
+      - name: Generate checksums
+        working-directory: dist
+        run: |
+          ls -1
+          sha256sum *.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
 
       - name: Publish Release
         uses: softprops/action-gh-release@v2

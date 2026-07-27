@@ -2,9 +2,13 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/bsfdsagfadg/vertex/internal/cli"
 	"github.com/bsfdsagfadg/vertex/internal/transform"
@@ -275,7 +279,8 @@ func anthropicToolResult(v any) string {
 func anthropicMessage(model, id string, out protocolOutput) map[string]any {
 	content := []any{}
 	if out.Reasoning != "" {
-		content = append(content, map[string]any{"type": "thinking", "thinking": out.Reasoning, "signature": ""})
+		// 非流式响应同样需要非空 signature，否则 Claude Code SDK 在下一轮对话历史中会拒绝该 thinking 块。
+		content = append(content, map[string]any{"type": "thinking", "thinking": out.Reasoning, "signature": thinkingSignature(out.Reasoning)})
 	}
 	if out.Text != "" || len(out.ToolCalls) == 0 {
 		content = append(content, map[string]any{"type": "text", "text": out.Text})
@@ -321,13 +326,40 @@ func (h *AnthropicHandler) streamMessages(
 		sw: newSSEWriter(w, "text/event-stream"), id: "msg_" + reqID24(), model: displayModel,
 	}
 	state.start()
+
+	// Claude Code SDK 期望流式连接中每 ~15 秒收到一个 ping 事件保活。
+	// 长思考场景下 Gemini 可能 10-30 秒不发内容，没有 ping 会导致 SDK 误判超时断连。
+	pingCtx, pingCancel := context.WithCancel(ctx)
+	defer pingCancel()
+	var pingWg sync.WaitGroup
+	pingWg.Add(1)
+	go func() {
+		defer pingWg.Done()
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-pingCtx.Done():
+				return
+			case <-ticker.C:
+				if !state.emitPing() {
+					return
+				}
+			}
+		}
+	}()
+
 	if aggregate {
 		resp, err := h.vc.CompleteChat(ctx, model, payload)
 		if err != nil {
+			pingCancel()
+			pingWg.Wait()
 			state.fail(toVertexError(err))
 			return
 		}
 		state.consume(outputFromOAI(h.respConv.ToOAI(resp, model)))
+		pingCancel()
+		pingWg.Wait()
 		state.finish()
 		return
 	}
@@ -341,6 +373,8 @@ func (h *AnthropicHandler) streamMessages(
 		state.consume(outputFromGeminiChunk(chunk.Data))
 		return true
 	})
+	pingCancel()
+	pingWg.Wait()
 	if !failed {
 		state.finish()
 	}
@@ -354,18 +388,31 @@ type anthropicStreamState struct {
 	openType string
 	text     string
 	out      protocolOutput
+	mu       sync.Mutex // 保护 sw 的并发写（ping goroutine 与主回调可能竞争）
 }
 
 func (s *anthropicStreamState) emit(event string, fields map[string]any) {
 	fields["type"] = event
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	_ = s.sw.write(namedSSE(event, fields))
+}
+
+// emitPing 发送一个 Anthropic 协议的 ping 保活事件。
+func (s *anthropicStreamState) emitPing() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sw.write("event: ping\ndata: {}\n\n")
 }
 
 func (s *anthropicStreamState) start() {
 	s.emit("message_start", map[string]any{"message": map[string]any{
 		"id": s.id, "type": "message", "role": "assistant", "model": s.model,
 		"content": []any{}, "stop_reason": nil, "stop_sequence": nil,
-		"usage": map[string]any{"input_tokens": 0, "output_tokens": 0},
+		"usage": map[string]any{
+			"input_tokens": 0, "output_tokens": 0,
+			"cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+		},
 	}})
 }
 
@@ -389,6 +436,14 @@ func (s *anthropicStreamState) consume(chunk protocolOutput) {
 		})
 		s.emit("content_block_delta", map[string]any{
 			"index": s.index, "delta": map[string]any{"type": "thinking_delta", "thinking": chunk.Reasoning},
+		})
+		// Claude Code SDK 要求 thinking 块在 content_block_stop 前必须有 signature_delta。
+		// 没有 signature 的 thinking 块在下一轮对话历史中会被 SDK 拒绝。
+		// 这里用 thinking 内容的 SHA-256 摘要作为伪签名（Anthropic 原生签名是加密的，
+		// 但 Claude Code 只校验字段存在且非空，不验签内容）。
+		signature := thinkingSignature(chunk.Reasoning)
+		s.emit("content_block_delta", map[string]any{
+			"index": s.index, "delta": map[string]any{"type": "signature_delta", "signature": signature},
 		})
 		s.emit("content_block_stop", map[string]any{"index": s.index})
 		s.index++
@@ -443,9 +498,20 @@ func (s *anthropicStreamState) finish() {
 			"stop_reason":   anthropicStopReason(s.out.Finish, len(s.out.ToolCalls) > 0),
 			"stop_sequence": nil,
 		},
-		"usage": map[string]any{"output_tokens": s.out.Output},
+		"usage": map[string]any{
+			"input_tokens": s.out.Input, "output_tokens": s.out.Output,
+			"cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+		},
 	})
 	s.emit("message_stop", map[string]any{})
+}
+
+// thinkingSignature 生成一个伪签名供 Claude Code SDK 校验。
+// Anthropic 原生签名是服务端加密的，这里取 thinking 内容的 SHA-256 前 32 字节
+// 做 base16 编码，保证：1) 非空 2) 同内容同签名 3) 不同内容不同签名。
+func thinkingSignature(thinking string) string {
+	sum := sha256.Sum256([]byte(thinking))
+	return hex.EncodeToString(sum[:32])
 }
 
 func (s *anthropicStreamState) fail(err *vertex.VertexError) {
