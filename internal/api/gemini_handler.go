@@ -111,7 +111,7 @@ func (g *GeminiHandler) handleGeminiGenerate(w http.ResponseWriter, r *http.Requ
 	cleanGeminiFinishReason(resp)
 	cleanGeminiPromptFeedback(resp)
 	applyGeminiUsage(
-		normalizeProtocolUsage(outputFromGeminiChunk(resp)),
+		completeProtocolUsageWithCountTokens(r.Context(), g.vc, actualModel, body, outputFromGeminiChunk(resp)),
 		resp,
 	)
 	rewriteGeminiIDs(resp, generateVPSuffix())
@@ -181,7 +181,7 @@ func (g *GeminiHandler) handleGeminiStreamGenerate(w http.ResponseWriter, r *htt
 		}))
 		return
 	}
-	streamOutput = normalizeProtocolUsage(streamOutput)
+	streamOutput = completeProtocolUsageWithCountTokens(r.Context(), g.vc, actualModel, body, streamOutput)
 	if hasProtocolUsage(streamOutput) {
 		usageChunk := map[string]any{
 			"candidates": []any{map[string]any{
@@ -279,7 +279,7 @@ func (g *GeminiHandler) geminiFakeStream(ctx context.Context, sw *sseWriter, mod
 	}
 
 	text := geminiResponseText(resp)
-	out := normalizeProtocolUsage(outputFromGeminiChunk(resp))
+	out := completeProtocolUsageWithCountTokens(ctx, g.vc, model, body, outputFromGeminiChunk(resp))
 	chunks := splitIntoRuneChunks(text)
 	for i, piece := range chunks {
 		cand := map[string]any{"index": 0, "content": map[string]any{"role": "model", "parts": []any{map[string]any{"text": piece}}}}
@@ -308,17 +308,12 @@ func (g *GeminiHandler) handleCountTokens(w http.ResponseWriter, r *http.Request
 	}
 	log.Printf("[Server] [CountTokens] 收到请求: 模型=%s, 真模型=%s", model, actualModel)
 
-	var contents []any
+	countPayload := body
 	if reqObj, ok2 := body["generateContentRequest"].(map[string]any); ok2 {
-		contents, _ = reqObj["contents"].([]any)
-	} else {
-		contents, _ = body["contents"].([]any)
-	}
-	if contents == nil {
-		contents = []any{}
+		countPayload = reqObj
 	}
 
-	total := g.vc.CountTokens(r.Context(), actualModel, contents)
+	total := g.vc.CountTokens(r.Context(), actualModel, protocolInputContents(countPayload))
 	writeJSON(w, http.StatusOK, map[string]any{"totalTokens": total})
 }
 

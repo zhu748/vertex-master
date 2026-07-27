@@ -152,7 +152,7 @@ func (c *ChatHandler) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 		transform.AssistantPrefillFromPayload(geminiPayload),
 	)
 	applyOAIUsage(
-		normalizeProtocolUsage(outputFromOAI(oaiResp)),
+		completeProtocolUsageWithCountTokens(r.Context(), c.vc, model, geminiPayload, outputFromOAI(oaiResp)),
 		oaiResp,
 	)
 	writeJSON(w, http.StatusOK, oaiResp)
@@ -258,7 +258,7 @@ func (c *ChatHandler) streamChatCompletions(ctx context.Context, w http.Response
 			return
 		}
 	}
-	streamOutput = normalizeProtocolUsage(streamOutput)
+	streamOutput = completeProtocolUsageWithCountTokens(ctx, c.vc, model, geminiPayload, streamOutput)
 	if !writeOAIStreamUsageValues(writeSilent, streamOutput, model, requestID, time.Now().Unix(), true) {
 		return
 	}
@@ -292,7 +292,9 @@ func (c *ChatHandler) oaiFakeStream(ctx context.Context, w http.ResponseWriter, 
 		firstChoiceContent(oai),
 		transform.AssistantPrefillFromPayload(geminiPayload),
 	)
-	applyOAIUsage(normalizeProtocolUsage(outputFromOAI(oai)), oai)
+	out := outputFromOAI(oai)
+	out.Text = contentText
+	applyOAIUsage(completeProtocolUsageWithCountTokens(ctx, c.vc, model, geminiPayload, out), oai)
 
 	createdTS := time.Now().Unix()
 	chunks := splitIntoRuneChunks(contentText)
@@ -353,7 +355,9 @@ func (c *ChatHandler) oaiAggregateStream(ctx context.Context, w http.ResponseWri
 		firstChoiceContent(oai),
 		transform.AssistantPrefillFromPayload(geminiPayload),
 	)
-	applyOAIUsage(normalizeProtocolUsage(outputFromOAI(oai)), oai)
+	out := outputFromOAI(oai)
+	out.Text = contentText
+	applyOAIUsage(completeProtocolUsageWithCountTokens(ctx, c.vc, model, geminiPayload, out), oai)
 
 	createdTS := time.Now().Unix()
 	base := streamChunkBase(model, requestID)

@@ -1,7 +1,9 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -304,7 +306,11 @@ func TestCompatibilityEndpoints(t *testing.T) {
 		// 提前 abort 流、让客户端拿不到后续真正的内容 chunk。
 		fx := newTestServer(t)
 		var calls atomic.Int32
-		blockedUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		blockedUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if testOperationName(r) == "CountTokens" {
+				writeTestCountTokensResponse(w, 1)
+				return
+			}
 			calls.Add(1)
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			_, _ = w.Write([]byte(
@@ -355,7 +361,11 @@ func TestCompatibilityEndpoints(t *testing.T) {
 		// 之前的语义重试会在第一帧就 return false 中断流，导致后续内容拿不到。
 		fx := newTestServer(t)
 		var calls atomic.Int32
-		blockedUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		blockedUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if testOperationName(r) == "CountTokens" {
+				writeTestCountTokensResponse(w, 1)
+				return
+			}
 			calls.Add(1)
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			_, _ = w.Write([]byte(
@@ -400,7 +410,11 @@ func TestCompatibilityEndpoints(t *testing.T) {
 		// 不再 503，由客户端自行判断。这与 c6f6b65 行为一致。
 		fx := newTestServer(t)
 		var calls atomic.Int32
-		blockedUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		blockedUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if testOperationName(r) == "CountTokens" {
+				writeTestCountTokensResponse(w, 1)
+				return
+			}
 			calls.Add(1)
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			_, _ = w.Write([]byte(
@@ -450,7 +464,11 @@ func TestCompatibilityEndpoints(t *testing.T) {
 		// 不再插入 UNAVAILABLE 错误事件。这与 c6f6b65 行为一致。
 		fx := newTestServer(t)
 		var calls atomic.Int32
-		blockedUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		blockedUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if testOperationName(r) == "CountTokens" {
+				writeTestCountTokensResponse(w, 1)
+				return
+			}
 			calls.Add(1)
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			_, _ = w.Write([]byte(
@@ -596,6 +614,155 @@ func TestCompatibilityEndpoints(t *testing.T) {
 			t.Fatalf("OpenAI 流没有透传真实 candidate tokenCount: %s", oaiStream)
 		}
 	})
+
+	t.Run("rikkahub_stream_uses_exact_counttokens_when_generation_omits_usage", func(t *testing.T) {
+		fx := newTestServer(t)
+		exactCountUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if testOperationName(r) == "CountTokens" {
+				count := 76
+				var request map[string]any
+				_ = json.NewDecoder(r.Body).Decode(&request)
+				variables, _ := request["variables"].(map[string]any)
+				contents := anySlice(variables["contents"])
+				if len(contents) > 0 {
+					first, _ := contents[0].(map[string]any)
+					if stringValue(first["role"]) == "model" {
+						count = 8
+					}
+				}
+				writeTestCountTokensResponse(w, count)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			_, _ = w.Write([]byte(
+				`[{"results":[{"data":{"ui":{"streamGenerateContentAnonymous":` +
+					`{"candidates":[{"content":{"parts":[{"text":"hello"}],"role":"model"},` +
+					`"finishReason":"STOP"}]}}}}]}]`,
+			))
+		}))
+		defer exactCountUpstream.Close()
+		vertex.SetBatchGraphqlURL(exactCountUpstream.URL + "/batchGraphql?key=test&prettyPrint=false")
+		t.Cleanup(func() {
+			vertex.SetBatchGraphqlURL(fx.mockUpstream.URL + "/batchGraphql?key=test&prettyPrint=false")
+		})
+
+		nativeResp := postWithHeader(
+			t,
+			fx.server.URL+"/v1beta/models/gemini-3.6-flash:streamGenerateContent?alt=sse",
+			"x-goog-api-key",
+			"sk-test-key",
+			map[string]any{"contents": []any{map[string]any{
+				"role": "user", "parts": []any{map[string]any{"text": "hello"}},
+			}}},
+		)
+		nativeData, _ := io.ReadAll(nativeResp.Body)
+		nativeResp.Body.Close()
+		nativeStream := string(nativeData)
+		if nativeResp.StatusCode != http.StatusOK ||
+			!strings.Contains(nativeStream, `"promptTokenCount":76`) ||
+			!strings.Contains(nativeStream, `"candidatesTokenCount":8`) ||
+			!strings.Contains(nativeStream, `"totalTokenCount":84`) ||
+			!strings.Contains(nativeStream, `"parts":[]`) {
+			t.Fatalf("Gemini 原生流没有补发精确 CountTokens usage: %s", nativeStream)
+		}
+
+		oaiResp := doPost(t, fx.server.URL+"/v1/chat/completions", "sk-test-key", map[string]any{
+			"model": "gemini-3.6-flash", "stream": true,
+			"stream_options": map[string]any{"include_usage": true},
+			"messages":       []any{map[string]any{"role": "user", "content": "hello"}},
+		})
+		oaiData, _ := io.ReadAll(oaiResp.Body)
+		oaiResp.Body.Close()
+		oaiStream := string(oaiData)
+		if oaiResp.StatusCode != http.StatusOK ||
+			!strings.Contains(oaiStream, `"prompt_tokens":76`) ||
+			!strings.Contains(oaiStream, `"completion_tokens":8`) ||
+			!strings.Contains(oaiStream, `"total_tokens":84`) ||
+			!strings.Contains(oaiStream, `"choices":[{"delta":{},"finish_reason":null,"index":0}]`) {
+			t.Fatalf("OpenAI 流没有补发精确 CountTokens usage: %s", oaiStream)
+		}
+
+		responsesResp := doPost(t, fx.server.URL+"/v1/responses", "sk-test-key", map[string]any{
+			"model": "gemini-3.6-flash", "input": "hello",
+		})
+		var responsesBody map[string]any
+		if err := json.NewDecoder(responsesResp.Body).Decode(&responsesBody); err != nil {
+			responsesResp.Body.Close()
+			t.Fatal(err)
+		}
+		responsesResp.Body.Close()
+		responsesUsage, _ := responsesBody["usage"].(map[string]any)
+		if responsesResp.StatusCode != http.StatusOK ||
+			protocolIntValue(responsesUsage["input_tokens"]) != 76 ||
+			protocolIntValue(responsesUsage["output_tokens"]) != 8 ||
+			protocolIntValue(responsesUsage["total_tokens"]) != 84 {
+			t.Fatalf("Responses API 没有补齐精确 CountTokens usage: %#v", responsesBody)
+		}
+
+		responsesStreamResp := doPost(t, fx.server.URL+"/v1/responses", "sk-test-key", map[string]any{
+			"model": "gemini-3.6-flash", "input": "hello", "stream": true,
+		})
+		responsesStreamData, _ := io.ReadAll(responsesStreamResp.Body)
+		responsesStreamResp.Body.Close()
+		responsesStream := string(responsesStreamData)
+		if responsesStreamResp.StatusCode != http.StatusOK ||
+			!strings.Contains(responsesStream, `"input_tokens":76`) ||
+			!strings.Contains(responsesStream, `"output_tokens":8`) ||
+			!strings.Contains(responsesStream, `"total_tokens":84`) {
+			t.Fatalf("Responses 流没有补齐精确 CountTokens usage: %s", responsesStream)
+		}
+
+		anthropicRequest := map[string]any{
+			"model": "gemini-3.6-flash", "max_tokens": 64,
+			"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+		}
+		anthropicResp := postWithHeader(
+			t, fx.server.URL+"/v1/messages", "x-api-key", "sk-test-key", anthropicRequest,
+		)
+		var anthropicBody map[string]any
+		if err := json.NewDecoder(anthropicResp.Body).Decode(&anthropicBody); err != nil {
+			anthropicResp.Body.Close()
+			t.Fatal(err)
+		}
+		anthropicResp.Body.Close()
+		anthropicUsage, _ := anthropicBody["usage"].(map[string]any)
+		if anthropicResp.StatusCode != http.StatusOK ||
+			protocolIntValue(anthropicUsage["input_tokens"]) != 76 ||
+			protocolIntValue(anthropicUsage["output_tokens"]) != 8 {
+			t.Fatalf("Anthropic API 没有补齐精确 CountTokens usage: %#v", anthropicBody)
+		}
+
+		anthropicRequest["stream"] = true
+		anthropicStreamResp := postWithHeader(
+			t, fx.server.URL+"/v1/messages", "x-api-key", "sk-test-key", anthropicRequest,
+		)
+		anthropicStreamData, _ := io.ReadAll(anthropicStreamResp.Body)
+		anthropicStreamResp.Body.Close()
+		anthropicStream := string(anthropicStreamData)
+		if anthropicStreamResp.StatusCode != http.StatusOK ||
+			!strings.Contains(anthropicStream, `"input_tokens":76`) ||
+			!strings.Contains(anthropicStream, `"output_tokens":8`) {
+			t.Fatalf("Anthropic 流没有补齐精确 CountTokens usage: %s", anthropicStream)
+		}
+	})
+}
+
+func testOperationName(r *http.Request) string {
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		return ""
+	}
+	r.Body = io.NopCloser(bytes.NewReader(raw))
+	var request map[string]any
+	if err := json.Unmarshal(raw, &request); err != nil {
+		return ""
+	}
+	return stringValue(request["operationName"])
+}
+
+func writeTestCountTokensResponse(w http.ResponseWriter, count int) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_, _ = fmt.Fprintf(w, `[{"results":[{"data":{"ui":{"countTokensV2":{"totalTokens":%d}}}}]}]`, count)
 }
 
 func postWithHeader(t *testing.T, url, header, key string, body any) *http.Response {

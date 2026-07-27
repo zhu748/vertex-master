@@ -3,23 +3,95 @@ package vertex
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"log"
 	"strconv"
 	"strings"
 
 	"github.com/bsfdsagfadg/vertex/internal/config"
+	"github.com/bsfdsagfadg/vertex/internal/spool"
 	"github.com/bsfdsagfadg/vertex/internal/transport"
 )
 
 // CountTokens 统计给定 contents 在指定模型下的 token 数。
-//
-// 当前为本地启发式估算（estimateTokens），不发起任何上游请求，因此不消耗配额、
-// 不受代理与 recaptcha 影响，但结果是近似值而非上游精确计数。
-//
-// 下方的 buildCountTokensPayload / countTokensHeaders / parseCountTokensResponse
-// 是走匿名 batchGraphql CountTokens operation 的真实实现所需组件，目前未接线；
-// 若要恢复精确计数，从这里改为调用它们即可。
+// 通过匿名 Vertex batchGraphql CountTokens operation 获取模型侧精确计数；查询
+// 失败时返回 0，调用方据此保持 usage 缺失，而不是退回本地估算。
 func (c *VertexAIClient) CountTokens(ctx context.Context, model string, contents []any) int {
-	return estimateTokens(contents)
+	if len(contents) == 0 {
+		return 0
+	}
+	count, err := c.countTokensUpstream(ctx, model, contents)
+	if err != nil {
+		log.Printf("[Vertex] [CountTokens] 上游精确计数失败: 模型=%s, 请求ID=%s, 原因=%v", model, RequestIDFromContext(ctx), err)
+		return 0
+	}
+	return count
+}
+
+func (c *VertexAIClient) countTokensUpstream(ctx context.Context, model string, contents []any) (int, error) {
+	proxyURI := c.cfg.ActiveNodeURI()
+	if proxyURI == "" {
+		proxyURI = c.cfg.ProxyURL()
+	}
+	recaptchaToken, err := c.pool.GetTokenWithProxy(proxyURI)
+	if err != nil {
+		return 0, fmt.Errorf("fetch recaptcha token: %w", err)
+	}
+	if recaptchaToken == "" {
+		return 0, fmt.Errorf("empty recaptcha token")
+	}
+
+	sess, err := c.net.CreateSession(c.cfg.RequestTimeout(), proxyURI, RequestIDFromContext(ctx))
+	if err != nil {
+		return 0, fmt.Errorf("create session: %w", err)
+	}
+	defer sess.Close()
+
+	payload := buildCountTokensPayload(model, contents, recaptchaToken, c.cfg)
+	// 匿名端点偶尔会在同一个 token 的首个请求返回 verify-fail，与生成接口行为一致，
+	// 因此允许在同一 session 上重试一次。
+	for attempt := 0; attempt < 2; attempt++ {
+		buf, encodeErr := spool.EncodeJSON(payload)
+		if encodeErr != nil {
+			return 0, fmt.Errorf("marshal payload: %w", encodeErr)
+		}
+		reader, readerErr := buf.Reader()
+		if readerErr != nil {
+			_ = buf.Close()
+			return 0, fmt.Errorf("spool reader: %w", readerErr)
+		}
+		status, raw, requestErr := sess.DoAndRead(ctx, "POST", c.getBatchGraphqlURL(), countTokensHeaders(), reader)
+		_ = buf.Close()
+		if requestErr != nil {
+			return 0, fmt.Errorf("upstream request: %w", requestErr)
+		}
+		if status == 200 {
+			if count := parseCountTokensResponse(raw); count > 0 {
+				return count, nil
+			}
+			if attempt == 0 && stringsContainAny(
+				string(raw), "Failed to verify action", "The caller does not have permission",
+			) {
+				continue
+			}
+			return 0, fmt.Errorf("upstream response did not contain totalTokens")
+		}
+		if attempt == 0 && (status == 401 || status == 403 ||
+			stringsContainAny(string(raw), "Failed to verify action", "The caller does not have permission")) {
+			continue
+		}
+		return 0, fmt.Errorf("upstream returned HTTP %d", status)
+	}
+	return 0, fmt.Errorf("recaptcha verification failed")
+}
+
+func stringsContainAny(value string, needles ...string) bool {
+	for _, needle := range needles {
+		if strings.Contains(value, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 // buildCountTokensPayload 构建 CountTokens 的 batchGraphql 请求体。
@@ -142,104 +214,4 @@ func coerceTokenCount(v any) int {
 		}
 	}
 	return 0
-}
-
-// estimateTokens 递归或嵌套遍历 contents 计算估算的 token 总数。
-func estimateTokens(contents []any) int {
-	totalTokens := 0
-	for _, contentAny := range contents {
-		if contentAny == nil {
-			continue
-		}
-		content, ok := contentAny.(map[string]any)
-		if !ok {
-			if s, ok := contentAny.(string); ok {
-				totalTokens += estimateTextTokens(s)
-			}
-			continue
-		}
-
-		parts, ok := content["parts"].([]any)
-		if !ok {
-			continue
-		}
-
-		for _, partAny := range parts {
-			if partAny == nil {
-				continue
-			}
-			switch part := partAny.(type) {
-			case string:
-				totalTokens += estimateTextTokens(part)
-			case map[string]any:
-				totalTokens += estimatePartTokens(part)
-			}
-		}
-	}
-	return totalTokens
-}
-
-// estimatePartTokens 估算单个 part 的 token 数。
-func estimatePartTokens(part map[string]any) int {
-	if isImagePart(part) {
-		return 1024
-	}
-	if textVal, ok := part["text"].(string); ok {
-		return estimateTextTokens(textVal)
-	}
-	return 0
-}
-
-// isImagePart 判断一个 part 是否为图片。
-func isImagePart(part map[string]any) bool {
-	// 检查 image_url, input_image (OpenAI style)
-	if _, ok := part["image_url"]; ok {
-		return true
-	}
-	if _, ok := part["input_image"]; ok {
-		return true
-	}
-	// 检查 inlineData / inline_data (Gemini style)
-	for _, k := range []string{"inlineData", "inline_data"} {
-		if m, ok := part[k].(map[string]any); ok {
-			for _, mk := range []string{"mimeType", "mime_type"} {
-				if mime, ok := m[mk].(string); ok && strings.Contains(strings.ToLower(mime), "image") {
-					return true
-				}
-			}
-		}
-	}
-	// 检查 fileData / file_data (Gemini style)
-	for _, k := range []string{"fileData", "file_data"} {
-		if m, ok := part[k].(map[string]any); ok {
-			for _, mk := range []string{"mimeType", "mime_type"} {
-				if mime, ok := m[mk].(string); ok && strings.Contains(strings.ToLower(mime), "image") {
-					return true
-				}
-			}
-		}
-	}
-	// 检查直接的 mimeType / mime_type
-	for _, mk := range []string{"mimeType", "mime_type"} {
-		if mime, ok := part[mk].(string); ok && strings.Contains(strings.ToLower(mime), "image") {
-			return true
-		}
-	}
-	return false
-}
-
-// estimateTextTokens 估算文本部分的 token 数。
-// 这里的简单估算规则：
-// - ASCII 字符（如英文、数字、符号、空格）算 0.25 个 token
-// - 非 ASCII 字符（如中文汉字、日文、韩文、Emoji等）每个算 1.5 个 token
-func estimateTextTokens(text string) int {
-	var tokens float64
-	for _, r := range text {
-		if r < 128 {
-			tokens += 0.25
-		} else {
-			tokens += 1.5
-		}
-	}
-	return int(tokens + 0.99)
 }

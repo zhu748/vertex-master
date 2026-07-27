@@ -1,6 +1,37 @@
 package vertex
 
-import "testing"
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"testing"
+	"time"
+
+	"github.com/bsfdsagfadg/vertex/internal/config"
+	"github.com/bsfdsagfadg/vertex/internal/recaptcha"
+)
+
+func TestLiveCountTokens(t *testing.T) {
+	if os.Getenv("VERTEX_LIVE_COUNT_TEST") == "" {
+		t.Skip("set VERTEX_LIVE_COUNT_TEST=1 to run")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	client := NewVertexAIClient(config.StaticProvider(config.DefaultConfig()))
+	input := client.CountTokens(ctx, "gemini-3.6-flash", []any{map[string]any{
+		"role": "user", "parts": []any{map[string]any{"text": "hello"}},
+	}})
+	output := client.CountTokens(ctx, "gemini-3.6-flash", []any{map[string]any{
+		"role": "model", "parts": []any{map[string]any{"text": "hello"}},
+	}})
+	if input <= 0 || output <= 0 {
+		t.Fatalf("live CountTokens returned zero: input=%d output=%d", input, output)
+	}
+	t.Logf("live CountTokens: input=%d output=%d", input, output)
+}
 
 // ---- parseCountTokensResponse：三种 unwrap 形态 + errors 跳过 + 字符串/数字 totalTokens ----
 
@@ -121,148 +152,39 @@ func TestCoerceTokenCount(t *testing.T) {
 		})
 	}
 }
-func TestEstimateTokens(t *testing.T) {
-	cases := []struct {
-		name     string
-		contents []any
-		want     int
-	}{
-		{
-			name:     "nil contents",
-			contents: nil,
-			want:     0,
-		},
-		{
-			name:     "empty contents",
-			contents: []any{},
-			want:     0,
-		},
-		{
-			name: "single string content",
-			contents: []any{
-				"Hello World",
-			},
-			want: 3, // "Hello World" -> 11 chars * 0.25 = 2.75 -> 3
-		},
-		{
-			name: "single content with ascii text part",
-			contents: []any{
-				map[string]any{
-					"parts": []any{
-						map[string]any{"text": "Hello, world!"}, // 13 chars * 0.25 = 3.25 -> 4
-					},
-				},
-			},
-			want: 4,
-		},
-		{
-			name: "single content with chinese text part",
-			contents: []any{
-				map[string]any{
-					"parts": []any{
-						map[string]any{"text": "你好，世界"}, // 5 chars * 1.5 = 7.5 -> 8
-					},
-				},
-			},
-			want: 8,
-		},
-		{
-			name: "mixed ascii and chinese text part",
-			contents: []any{
-				map[string]any{
-					"parts": []any{
-						map[string]any{"text": "Hello 世界"}, // 6 ascii (1.5) + 2 chinese (3.0) = 4.5 -> 5
-					},
-				},
-			},
-			want: 5,
-		},
-		{
-			name: "OpenAI style image_url part",
-			contents: []any{
-				map[string]any{
-					"parts": []any{
-						map[string]any{
-							"image_url": map[string]any{"url": "data:image/jpeg;base64,abc"},
-						},
-					},
-				},
-			},
-			want: 1024,
-		},
-		{
-			name: "Gemini style inlineData image part",
-			contents: []any{
-				map[string]any{
-					"parts": []any{
-						map[string]any{
-							"inlineData": map[string]any{
-								"mimeType": "image/png",
-								"data":     "base64data",
-							},
-						},
-					},
-				},
-			},
-			want: 1024,
-		},
-		{
-			name: "Gemini style fileData image part",
-			contents: []any{
-				map[string]any{
-					"parts": []any{
-						map[string]any{
-							"fileData": map[string]any{
-								"mimeType": "image/webp",
-								"fileUri":  "gs://bucket/img.webp",
-							},
-						},
-					},
-				},
-			},
-			want: 1024,
-		},
-		{
-			name: "Gemini style inline_data snake_case image part",
-			contents: []any{
-				map[string]any{
-					"parts": []any{
-						map[string]any{
-							"inline_data": map[string]any{
-								"mime_type": "image/gif",
-								"data":      "base64data",
-							},
-						},
-					},
-				},
-			},
-			want: 1024,
-		},
-		{
-			name: "mixed text and image parts",
-			contents: []any{
-				map[string]any{
-					"parts": []any{
-						map[string]any{"text": "Analyze this image:"}, // 20 chars * 0.25 = 5
-						map[string]any{
-							"inlineData": map[string]any{
-								"mimeType": "image/jpeg",
-								"data":     "xyz",
-							},
-						},
-						map[string]any{"text": "谢谢"}, // 2 * 1.5 = 3
-					},
-				},
-			},
-			want: 1032, // 5 + 1024 + 3 = 1032
-		},
-	}
+func TestCountTokensUsesUpstreamOperation(t *testing.T) {
+	oldURL := batchGraphqlURL
+	t.Cleanup(func() { batchGraphqlURL = oldURL })
 
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if got := estimateTokens(c.contents); got != c.want {
-				t.Errorf("estimateTokens(%v) = %d, want %d", c.name, got, c.want)
-			}
-		})
+	var received map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &received)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"results":[{"data":{"ui":{"countTokensV2":{"totalTokens":42}}}}]}]`))
+	}))
+	defer upstream.Close()
+	batchGraphqlURL = upstream.URL
+
+	cfg := config.DefaultConfig()
+	cfg.ParallelPoolEnabled = false
+	client := NewVertexAIClient(config.StaticProvider(cfg))
+	client.SetTokenPool(recaptcha.NewTokenPoolCustom(func(string) (string, error) {
+		return "test-recaptcha-token", nil
+	}))
+
+	contents := []any{map[string]any{
+		"role": "user", "parts": []any{map[string]any{"text": "hello"}},
+	}}
+	if got := client.CountTokens(context.Background(), "gemini-test", contents); got != 42 {
+		t.Fatalf("CountTokens=%d, want 42", got)
+	}
+	if received["operationName"] != "CountTokens" {
+		t.Fatalf("未调用上游 CountTokens operation: %#v", received)
+	}
+	variables, _ := received["variables"].(map[string]any)
+	if variables["recaptchaToken"] != "test-recaptcha-token" {
+		t.Fatalf("CountTokens 请求缺少 recaptchaToken: %#v", variables)
 	}
 }

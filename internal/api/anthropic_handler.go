@@ -68,7 +68,7 @@ func (h *AnthropicHandler) handleMessages(w http.ResponseWriter, r *http.Request
 		return
 	}
 	out := outputFromOAI(h.respConv.ToOAI(resp, model))
-	out = normalizeProtocolUsage(out)
+	out = completeProtocolUsageWithCountTokens(r.Context(), h.vc, model, payload, out)
 	writeJSON(w, http.StatusOK, anthropicMessage(rawModel, "msg_"+reqID24(), out))
 }
 
@@ -98,8 +98,9 @@ func (h *AnthropicHandler) handleCountTokens(w http.ResponseWriter, r *http.Requ
 		h.anthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
-	contents, _ := payload["contents"].([]any)
-	writeJSON(w, http.StatusOK, map[string]any{"input_tokens": h.vc.CountTokens(r.Context(), model, contents)})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"input_tokens": h.vc.CountTokens(r.Context(), model, protocolInputContents(payload)),
+	})
 }
 
 func (h *AnthropicHandler) readAnthropicBody(w http.ResponseWriter, r *http.Request) (map[string]any, bool) {
@@ -364,7 +365,7 @@ func (h *AnthropicHandler) streamMessages(
 			state.fail(toVertexError(err))
 			return
 		}
-		out := normalizeProtocolUsage(outputFromOAI(h.respConv.ToOAI(resp, model)))
+		out := completeProtocolUsageWithCountTokens(ctx, h.vc, model, payload, outputFromOAI(h.respConv.ToOAI(resp, model)))
 		state.consume(out)
 		pingCancel()
 		pingWg.Wait()
@@ -387,7 +388,7 @@ func (h *AnthropicHandler) streamMessages(
 	pingCancel()
 	pingWg.Wait()
 	if !failed {
-		state.out = normalizeProtocolUsage(state.out)
+		state.out = completeProtocolUsageWithCountTokens(ctx, h.vc, model, payload, state.out)
 		state.finish()
 	}
 }

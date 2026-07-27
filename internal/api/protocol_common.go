@@ -1,14 +1,17 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/bsfdsagfadg/vertex/internal/jsonx"
 	"github.com/bsfdsagfadg/vertex/internal/transform"
+	"github.com/bsfdsagfadg/vertex/internal/vertex"
 )
 
 type protocolToolCall struct {
@@ -70,6 +73,101 @@ func normalizeProtocolUsage(out protocolOutput) protocolOutput {
 		out.Total = out.Input + out.Output
 	}
 	return out
+}
+
+// completeProtocolUsageWithCountTokens 只在生成响应缺少 usage 时调用匿名
+// Vertex 的真实 CountTokens operation 补齐缺失分项。它不做本地估算，也不
+// 覆盖生成接口已经返回的统计；查询失败时相应字段继续保持为零。
+func completeProtocolUsageWithCountTokens(
+	ctx context.Context,
+	vc *vertex.VertexAIClient,
+	model string,
+	payload map[string]any,
+	out protocolOutput,
+) protocolOutput {
+	out = normalizeProtocolUsage(out)
+	needInput := out.Input == 0
+	needOutput := out.Output == 0
+	if (!needInput && !needOutput) || vc == nil {
+		return out
+	}
+
+	inputContents := protocolInputContents(payload)
+	outputContents := protocolOutputContents(out)
+	if len(inputContents) == 0 {
+		needInput = false
+	}
+	if len(outputContents) == 0 {
+		needOutput = false
+	}
+
+	var inputCount, outputCount int
+	var wg sync.WaitGroup
+	if needInput {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			inputCount = vc.CountTokens(ctx, model, inputContents)
+		}()
+	}
+	if needOutput {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			outputCount = vc.CountTokens(ctx, model, outputContents)
+		}()
+	}
+	wg.Wait()
+
+	if out.Input == 0 && inputCount > 0 {
+		out.Input = inputCount
+	}
+	if out.Output == 0 && outputCount > 0 {
+		out.Output = outputCount
+	}
+	return normalizeProtocolUsage(out)
+}
+
+func protocolInputContents(payload map[string]any) []any {
+	contents := make([]any, 0, len(anySlice(payload["contents"]))+1)
+	if system, ok := payload["systemInstruction"].(map[string]any); ok && len(system) > 0 {
+		// CountTokens operation 仅接收 contents；用独立 user content 传入 system
+		// parts，使系统提示也由模型 tokenizer 计入，而不是在本地估算。
+		systemContent := cloneStringMap(system)
+		if stringValue(systemContent["role"]) == "" {
+			systemContent["role"] = "user"
+		}
+		contents = append(contents, systemContent)
+	}
+	contents = append(contents, anySlice(payload["contents"])...)
+	return contents
+}
+
+func protocolOutputContents(out protocolOutput) []any {
+	parts := make([]any, 0, 2+len(out.ToolCalls))
+	if out.Reasoning != "" {
+		parts = append(parts, map[string]any{"text": out.Reasoning})
+	}
+	if out.Text != "" {
+		parts = append(parts, map[string]any{"text": out.Text})
+	}
+	for _, toolCall := range out.ToolCalls {
+		functionCall := map[string]any{
+			"name": toolCall.Name,
+			"args": jsonValue(toolCall.Arguments),
+		}
+		if toolCall.ID != "" {
+			functionCall["id"] = toolCall.ID
+		}
+		parts = append(parts, map[string]any{"functionCall": functionCall})
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	return []any{map[string]any{
+		"role":  "model",
+		"parts": parts,
+	}}
 }
 
 func hasProtocolUsage(out protocolOutput) bool {
