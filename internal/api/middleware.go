@@ -99,7 +99,7 @@ func (m *middleware) withCORS(next http.Handler) http.Handler {
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set(
 			"Access-Control-Allow-Headers",
-			"Authorization, Content-Type, X-API-Key, X-Goog-Api-Key",
+			"Authorization, Content-Type, X-API-Key, X-Goog-Api-Key, Anthropic-Version, Anthropic-Beta, OpenAI-Beta",
 		)
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -181,7 +181,8 @@ func (m *middleware) withConcurrencyLimit(next http.Handler) http.Handler {
 
 func isUpstreamWorkloadPath(path string) bool {
 	switch path {
-	case "/v1/chat/completions", "/v1/images/generations", "/v1/images/edits",
+	case "/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/messages/count_tokens",
+		"/v1/images/generations", "/v1/images/edits",
 		"/v1/images/variations", "/v1/audio/speech":
 		return true
 	default:
@@ -218,24 +219,47 @@ func (m *middleware) withAPIKey(next http.Handler) http.Handler {
 		}
 		key := extractAPIKey(r)
 		if key == "" {
+			if isAnthropicPath(r.URL.Path) {
+				writeAnthropicMiddlewareError(w, http.StatusUnauthorized, "authentication_error", "missing API key")
+				return
+			}
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]any{
 				"code": 401, "message": "缺少 API 密钥 (missing API key)", "status": "UNAUTHENTICATED",
 			}})
 			return
 		}
 		if key == "sk-your-key-here" {
+			if isAnthropicPath(r.URL.Path) {
+				writeAnthropicMiddlewareError(w, http.StatusUnauthorized, "authentication_error", "example API key is not allowed")
+				return
+			}
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]any{
 				"code": 401, "message": "示例密钥禁止调用，请新建密钥。", "status": "UNAUTHENTICATED",
 			}})
 			return
 		}
 		if !m.keys.ValidateKey(key) {
+			if isAnthropicPath(r.URL.Path) {
+				writeAnthropicMiddlewareError(w, http.StatusUnauthorized, "authentication_error", "invalid API key")
+				return
+			}
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]any{
 				"code": 401, "message": "API 密钥无效 (invalid API key)", "status": "UNAUTHENTICATED",
 			}})
 			return
 		}
 		next.ServeHTTP(w, r)
+	})
+}
+
+func isAnthropicPath(path string) bool {
+	return path == "/v1/messages" || strings.HasPrefix(path, "/v1/messages/")
+}
+
+func writeAnthropicMiddlewareError(w http.ResponseWriter, status int, typ, message string) {
+	writeJSON(w, status, map[string]any{
+		"type": "error", "error": map[string]any{"type": typ, "message": message},
+		"request_id": "req_" + reqID24(),
 	})
 }
 

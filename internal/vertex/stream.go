@@ -88,6 +88,7 @@ func (c *VertexAIClient) executeStreamingWithRetries(ctx context.Context, model 
 
 	recaptchaToken := ""
 	isFirstAuth := true
+	semanticRetried := false
 	attempt := 0
 
 retryLoop:
@@ -112,11 +113,40 @@ retryLoop:
 
 		// 单次流式尝试：把增量 yield 给上层，统计本次 attempt yield 的 chunk 数。
 		chunkCount := 0
+		semanticBlockReason := ""
 		attemptErr := c.executeStreamingAttempt(ctx, sess, model, geminiPayload, recaptchaToken, isFirstAuth, func(ch map[string]any) bool {
+			// promptFeedback-only 帧不是真正的内容。匿名 Gemini 上游偶尔会返回
+			// BLOCKED_REASON_UNSPECIFIED；在任何数据发给客户端前拦住它，允许一次
+			// 语义重试，避免 Gemini 原生暴露 block、兼容接口却伪装成空白成功。
+			if !contentYielded {
+				reason := promptFeedbackBlockReason(ch)
+				if isUnspecifiedBlockReason(reason) {
+					semanticBlockReason = reason
+					return false
+				}
+			}
 			chunkCount++
+			if !yield(StreamChunk{Data: ch}) {
+				return false
+			}
 			contentYielded = true
-			return yield(StreamChunk{Data: ch})
+			return true
 		})
+
+		if semanticBlockReason != "" && !contentYielded {
+			if !semanticRetried {
+				semanticRetried = true
+				if settings, ok := geminiPayload["safetySettings"].([]any); !ok || len(settings) == 0 {
+					geminiPayload["safetySettings"] = deepCopyAny(defaultSafetySettings)
+				}
+				log.Printf("[Vertex] [StreamChat] 上游返回未指定原因的 promptFeedback，使用显式默认安全设置重试一次: reason=%s, 请求ID=%s", semanticBlockReason, reqID)
+				continue
+			}
+			lastError = NewUnavailableError(
+				"Upstream blocked the prompt without a specific reason after retry: " + semanticBlockReason,
+			)
+			break retryLoop
+		}
 
 		if attemptErr == nil {
 			// 本次尝试无错误。若 0 chunk 且仍是首帧 → 认证重试（同 token 再打一次）。

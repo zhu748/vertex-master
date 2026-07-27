@@ -1,7 +1,5 @@
-// Package api 暴露 OpenAI 兼容的 HTTP 端点。
-//
-// 里程碑1 只实现非流式 /v1/chat/completions（+ /、/health、/healthz、/v1/models）。
-// 真流式 SSE、图像/TTS/embeddings、Gemini 原生端点留待后续里程碑。
+// Package api exposes OpenAI Chat Completions/Responses, Anthropic Messages,
+// and native Gemini-compatible HTTP endpoints.
 package api
 
 import (
@@ -18,23 +16,29 @@ import (
 )
 
 type Server struct {
-	chat   *ChatHandler
-	image  *ImageHandler
-	audio  *AudioHandler
-	gemini *GeminiHandler
-	admin  *AdminHandler
-	mw     *middleware
+	chat      *ChatHandler
+	responses *ResponsesHandler
+	anthropic *AnthropicHandler
+	image     *ImageHandler
+	audio     *AudioHandler
+	gemini    *GeminiHandler
+	admin     *AdminHandler
+	mw        *middleware
 }
 
 func NewServer(vc *vertex.VertexAIClient, keys *APIKeyManager, cfg config.ConfigProvider) *Server {
 	h := handler{vc: vc, keys: keys, cfg: cfg}
+	reqConv := transform.DefaultRequestConverter()
+	respConv := transform.DefaultResponseConverter()
 	return &Server{
-		chat:   &ChatHandler{handler: h, reqConv: transform.DefaultRequestConverter(), respConv: transform.DefaultResponseConverter()},
-		image:  &ImageHandler{h},
-		audio:  &AudioHandler{h},
-		gemini: &GeminiHandler{h},
-		admin:  &AdminHandler{h},
-		mw:     &middleware{cfg: cfg, keys: keys},
+		chat:      &ChatHandler{handler: h, reqConv: reqConv, respConv: respConv},
+		responses: &ResponsesHandler{handler: h, reqConv: reqConv, respConv: respConv},
+		anthropic: &AnthropicHandler{handler: h, reqConv: reqConv, respConv: respConv},
+		image:     &ImageHandler{h},
+		audio:     &AudioHandler{h},
+		gemini:    &GeminiHandler{h},
+		admin:     &AdminHandler{h},
+		mw:        &middleware{cfg: cfg, keys: keys},
 	}
 }
 
@@ -47,6 +51,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/models", s.handleModelsOAI)
 	mux.HandleFunc("/v1beta/models", s.handleModelsGemini)
 	mux.HandleFunc("/v1/chat/completions", s.chat.handleChatCompletions)
+	mux.HandleFunc("/v1/responses", s.responses.handleResponses)
+	mux.HandleFunc("/v1/messages", s.anthropic.handleMessages)
+	mux.HandleFunc("/v1/messages/count_tokens", s.anthropic.handleCountTokens)
 	mux.HandleFunc("/v1/images/generations", s.image.handleImageGenerations)
 	mux.HandleFunc("/v1/images/edits", s.image.handleImageEdits)
 	mux.HandleFunc("/v1/images/variations", s.image.handleImageVariations)

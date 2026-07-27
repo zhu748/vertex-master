@@ -2,7 +2,9 @@ package vertex
 
 import (
 	"context"
+	"log"
 	"sort"
+	"strings"
 
 	"github.com/bsfdsagfadg/vertex/internal/nodes"
 )
@@ -39,6 +41,16 @@ func (c *VertexAIClient) CompleteChat(ctx context.Context, model string, geminiP
 }
 
 func (c *VertexAIClient) runSingleCandidate(ctx context.Context, model string, geminiPayload map[string]any, proxyURI string) (map[string]any, error) {
+	return c.runSingleCandidateWithSemanticRetry(ctx, model, geminiPayload, proxyURI, true)
+}
+
+func (c *VertexAIClient) runSingleCandidateWithSemanticRetry(
+	ctx context.Context,
+	model string,
+	geminiPayload map[string]any,
+	proxyURI string,
+	allowRetry bool,
+) (map[string]any, error) {
 	var chunks []map[string]any
 	var firstErr *VertexError
 
@@ -68,13 +80,43 @@ func (c *VertexAIClient) runSingleCandidate(ctx context.Context, model string, g
 		return nil, err
 	}
 
-	if _, hasSafety := geminiPayload["safetySettings"]; candidateFinish(resp) == "SAFETY" && !hasSafety {
+	blockReason := promptFeedbackBlockReason(resp)
+	_, hasSafety := geminiPayload["safetySettings"]
+	shouldRetrySafety := candidateFinish(resp) == "SAFETY" && !hasSafety
+	shouldRetryFeedback := isUnspecifiedBlockReason(blockReason)
+	if allowRetry && (shouldRetrySafety || shouldRetryFeedback) {
+		log.Printf(
+			"[Vertex] 上游返回无内容拦截，自动重试一次: finishReason=%s, blockReason=%s",
+			candidateFinish(resp),
+			blockReason,
+		)
 		retryPayload := shallowCopy(geminiPayload)
-		retryPayload["safetySettings"] = defaultSafetySettings
-		return c.runSingleCandidate(ctx, model, retryPayload, proxyURI)
+		if !hasSafety {
+			retryPayload["safetySettings"] = defaultSafetySettings
+		}
+		return c.runSingleCandidateWithSemanticRetry(ctx, model, retryPayload, proxyURI, false)
+	}
+	if shouldRetryFeedback {
+		return nil, NewUnavailableError(
+			"Upstream blocked the prompt without a specific reason after retry: " + blockReason,
+		)
 	}
 
 	return resp, nil
+}
+
+func promptFeedbackBlockReason(resp map[string]any) string {
+	feedback, _ := resp["promptFeedback"].(map[string]any)
+	return strings.TrimSpace(toStr(feedback["blockReason"]))
+}
+
+func isUnspecifiedBlockReason(reason string) bool {
+	switch strings.ToUpper(strings.TrimSpace(reason)) {
+	case "BLOCKED_REASON_UNSPECIFIED", "BLOCK_REASON_UNSPECIFIED":
+		return true
+	default:
+		return false
+	}
 }
 
 func pickBestResult(results []candidateResult) (candidateResult, error) {

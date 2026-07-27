@@ -1,12 +1,14 @@
 # Vertex AI Proxy
 
-免费使用 Google Gemini 模型的代理工具。将 **OpenAI 兼容的 API 请求**无缝转换为对 Google 匿名端点的调用——让你的客户端以为在调用 OpenAI，实际上使用的是免费的 Gemini 服务。也支持原始Gemini格式
+免费使用 Google Gemini 模型的代理工具。将 **OpenAI、OpenAI Responses、Anthropic Claude 兼容请求**无缝转换为对 Google 匿名端点的调用，也支持 Gemini 原生格式。
 
 **免安装、解压即用的绿色软件。** 全面支持 Windows、Linux、macOS 以及 Android 手机等平台。
 
 ## ✨ 核心特性
 
-- **完整兼容 OpenAI 接口**：支持聊天（流式/非流式）、工具调用（Function Calling）、多模态输入（图片/文件）。
+- **多协议兼容**：支持 OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 和 Gemini 原生接口。
+- **流式与工具调用**：四类接口均支持流式/非流式文本；兼容 Function Calling / Tool Use 及工具结果回传。
+- **多模态输入**：兼容 OpenAI、Responses、Claude 和 Gemini 常见的图片输入格式。
 - **丰富的多媒体支持**：支持文生图、图片编辑、语音合成（TTS）。
 - **内置反爬突破**：内置 TLS 指纹伪装及 reCAPTCHA token 自动获取，轻松通过 Google 匿名端点校验。
 - **内置代理节点池**：支持 HTTP、HTTPS、SOCKS4、SOCKS4A、SOCKS5、SOCKS5H 以及 mihomo 节点；可订阅纯文本代理列表、定时差异更新、自动健康巡检、失败冷却与请求接力，并通过分页筛选管理大规模代理池。
@@ -28,6 +30,40 @@
 
 > **如何使用？**
 > 在你的客户端（如 Cherry Studio、ChatBox 等）中，填入刚才设置的 API Key，API 地址填为 `http://127.0.0.1:2156/v1` 即可开始使用！
+
+## 🔌 兼容接口
+
+同一个本地 API Key 可用于以下协议：
+
+| 协议 | 端点 | 鉴权 |
+|------|------|------|
+| OpenAI Chat Completions | `POST /v1/chat/completions` | `Authorization: Bearer <key>` |
+| OpenAI Responses | `POST /v1/responses` | `Authorization: Bearer <key>` |
+| Anthropic Messages | `POST /v1/messages` | `x-api-key: <key>` |
+| Anthropic Token Count | `POST /v1/messages/count_tokens` | `x-api-key: <key>` |
+| Gemini GenerateContent | `POST /v1beta/models/{model}:generateContent` | `x-goog-api-key: <key>` 或 `?key=<key>` |
+| Gemini StreamGenerateContent | `POST /v1beta/models/{model}:streamGenerateContent?alt=sse` | `x-goog-api-key: <key>` 或 `?key=<key>` |
+
+Responses API 示例：
+
+```bash
+curl http://127.0.0.1:2156/v1/responses \
+  -H "Authorization: Bearer mykey123" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gemini-3.6-flash","input":"你好","stream":true}'
+```
+
+Anthropic Messages 示例：
+
+```bash
+curl http://127.0.0.1:2156/v1/messages \
+  -H "x-api-key: mykey123" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gemini-3.6-flash","max_tokens":1024,"messages":[{"role":"user","content":"你好"}]}'
+```
+
+Responses 当前实现面向无状态生成：支持 `input`、`instructions`、图片、函数工具、结构化输出和 SSE；`previous_response_id`、Conversations 及 OpenAI 托管工具不会在本地持久化或执行。
 
 **完整的分平台部署教程**（包括开机自启、代理配置、手机部署、常见问题解答）见 **[部署指南](部署指南.md)**。
 

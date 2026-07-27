@@ -215,13 +215,42 @@ func BuildVertexVariables(model string, geminiPayload map[string]any, cfg config
 		delete(vars, "generationConfig")
 	}
 
-	if _, ok := vars["safetySettings"]; !ok {
-		if _, ok2 := geminiPayload["safety_settings"]; !ok2 {
-			vars["safetySettings"] = buildSafetySettings(cfg)
-		}
-	}
+	vars["safetySettings"] = normalizeSafetySettings(vars["safetySettings"], cfg)
 
 	return vars
+}
+
+// normalizeSafetySettings makes native Gemini requests behave like converted
+// OpenAI requests when clients send an empty list or protobuf UNSPECIFIED
+// threshold values. Explicit, meaningful thresholds are preserved.
+func normalizeSafetySettings(raw any, cfg config.ConfigProvider) []any {
+	settings, ok := raw.([]any)
+	if !ok || len(settings) == 0 {
+		return buildSafetySettings(cfg)
+	}
+	out := make([]any, 0, len(settings))
+	for _, itemRaw := range settings {
+		item, ok := itemRaw.(map[string]any)
+		if !ok {
+			continue
+		}
+		category := strings.TrimSpace(toString(item["category"]))
+		if category == "" {
+			continue
+		}
+		threshold := strings.ToUpper(strings.TrimSpace(toString(item["threshold"])))
+		if threshold == "" || strings.Contains(threshold, "UNSPECIFIED") {
+			threshold = "BLOCK_NONE"
+			if configured, exists := cfg.SafetySettings()[category]; exists && configured != "" {
+				threshold = configured
+			}
+		}
+		out = append(out, map[string]any{"category": category, "threshold": threshold})
+	}
+	if len(out) == 0 {
+		return buildSafetySettings(cfg)
+	}
+	return out
 }
 
 // handleSystemInstruction 把 systemInstruction 在无 user content 时降级为首条 user message。

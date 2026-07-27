@@ -123,6 +123,47 @@ func TestBuildVertexVariables_SafetyDefault(t *testing.T) {
 	}
 }
 
+func TestBuildVertexVariables_NormalizesUnspecifiedSafetySettings(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.SafetySettings = map[string]string{
+		"HARM_CATEGORY_HARASSMENT": "BLOCK_ONLY_HIGH",
+	}
+	payload := map[string]any{
+		"contents": []any{map[string]any{
+			"role": "user", "parts": []any{map[string]any{"text": "hello"}},
+		}},
+		"safetySettings": []any{
+			map[string]any{
+				"category":  "HARM_CATEGORY_HARASSMENT",
+				"threshold": "HARM_BLOCK_THRESHOLD_UNSPECIFIED",
+			},
+			map[string]any{
+				"category":  "HARM_CATEGORY_HATE_SPEECH",
+				"threshold": "",
+			},
+		},
+	}
+	vars := BuildVertexVariables("gemini-3.6-flash", payload, config.StaticProvider(cfg))
+	settings, ok := vars["safetySettings"].([]any)
+	if !ok || len(settings) != 2 {
+		t.Fatalf("safetySettings=%#v", vars["safetySettings"])
+	}
+	first := settings[0].(map[string]any)
+	if first["threshold"] != "BLOCK_ONLY_HIGH" {
+		t.Fatalf("configured threshold not applied: %#v", first)
+	}
+	second := settings[1].(map[string]any)
+	if second["threshold"] != "BLOCK_NONE" {
+		t.Fatalf("empty threshold should default to BLOCK_NONE: %#v", second)
+	}
+
+	payload["safetySettings"] = []any{}
+	vars = BuildVertexVariables("gemini-3.6-flash", payload, config.StaticProvider(cfg))
+	if got := len(vars["safetySettings"].([]any)); got != len(safetyCategories) {
+		t.Fatalf("empty safety settings should use defaults, got %d", got)
+	}
+}
+
 func TestBuildVertexVariables_SystemDemote(t *testing.T) {
 	cfg := config.StaticProvider(config.DefaultConfig())
 	payload := map[string]any{

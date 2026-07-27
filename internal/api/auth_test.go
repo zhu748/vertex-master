@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// ---- extractAPIKey：Bearer 头 > x-goog-api-key 头 > query ?key= ----
+// ---- extractAPIKey：Bearer > x-api-key > x-goog-api-key > query ?key= ----
 
 func newReq(t *testing.T, headers map[string]string, query string) *http.Request {
 	t.Helper()
@@ -52,8 +52,18 @@ func TestExtractAPIKey(t *testing.T) {
 		},
 		{
 			name:    "bearer beats x-goog-api-key",
-			headers: map[string]string{"Authorization": "Bearer sk-bearer", "x-goog-api-key": "sk-goog"},
+			headers: map[string]string{"Authorization": "Bearer sk-bearer", "x-api-key": "sk-anthropic", "x-goog-api-key": "sk-goog"},
 			want:    "sk-bearer",
+		},
+		{
+			name:    "x-api-key when no bearer",
+			headers: map[string]string{"x-api-key": "sk-anthropic"},
+			want:    "sk-anthropic",
+		},
+		{
+			name:    "x-api-key beats x-goog-api-key",
+			headers: map[string]string{"x-api-key": "sk-anthropic", "x-goog-api-key": "sk-goog"},
+			want:    "sk-anthropic",
 		},
 		{
 			name:    "x-goog-api-key when no bearer",

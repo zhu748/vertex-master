@@ -26,3 +26,21 @@ func TestPickBestResultKeepsSelectedProxyURI(t *testing.T) {
 		t.Fatalf("selected proxy=%q, want longest fallback proxy", selected.proxyURI)
 	}
 }
+
+func TestPromptFeedbackBlockReason(t *testing.T) {
+	resp := map[string]any{
+		"promptFeedback": map[string]any{"blockReason": "BLOCKED_REASON_UNSPECIFIED"},
+	}
+	if got := promptFeedbackBlockReason(resp); got != "BLOCKED_REASON_UNSPECIFIED" {
+		t.Fatalf("block reason=%q", got)
+	}
+	if !isUnspecifiedBlockReason(promptFeedbackBlockReason(resp)) {
+		t.Fatal("BLOCKED_REASON_UNSPECIFIED should trigger one semantic retry")
+	}
+	if !isUnspecifiedBlockReason("BLOCK_REASON_UNSPECIFIED") {
+		t.Fatal("official BLOCK_REASON_UNSPECIFIED spelling should also trigger retry")
+	}
+	if isUnspecifiedBlockReason("SAFETY") {
+		t.Fatal("specific safety reasons must not be classified as unspecified")
+	}
+}

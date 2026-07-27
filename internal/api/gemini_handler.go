@@ -132,9 +132,11 @@ func (g *GeminiHandler) handleGeminiStreamGenerate(w http.ResponseWriter, r *htt
 
 	gotChunk := false
 	hasFinish := false
+	streamErrWritten := false
 	suffix := generateVPSuffix()
 	g.vc.StreamChat(r.Context(), actualModel, body, func(ch vertex.StreamChunk) bool {
 		if ch.Err != nil {
+			streamErrWritten = true
 			if isSafetyBlock(ch.Err) {
 				_ = sw.write(g.geminiSSE(geminiSafetyChunk(ch.Err)))
 			} else {
@@ -152,6 +154,9 @@ func (g *GeminiHandler) handleGeminiStreamGenerate(w http.ResponseWriter, r *htt
 		return sw.write(g.geminiSSE(ch.Data))
 	})
 
+	if streamErrWritten {
+		return
+	}
 	if !gotChunk {
 		_ = sw.write(g.geminiSSE(map[string]any{
 			"error": map[string]any{

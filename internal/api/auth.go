@@ -112,10 +112,13 @@ func (m *APIKeyManager) Count() int {
 }
 
 // extractAPIKey 从请求提取 API key：
-// Bearer 头 > x-goog-api-key 头 > query 参数 key。
+// Bearer 头 > x-api-key（Anthropic）> x-goog-api-key（Gemini）> query 参数 key。
 func extractAPIKey(r *http.Request) string {
 	if auth := r.Header.Get("Authorization"); auth != "" && strings.HasPrefix(strings.ToLower(auth), "bearer ") {
 		return strings.TrimSpace(auth[7:])
+	}
+	if a := r.Header.Get("x-api-key"); a != "" {
+		return strings.TrimSpace(a)
 	}
 	if g := r.Header.Get("x-goog-api-key"); g != "" {
 		return strings.TrimSpace(g)
