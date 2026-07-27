@@ -49,15 +49,17 @@ func wrap(inner string) string {
 }
 
 func TestScanStream_MultiChunkBraceScan(t *testing.T) {
-	// 两个连在一起的对象（模拟上游一个网络 chunk 里塞了两帧），增量花括号扫描要拆成两个。
+	// 多个连在一起的对象（模拟上游一个网络 chunk 里塞了多帧），增量花括号扫描要逐个拆开。
+	// usageMetadata 可能在 STOP 后单独到达，必须继续读取，不能把统计帧丢掉。
 	raw := wrap(`{"candidates":[{"content":{"parts":[{"text":"Hello"}],"role":"model"},"finishReason":"FINISH_REASON_UNSPECIFIED","index":0}]}`) +
-		wrap(`{"candidates":[{"content":{"parts":[{"text":" world"}],"role":"model"},"finishReason":"STOP","index":0}]}`)
+		wrap(`{"candidates":[{"content":{"parts":[{"text":" world"}],"role":"model"},"finishReason":"STOP","index":0}]}`) +
+		wrap(`{"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"totalTokenCount":12}}`)
 	emitted, stopped, err := collectStream(t, raw)
 	if err != nil {
 		t.Fatalf("scan error: %v", err)
 	}
-	if len(emitted) != 2 {
-		t.Fatalf("emitted=%d, want 2", len(emitted))
+	if len(emitted) != 3 {
+		t.Fatalf("emitted=%d, want 3", len(emitted))
 	}
 	if got := firstPartText(emitted[0]); got != "Hello" {
 		t.Errorf("chunk0 text=%q, want Hello", got)
@@ -65,8 +67,12 @@ func TestScanStream_MultiChunkBraceScan(t *testing.T) {
 	if got := firstPartText(emitted[1]); got != " world" {
 		t.Errorf("chunk1 text=%q, want ' world'", got)
 	}
-	if !stopped {
-		t.Error("收到真实 STOP 应触发 stop（主动结束流）")
+	usage, ok := emitted[2]["usageMetadata"].(map[string]any)
+	if !ok || usage["totalTokenCount"] != float64(12) {
+		t.Fatalf("STOP 后的 usageMetadata 丢失: %#v", emitted[2])
+	}
+	if stopped {
+		t.Error("真实 STOP 后仍应读取统计尾帧，不能提前停止扫描")
 	}
 }
 
@@ -85,12 +91,12 @@ func TestScanStream_UnspecifiedDoesNotTruncate(t *testing.T) {
 	if len(emitted) != 6 {
 		t.Fatalf("emitted=%d, want 6（UNSPECIFIED 不能截断！血泪教训）", len(emitted))
 	}
-	if !stopped {
-		t.Error("末帧 STOP 应触发 stop")
+	if stopped {
+		t.Error("STOP 只结束内容生成，不应提前结束上游扫描")
 	}
 }
 
-// 真实 finishReason 与末段文本同帧到达：该帧仍要 emit（内容不丢），且触发 stop。
+// 真实 finishReason 与末段文本同帧到达：该帧仍要 emit，扫描留给 EOF 收尾。
 func TestScanStream_FinishWithContentSameFrame(t *testing.T) {
 	raw := wrap(`{"candidates":[{"content":{"parts":[{"text":"final text"}],"role":"model"},"finishReason":"MAX_TOKENS"}]}`)
 	emitted, stopped, err := collectStream(t, raw)
@@ -103,8 +109,8 @@ func TestScanStream_FinishWithContentSameFrame(t *testing.T) {
 	if got := firstPartText(emitted[0]); got != "final text" {
 		t.Errorf("text=%q, want 'final text'（finish 同帧文本不能丢）", got)
 	}
-	if !stopped {
-		t.Error("MAX_TOKENS 应触发 stop")
+	if stopped {
+		t.Error("MAX_TOKENS 后仍可能有统计尾帧，不应提前停止扫描")
 	}
 }
 
@@ -351,46 +357,14 @@ func TestExtractTextRecursive_DepthGuard(t *testing.T) {
 	_ = extractTextRecursive(deep, 0)
 }
 
-// chunkFinishReason 正确取 candidates[0].finishReason，缺省返回空串。
-func TestChunkFinishReason(t *testing.T) {
-	if got := chunkFinishReason(map[string]any{"candidates": []any{map[string]any{"finishReason": "STOP"}}}); got != "STOP" {
-		t.Errorf("got %q, want STOP", got)
+func TestProcessStreamingObject_ClientDisconnectStops(t *testing.T) {
+	obj := parseJSONObject([]byte(wrap(`{"candidates":[{"content":{"parts":[{"text":"hello"}]}}]}`)))
+	stop, err := processStreamingObject(obj, func(map[string]any) bool { return false })
+	if err != nil {
+		t.Fatalf("process error: %v", err)
 	}
-	if got := chunkFinishReason(map[string]any{"candidates": []any{}}); got != "" {
-		t.Errorf("空 candidates 应返回空串, got %q", got)
-	}
-	if got := chunkFinishReason(map[string]any{}); got != "" {
-		t.Errorf("无 candidates 应返回空串, got %q", got)
-	}
-}
-
-// emitAndCheckFinish: UNSPECIFIED 不结束流；真实 finish 结束。
-func TestEmitAndCheckFinish(t *testing.T) {
-	noop := func(map[string]any) bool { return true }
-
-	// UNSPECIFIED → 不 done。
-	_, done := emitAndCheckFinish(map[string]any{"candidates": []any{map[string]any{"finishReason": "FINISH_REASON_UNSPECIFIED"}}}, noop)
-	if done {
-		t.Error("UNSPECIFIED 不应结束流（红线⑤）")
-	}
-
-	// 空 finishReason → 不 done。
-	_, done = emitAndCheckFinish(map[string]any{"candidates": []any{map[string]any{}}}, noop)
-	if done {
-		t.Error("空 finishReason 不应结束流")
-	}
-
-	// STOP → done。
-	_, done = emitAndCheckFinish(map[string]any{"candidates": []any{map[string]any{"finishReason": "STOP"}}}, noop)
-	if !done {
-		t.Error("STOP 应结束流")
-	}
-
-	// 客户端断开（emit 返回 false）→ stopByClient + done。
-	reject := func(map[string]any) bool { return false }
-	stopByClient, done := emitAndCheckFinish(map[string]any{"candidates": []any{map[string]any{"finishReason": "FINISH_REASON_UNSPECIFIED"}}}, reject)
-	if !stopByClient || !done {
-		t.Error("客户端断开应 stopByClient=true done=true")
+	if !stop {
+		t.Error("客户端断开时应立即停止扫描")
 	}
 }
 

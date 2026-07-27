@@ -18,15 +18,6 @@ import (
 	"github.com/bsfdsagfadg/vertex/internal/transport"
 )
 
-// finishReasonUnspecified 是匿名 batchGraphql 每帧都携带的 protobuf 默认值（无意义）。
-//
-// 流式最关键红线（红线⑤）：匿名端点每个增量帧都带 finishReason="FINISH_REASON_UNSPECIFIED"，
-// 只有真正结束时才给 STOP/MAX_TOKENS/SAFETY/PROHIBITED_CONTENT 等真实值。
-// **绝不能据 UNSPECIFIED 发 finish 事件或结束流**：首帧就命中会立即截断（血泪教训）。
-// 只有 finishReason 非空且 != FINISH_REASON_UNSPECIFIED 才主动结束流（否则上游不及时关连接
-// 会挂死到 180s 超时）。
-const finishReasonUnspecified = "FINISH_REASON_UNSPECIFIED"
-
 // StreamChunk 是真流式中 yield 的单个增量。要么是 Gemini 数据 chunk，要么是错误。
 //
 // 正常 yield Gemini dict，所有重试耗尽时 yield {"error": {...}}（routes 层据此
@@ -219,7 +210,7 @@ func effectiveMaxRetries(configured int, parallelPoolEnabled, parallelPoolRetryE
 	return configured
 }
 
-// executeStreamingAttempt 执行单次流式请求：发请求 → 增量扫描 JSON → 提取 chunk → 过滤 finishReason。
+// executeStreamingAttempt 执行单次流式请求：发请求 → 增量扫描 JSON → 提取 chunk。
 //
 // emit 回调把清洗后的 Gemini chunk 推给上层；
 // emit 返回 false（客户端断开）时扫描正常停止、返回 nil（StreamChat 据 chunkCount>0 收尾，不重试）。
@@ -278,9 +269,11 @@ func (c *VertexAIClient) executeStreamingAttempt(ctx context.Context, sess *tran
 		return raiseForStatus(sr.StatusCode, "", "Upstream Error: "+errText, nil, errText)
 	}
 
-	// 增量扫描上游流，逐个完整 JSON 对象提取 chunk。
+	// 增量扫描上游流，逐个完整 JSON 对象提取 chunk。不能在真实 finishReason 后立即
+	// 停止：Gemini 可能把 usageMetadata 放在随后的独立末帧。sr.Close 本来就会排干
+	// response body，因此读到 EOF 不会额外扩大原有的等待窗口。
 	scanErr := scanStream(sr.Body, func(obj map[string]any) (stop bool, err error) {
-		// 从单个上游对象提取（可能多个）chunk，逐个 emit；命中真实 finishReason 即结束。
+		// 从单个上游对象提取（可能多个）chunk，逐个 emit。
 		return processStreamingObject(obj, emit)
 	})
 
@@ -303,7 +296,7 @@ func (c *VertexAIClient) executeStreamingAttempt(ctx context.Context, sess *tran
 // 跨网络 chunk 维护 scanPos/braceCount/inString/escape 状态，下个 chunk 从上次扫到的位置
 // 续扫，而非每来一个 chunk 都从 startIdx 重扫整个 buffer（旧逻辑 O(n²）。逐字节逻辑等价。
 //
-// onObject 返回 (stop, err)：stop=true（命中真实 finishReason / 客户端断开）即正常结束扫描；
+// onObject 返回 (stop, err)：stop=true（客户端断开）即正常结束扫描；
 // err 非 nil 即中断并上抛（上游错误）。
 var scanBufPool = sync.Pool{ //nolint:gochecknoglobals
 	New: func() any {
@@ -430,7 +423,8 @@ func parseJSONObject(b []byte) map[string]any {
 //
 // 先识别 results 内的错误（"Failed to verify action" → AuthenticationError 触发重试），
 // 再 unwrap data.ui.streamGenerateContentAnonymous，最后 _extract_chunk 清洗后 emit。
-// 返回 (stop, err)：emit 出真实 finishReason 或客户端断开即 stop=true（结束扫描）；上游错误即 err 非 nil。
+// 返回 (stop, err)：客户端断开即 stop=true（结束扫描）；上游错误即 err 非 nil。
+// 真实 finishReason 只表示内容生成结束，后面仍可能有独立 usageMetadata 统计帧。
 func processStreamingObject(obj map[string]any, emit func(map[string]any) bool) (bool, error) {
 	results, _ := obj["results"].([]any)
 	for _, rRaw := range results {
@@ -483,7 +477,8 @@ func processStreamingObject(obj map[string]any, emit func(map[string]any) bool) 
 								}
 							}
 							if chunk := extractChunk(item); chunk != nil {
-								if _, done := emitAndCheckFinish(chunk, emit); done {
+								if !emit(chunk) {
+									log.Printf("[Stream] 客户端主动断开，导致流结束")
 									return true, nil
 								}
 							}
@@ -497,44 +492,13 @@ func processStreamingObject(obj map[string]any, emit func(map[string]any) bool) 
 		}
 
 		if chunk := extractChunk(data); chunk != nil {
-			if _, done := emitAndCheckFinish(chunk, emit); done {
+			if !emit(chunk) {
+				log.Printf("[Stream] 客户端主动断开，导致流结束")
 				return true, nil
 			}
 		}
 	}
 	return false, nil
-}
-
-// emitAndCheckFinish emit 一个 chunk 并判定是否应结束流。
-//
-// finishReason 过滤（红线⑤）：emit 后取 chunk 的 candidates[0].finishReason，
-// **仅当非空且 != FINISH_REASON_UNSPECIFIED 才主动结束流**。
-// 返回 (stopByClient, done)：done=true 表示应停止扫描；stopByClient 区分是客户端断开还是正常 finish。
-func emitAndCheckFinish(chunk map[string]any, emit func(map[string]any) bool) (stopByClient bool, done bool) {
-	if !emit(chunk) {
-		// 客户端断开 / 上层要求停止。
-		log.Printf("[Stream] 客户端主动断开，导致流结束")
-		return true, true
-	}
-	fr := chunkFinishReason(chunk)
-	if fr != "" && fr != finishReasonUnspecified {
-		// 真实 finishReason：主动结束（避免上游不关连接挂到 180s）。
-		return false, true
-	}
-	return false, false
-}
-
-// chunkFinishReason 取 chunk 的 candidates[0].finishReason。
-func chunkFinishReason(chunk map[string]any) string {
-	cands, ok := chunk["candidates"].([]any)
-	if !ok || len(cands) == 0 {
-		return ""
-	}
-	c, ok := cands[0].(map[string]any)
-	if !ok {
-		return ""
-	}
-	return toStr(c["finishReason"])
 }
 
 // extractChunk 从 Gemini 数据中提取标准化 chunk，清洗畸形嵌套。
