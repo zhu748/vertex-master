@@ -148,12 +148,17 @@ func (g *GeminiHandler) handleGeminiStreamGenerate(w http.ResponseWriter, r *htt
 			return false
 		}
 		gotChunk = true
-		if fr := cleanGeminiFinishReason(ch.Data); fr != "" {
+		// StreamParallel 的 race engine 可能把同一份 chunk map 共享给多个候选
+		// goroutine 做竞速，cleanGeminiFinishReason / cleanGeminiPromptFeedback 会
+		// 修改 map，直接在 ch.Data 上改会触发 data race。这里先递归复制一份独占
+		// 的副本再修改和写出。
+		data := cloneStringMap(ch.Data)
+		if fr := cleanGeminiFinishReason(data); fr != "" {
 			hasFinish = true
 		}
-		cleanGeminiPromptFeedback(ch.Data)
-		rewriteGeminiIDs(ch.Data, suffix)
-		return sw.write(g.geminiSSE(ch.Data))
+		cleanGeminiPromptFeedback(data)
+		rewriteGeminiIDs(data, suffix)
+		return sw.write(g.geminiSSE(data))
 	})
 
 	if streamErrWritten {
@@ -295,6 +300,9 @@ func cleanGeminiFinishReason(data map[string]any) string {
 //
 // 这里在透传前删除这个无害的占位符；只有真正的拦截原因（SAFETY / RECITATION 等）才保留。
 // 真正被拦截时 vertex 层会走 isSafetyBlock 分支返回 geminiSafetyResponse，不会走到这里。
+//
+// 调用方需保证传入的 data 是独占副本（见 shallowCloneMap / cloneStringMap），避免在
+// StreamParallel 的 race engine 共享 map 时触发 data race。
 func cleanGeminiPromptFeedback(data map[string]any) {
 	feedback, ok := data["promptFeedback"].(map[string]any)
 	if !ok {
@@ -310,6 +318,24 @@ func cleanGeminiPromptFeedback(data map[string]any) {
 	if len(feedback) == 0 {
 		delete(data, "promptFeedback")
 	}
+}
+
+// cloneStringMap 递归复制 map[string]any（slice 和基本类型按引用共享，但每层 map
+// 都是新的），用于在清理 promptFeedback / finishReason 等嵌套字段前确保子 map 也是
+// 独占的，避免在 StreamParallel race engine 共享 map 时触发 data race。
+func cloneStringMap(m map[string]any) map[string]any {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		if sub, ok := v.(map[string]any); ok {
+			out[k] = cloneStringMap(sub)
+		} else {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 func vertexErrorToGemini(e *vertex.VertexError) map[string]any {
