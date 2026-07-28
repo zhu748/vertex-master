@@ -27,11 +27,6 @@ if (Test-Path $OUT) {
 }
 New-Item -ItemType Directory -Force -Path $OUT | Out-Null
 
-# 默认设置 NDK 路径
-if ([string]::IsNullOrEmpty($env:ANDROID_NDK_HOME)) {
-    $env:ANDROID_NDK_HOME = "E:\android-ndk-r29"
-}
-
 function Build-Release {
     param (
         [string]$goos,
@@ -123,8 +118,15 @@ Build-Release -goos linux -goarch arm64 -bin vertex-proxy -pkg vertex-proxy-linu
 # 32 位 ARM 的 GOARCH 是 arm（不是 arm32）；包名仍用 arm32 以便用户区分位数。
 Build-Release -goos linux -goarch arm -bin vertex-proxy -pkg vertex-proxy-linux-arm32 -files @("scripts\start.sh", "scripts\vertex-proxy.service", "scripts\setup.sh")
 
-# Android
-Build-Release -goos android -goarch arm64 -bin vertex-proxy -pkg vertex-proxy-android-arm64 -files @("scripts\start.sh", "scripts\setup.sh")
+# Android（未配置 NDK 时默认跳过；BUILD_ANDROID=1/true 时改为严格失败）
+if (-not [string]::IsNullOrWhiteSpace($env:ANDROID_NDK_HOME)) {
+    Build-Release -goos android -goarch arm64 -bin vertex-proxy -pkg vertex-proxy-android-arm64 -files @("scripts\start.sh", "scripts\setup.sh")
+} elseif ($env:BUILD_ANDROID -match "^(1|true)$") {
+    Write-Error "错误：BUILD_ANDROID 已启用，但未指定 ANDROID_NDK_HOME 环境变量！"
+    exit 1
+} else {
+    Write-Host "==> 跳过 android/arm64：未设置 ANDROID_NDK_HOME"
+}
 
 # macOS
 Build-Release -goos darwin -goarch amd64 -bin vertex-proxy -pkg vertex-proxy-darwin-amd64 -files @("scripts\start.sh", "scripts\setup.sh")

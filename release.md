@@ -75,7 +75,7 @@ git push origin v1.1.1
 bash scripts/build-release.sh v1.1.1
 
 # Windows PowerShell
-powershell -File scripts/build-release.ps1 -Version v1.1.1
+powershell -File scripts/build-release.ps1 v1.1.1
 ```
 
 产物输出到 `dist/` 目录。
