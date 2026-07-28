@@ -83,6 +83,10 @@ func (h *ResponsesHandler) handleResponses(w http.ResponseWriter, r *http.Reques
 	}
 	oaiResp := h.respConv.ToOAI(geminiResp, model)
 	out := outputFromOAI(oaiResp)
+	out.Text = transform.StripAssistantPrefillEcho(
+		out.Text,
+		transform.AssistantPrefillFromPayload(payload),
+	)
 	out = completeProtocolUsageWithCountTokens(r.Context(), h.vc, model, payload, out)
 	restoreResponsesToolNamespaces(&out, namespaceTools)
 	writeJSON(w, http.StatusOK, buildResponsesResponse(body, rawModel, "resp_"+reqID24(), out))
@@ -646,6 +650,10 @@ func (h *ResponsesHandler) streamResponses(
 			return
 		}
 		out := outputFromOAI(h.respConv.ToOAI(resp, model))
+		out.Text = transform.StripAssistantPrefillEcho(
+			out.Text,
+			transform.AssistantPrefillFromPayload(payload),
+		)
 		out = completeProtocolUsageWithCountTokens(ctx, h.vc, model, payload, out)
 		if state.streamFailed() {
 			return
@@ -658,6 +666,9 @@ func (h *ResponsesHandler) streamResponses(
 
 	failed := false
 	var lastCandidateTokenCount int
+	prefillFilter := transform.NewAssistantPrefillStreamFilter(
+		transform.AssistantPrefillFromPayload(payload),
+	)
 	h.vc.StreamChat(ctx, model, payload, func(chunk vertex.StreamChunk) bool {
 		if state.streamFailed() {
 			return false
@@ -668,11 +679,15 @@ func (h *ResponsesHandler) streamResponses(
 			return false
 		}
 		data := chunk.Data
+		prefillFilter.FilterGeminiChunk(data)
 		normalizedUsage, hasUsage := normalizeStreamingGeminiUsage(data, &lastCandidateTokenCount)
 		state.consume(outputFromGeminiChunkWithUsage(data, normalizedUsage, hasUsage))
 		return !state.streamFailed()
 	})
 	if !failed && !state.streamFailed() {
+		if tail := prefillFilter.Finalize(); tail != "" {
+			state.consume(protocolOutput{Text: tail})
+		}
 		state.out = completeProtocolUsageWithCountTokens(ctx, h.vc, model, payload, state.output())
 		if !state.streamFailed() {
 			state.finish()

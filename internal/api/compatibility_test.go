@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/bsfdsagfadg/vertex/internal/config"
 	"github.com/bsfdsagfadg/vertex/internal/transform"
@@ -120,6 +121,101 @@ func TestResponsesTextContentPassesThroughFullConversion(t *testing.T) {
 	if len(parts) != 3 || parts[0].(map[string]any)["text"] != "one" ||
 		parts[1].(map[string]any)["text"] != "two" || parts[2].(map[string]any)["text"] != "three" {
 		t.Fatalf("Responses text parts were not preserved through Gemini conversion: %#v", parts)
+	}
+}
+
+func TestResponsesAndAnthropicGemini36AssistantPrefill(t *testing.T) {
+	tests := []struct {
+		name string
+		chat func(t *testing.T) map[string]any
+	}{
+		{
+			name: "responses",
+			chat: func(t *testing.T) map[string]any {
+				t.Helper()
+				chat, err := responsesToChatRequest(map[string]any{
+					"input": []any{
+						map[string]any{"type": "message", "role": "user", "content": "Continue"},
+						map[string]any{"type": "message", "role": "assistant", "content": []any{
+							map[string]any{"type": "output_text", "text": "ABC"},
+						}},
+					},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return chat
+			},
+		},
+		{
+			name: "anthropic",
+			chat: func(t *testing.T) map[string]any {
+				t.Helper()
+				chat, err := anthropicToChatRequest(map[string]any{
+					"max_tokens": float64(64),
+					"messages": []any{
+						map[string]any{"role": "user", "content": "Continue"},
+						map[string]any{"role": "assistant", "content": []any{
+							map[string]any{"type": "text", "text": "ABC"},
+						}},
+					},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return chat
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			chat := tc.chat(t)
+			chat["model"] = "gemini-3.6-flash"
+			_, payload, err := transform.ConvertChatRequest(
+				chat,
+				config.StaticProvider(config.DefaultConfig()),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := transform.AssistantPrefillFromPayload(payload); got != "ABC" {
+				t.Fatalf("%s 预填充未进入共享 Gemini 3.6 适配: %q", tc.name, got)
+			}
+			contents := payload["contents"].([]any)
+			if got := contents[len(contents)-1].(map[string]any)["role"]; got != "user" {
+				t.Fatalf("%s 转换后仍以 model 结尾: %v", tc.name, got)
+			}
+		})
+	}
+}
+
+func TestAnthropicGemini36DisabledThinkingUsesSupportedMinimum(t *testing.T) {
+	chat, err := anthropicToChatRequest(map[string]any{
+		"max_tokens": float64(64),
+		"thinking":   map[string]any{"type": "disabled"},
+		"messages": []any{
+			map[string]any{"role": "user", "content": "hello"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	chat["model"] = "gemini-3.6-flash"
+	model, payload, err := transform.ConvertChatRequest(
+		chat,
+		config.StaticProvider(config.DefaultConfig()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vars := transform.BuildVertexVariables(
+		model,
+		payload,
+		config.StaticProvider(config.DefaultConfig()),
+	)
+	thinking := vars["generationConfig"].(map[string]any)["thinkingConfig"].(map[string]any)
+	if got := thinking["thinkingLevel"]; got != "MINIMAL" {
+		t.Fatalf("Claude thinking.disabled 在 Gemini 3.6 应降级为 MINIMAL，got %v", got)
 	}
 }
 
@@ -366,6 +462,151 @@ func TestCompatibilityEndpoints(t *testing.T) {
 		}
 		if len(anySlice(body["candidates"])) == 0 {
 			t.Fatalf("missing Gemini candidates: %#v", body)
+		}
+	})
+
+	t.Run("gemini36_prefill_protocol_matrix", func(t *testing.T) {
+		fx := newTestServer(t)
+		captures := make(chan map[string]any, 16)
+		prefillUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var request map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if stringValue(request["operationName"]) == "CountTokens" {
+				writeTestCountTokensResponse(w, 1)
+				return
+			}
+			variables, _ := request["variables"].(map[string]any)
+			captures <- variables
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			_, _ = w.Write([]byte(
+				`[{"results":[{"data":{"ui":{"streamGenerateContentAnonymous":` +
+					`{"candidates":[{"content":{"parts":[{"text":"ABCDEF"}],"role":"model"},` +
+					`"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,` +
+					`"candidatesTokenCount":6,"totalTokenCount":16}}}}}]}]`,
+			))
+		}))
+		defer prefillUpstream.Close()
+		vertex.SetBatchGraphqlURL(prefillUpstream.URL + "/batchGraphql?key=test&prettyPrint=false")
+		t.Cleanup(func() {
+			vertex.SetBatchGraphqlURL(fx.mockUpstream.URL + "/batchGraphql?key=test&prettyPrint=false")
+		})
+
+		chatBody := func(model string, stream bool) map[string]any {
+			return map[string]any{
+				"model": model,
+				"messages": []any{
+					map[string]any{"role": "user", "content": "Continue"},
+					map[string]any{"role": "assistant", "content": []any{
+						map[string]any{"type": "text", "text": "ABC"},
+					}},
+				},
+				"reasoning_effort": "none",
+				"temperature":      0.7,
+				"top_p":            0.9,
+				"stream":           stream,
+			}
+		}
+		responsesBody := func(model string, stream bool) map[string]any {
+			return map[string]any{
+				"model": model,
+				"reasoning": map[string]any{
+					"effort": "none",
+				},
+				"input": []any{
+					map[string]any{"type": "message", "role": "user", "content": "Continue"},
+					map[string]any{"type": "message", "role": "assistant", "content": []any{
+						map[string]any{"type": "output_text", "text": "ABC"},
+					}},
+				},
+				"stream": stream,
+			}
+		}
+		anthropicBody := func(model string, stream bool) map[string]any {
+			return map[string]any{
+				"model": model, "max_tokens": 64,
+				"thinking": map[string]any{"type": "disabled"},
+				"messages": []any{
+					map[string]any{"role": "user", "content": "Continue"},
+					map[string]any{"role": "assistant", "content": []any{
+						map[string]any{"type": "text", "text": "ABC"},
+					}},
+				},
+				"stream": stream,
+			}
+		}
+		geminiBody := func(stream bool) map[string]any {
+			return map[string]any{
+				"contents": []any{
+					map[string]any{"role": "user", "parts": []any{map[string]any{"text": "Continue"}}},
+					map[string]any{"role": "model", "parts": []any{map[string]any{"text": "ABC"}}},
+				},
+				"generationConfig": map[string]any{
+					"temperature": 0.7,
+					"thinkingConfig": map[string]any{
+						"thinkingBudget": 0,
+					},
+				},
+			}
+		}
+
+		tests := []struct {
+			name   string
+			url    string
+			header string
+			key    string
+			body   map[string]any
+		}{
+			{name: "chat non-stream", url: "/v1/chat/completions", header: "Authorization", key: "Bearer sk-test-key", body: chatBody("gemini-3.6-flash", false)},
+			{name: "chat stream", url: "/v1/chat/completions", header: "Authorization", key: "Bearer sk-test-key", body: chatBody("gemini-3.6-flash", true)},
+			{name: "chat aggregate", url: "/v1/chat/completions", header: "Authorization", key: "Bearer sk-test-key", body: chatBody("fake-gemini-3.6-flash", true)},
+			{name: "responses non-stream", url: "/v1/responses", header: "Authorization", key: "Bearer sk-test-key", body: responsesBody("gemini-3.6-flash", false)},
+			{name: "responses stream", url: "/v1/responses", header: "Authorization", key: "Bearer sk-test-key", body: responsesBody("gemini-3.6-flash", true)},
+			{name: "responses aggregate", url: "/v1/responses", header: "Authorization", key: "Bearer sk-test-key", body: responsesBody("fake-gemini-3.6-flash", true)},
+			{name: "anthropic non-stream", url: "/v1/messages", header: "x-api-key", key: "sk-test-key", body: anthropicBody("gemini-3.6-flash", false)},
+			{name: "anthropic stream", url: "/v1/messages", header: "x-api-key", key: "sk-test-key", body: anthropicBody("gemini-3.6-flash", true)},
+			{name: "anthropic aggregate", url: "/v1/messages", header: "x-api-key", key: "sk-test-key", body: anthropicBody("fake-gemini-3.6-flash", true)},
+			{name: "gemini non-stream", url: "/v1beta/models/gemini-3.6-flash:generateContent", header: "x-goog-api-key", key: "sk-test-key", body: geminiBody(false)},
+			{name: "gemini stream", url: "/v1beta/models/gemini-3.6-flash:streamGenerateContent?alt=sse", header: "x-goog-api-key", key: "sk-test-key", body: geminiBody(true)},
+			{name: "gemini aggregate", url: "/v1beta/models/fake-gemini-3.6-flash:streamGenerateContent?alt=sse", header: "x-goog-api-key", key: "sk-test-key", body: geminiBody(true)},
+		}
+
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				resp := postWithHeader(t, fx.server.URL+tc.url, tc.header, tc.key, tc.body)
+				data, err := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if resp.StatusCode != http.StatusOK {
+					t.Fatalf("status=%d body=%s", resp.StatusCode, data)
+				}
+				responseText := string(data)
+				remaining := responseText
+				continuationInOrder := true
+				for _, piece := range []string{"D", "E", "F"} {
+					index := strings.Index(remaining, piece)
+					if index < 0 {
+						continuationInOrder = false
+						break
+					}
+					remaining = remaining[index+len(piece):]
+				}
+				if !continuationInOrder || strings.Contains(responseText, "ABC") {
+					t.Fatalf("客户端必须只收到新续写 DEF，got %s", responseText)
+				}
+
+				var variables map[string]any
+				select {
+				case variables = <-captures:
+				case <-time.After(time.Second):
+					t.Fatal("未捕获到 Vertex 出站请求")
+				}
+				assertGemini36PrefillVariables(t, variables)
+			})
 		}
 	})
 
@@ -814,6 +1055,51 @@ func TestCompatibilityEndpoints(t *testing.T) {
 			t.Fatalf("Anthropic 流没有补齐精确 CountTokens usage: %s", anthropicStream)
 		}
 	})
+}
+
+func assertGemini36PrefillVariables(t *testing.T, variables map[string]any) {
+	t.Helper()
+	if stringValue(variables["model"]) != "gemini-3.6-flash" {
+		t.Fatalf("出站模型错误: %#v", variables["model"])
+	}
+	contents := anySlice(variables["contents"])
+	if len(contents) == 0 {
+		t.Fatal("出站 contents 为空")
+	}
+	last, _ := contents[len(contents)-1].(map[string]any)
+	if stringValue(last["role"]) != "user" {
+		t.Fatalf("Gemini 3.6 出站请求仍以 model 结束: %#v", contents)
+	}
+	foundInstruction := false
+	for _, rawPart := range anySlice(last["parts"]) {
+		part, _ := rawPart.(map[string]any)
+		if strings.Contains(stringValue(part["text"]), `Assistant prefix JSON: "ABC"`) {
+			foundInstruction = true
+			break
+		}
+	}
+	if !foundInstruction {
+		t.Fatalf("出站请求缺少精确预填充上下文: %#v", last)
+	}
+	if _, leaked := variables["__vproxy_assistant_prefill"]; leaked {
+		t.Fatal("内部预填充元数据泄漏到 Vertex 请求")
+	}
+	generation, _ := variables["generationConfig"].(map[string]any)
+	for _, key := range []string{"temperature", "topP", "topK", "candidateCount"} {
+		if _, exists := generation[key]; exists {
+			t.Fatalf("Gemini 3.6 出站请求仍包含 %s: %#v", key, generation)
+		}
+	}
+	thinking, ok := generation["thinkingConfig"].(map[string]any)
+	if !ok {
+		t.Fatalf("客户端的最低思考意图未转换为 thinkingConfig: %#v", generation)
+	}
+	if _, exists := thinking["thinkingBudget"]; exists {
+		t.Fatalf("Gemini 3.6 出站请求仍包含 thinkingBudget: %#v", thinking)
+	}
+	if level := stringValue(thinking["thinkingLevel"]); level != "MINIMAL" {
+		t.Fatalf("客户端的 NONE/disabled/零预算应转换为 MINIMAL: %#v", thinking)
+	}
 }
 
 func testOperationName(r *http.Request) string {

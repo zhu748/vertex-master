@@ -59,10 +59,67 @@ func applyModelGenerationCompatibility(model string, cfg map[string]any) {
 		delete(cfg, key)
 	}
 	if thinking, ok := cfg["thinkingConfig"].(map[string]any); ok {
+		// BuildVertexVariables may be holding a shallow copy of generationConfig.
+		// Copy the nested map as well so compatibility cleanup never mutates the
+		// request payload later reused by usage/count-token handling.
+		thinking = copyMap(thinking)
+		cfg["thinkingConfig"] = thinking
+
+		level := strings.ToUpper(strings.TrimSpace(toString(thinking["thinkingLevel"])))
+		switch level {
+		case "NONE", "DISABLED", "OFF":
+			// Gemini 3.6 no longer accepts NONE. MINIMAL is the closest supported
+			// level and preserves the caller's intent to minimize hidden reasoning.
+			thinking["thinkingLevel"] = "MINIMAL"
+		case "MINIMAL", "LOW", "MEDIUM", "HIGH":
+			thinking["thinkingLevel"] = level
+		case "":
+			// thinkingBudget is deprecated for Gemini 3.6 and has no exact level
+			// equivalent. A non-positive budget means the minimum supported level;
+			// a positive budget falls back to the documented MEDIUM default.
+			if budget, exists := thinking["thinkingBudget"]; exists {
+				if nonPositiveThinkingBudget(budget) {
+					thinking["thinkingLevel"] = "MINIMAL"
+				} else {
+					thinking["thinkingLevel"] = "MEDIUM"
+				}
+			}
+		}
 		delete(thinking, "thinkingBudget")
 		if len(thinking) == 0 {
 			delete(cfg, "thinkingConfig")
 		}
+	}
+}
+
+func nonPositiveThinkingBudget(value any) bool {
+	switch number := value.(type) {
+	case int:
+		return number <= 0
+	case int8:
+		return number <= 0
+	case int16:
+		return number <= 0
+	case int32:
+		return number <= 0
+	case int64:
+		return number <= 0
+	case uint:
+		return number == 0
+	case uint8:
+		return number == 0
+	case uint16:
+		return number == 0
+	case uint32:
+		return number == 0
+	case uint64:
+		return number == 0
+	case float32:
+		return number <= 0
+	case float64:
+		return number <= 0
+	default:
+		return false
 	}
 }
 

@@ -474,6 +474,65 @@ func TestGemini36DropsDeprecatedGenerationFields(t *testing.T) {
 	if thinking["thinkingLevel"] != "MEDIUM" {
 		t.Fatalf("thinkingLevel 应保留并规范为大写: %v", thinking)
 	}
+	originalThinking := payload["generationConfig"].(map[string]any)["thinkingConfig"].(map[string]any)
+	if originalThinking["thinkingBudget"] != 256 || originalThinking["thinkingLevel"] != "medium" {
+		t.Fatalf("出站兼容清理不应修改原始 payload: %v", originalThinking)
+	}
+}
+
+func TestGemini36NormalizesUnsupportedThinkingControls(t *testing.T) {
+	tests := []struct {
+		name     string
+		thinking map[string]any
+		want     string
+	}{
+		{name: "none level", thinking: map[string]any{"thinkingLevel": "NONE"}, want: "MINIMAL"},
+		{name: "disabled level", thinking: map[string]any{"thinkingLevel": "disabled"}, want: "MINIMAL"},
+		{name: "zero budget", thinking: map[string]any{"thinkingBudget": float64(0)}, want: "MINIMAL"},
+		{name: "positive budget", thinking: map[string]any{"thinkingBudget": float64(1024)}, want: "MEDIUM"},
+		{name: "explicit level wins", thinking: map[string]any{"thinkingLevel": "high", "thinkingBudget": float64(0)}, want: "HIGH"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := map[string]any{
+				"contents": []any{map[string]any{
+					"role": "user", "parts": []any{map[string]any{"text": "hi"}},
+				}},
+				"generationConfig": map[string]any{"thinkingConfig": tc.thinking},
+			}
+			vars := BuildVertexVariables(
+				"gemini-3.6-flash",
+				payload,
+				config.StaticProvider(config.DefaultConfig()),
+			)
+			thinking := vars["generationConfig"].(map[string]any)["thinkingConfig"].(map[string]any)
+			if thinking["thinkingLevel"] != tc.want {
+				t.Fatalf("thinkingLevel=%v, want %s", thinking["thinkingLevel"], tc.want)
+			}
+			if _, exists := thinking["thinkingBudget"]; exists {
+				t.Fatalf("Gemini 3.6 不应发送 thinkingBudget: %v", thinking)
+			}
+		})
+	}
+}
+
+func TestGemini36ReasoningNoneBecomesMinimalAtOutboundLayer(t *testing.T) {
+	body := map[string]any{
+		"model": "gemini-3.6-flash",
+		"messages": []any{
+			map[string]any{"role": "user", "content": "hi"},
+		},
+		"reasoning_effort": "none",
+	}
+	model, payload, err := ConvertChatRequest(body, config.StaticProvider(config.DefaultConfig()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	vars := BuildVertexVariables(model, payload, config.StaticProvider(config.DefaultConfig()))
+	thinking := vars["generationConfig"].(map[string]any)["thinkingConfig"].(map[string]any)
+	if thinking["thinkingLevel"] != "MINIMAL" {
+		t.Fatalf("Gemini 3.6 reasoning_effort=none 应降级为 MINIMAL: %v", thinking)
+	}
 }
 
 func TestParallelToolCalls_GracefullyAccepted(t *testing.T) {

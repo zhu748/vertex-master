@@ -96,6 +96,7 @@ func (g *GeminiHandler) handleGeminiGenerate(w http.ResponseWriter, r *http.Requ
 	if reqObj, ok2 := body["generateContentRequest"].(map[string]any); ok2 {
 		body = reqObj
 	}
+	prefill := transform.AdaptGemini36Prefill(g.cfg.ResolveModelName(actualModel), body)
 	log.Printf("[Server] [GeminiGenerate] 收到请求: 模型=%s, 真模型=%s", model, actualModel)
 
 	resp, vErr := g.vc.CompleteChat(r.Context(), actualModel, body)
@@ -108,6 +109,7 @@ func (g *GeminiHandler) handleGeminiGenerate(w http.ResponseWriter, r *http.Requ
 		writeJSON(w, ve.Code, vertexErrorToGemini(ve))
 		return
 	}
+	transform.StripAssistantPrefillFromGemini(resp, prefill)
 	cleanGeminiFinishReason(resp)
 	cleanGeminiPromptFeedback(resp)
 	applyGeminiUsage(
@@ -127,6 +129,7 @@ func (g *GeminiHandler) handleGeminiStreamGenerate(w http.ResponseWriter, r *htt
 	if reqObj, ok2 := body["generateContentRequest"].(map[string]any); ok2 {
 		body = reqObj
 	}
+	transform.AdaptGemini36Prefill(g.cfg.ResolveModelName(actualModel), body)
 	log.Printf("[Server] [GeminiStreamGenerate] 收到请求: 模型=%s, 真模型=%s, 假流式=%v", model, actualModel, useFake)
 
 	sw := newSSEWriter(w, "text/event-stream")
@@ -142,6 +145,9 @@ func (g *GeminiHandler) handleGeminiStreamGenerate(w http.ResponseWriter, r *htt
 	suffix := generateVPSuffix()
 	var lastCandidateTokenCount int
 	var streamOutput protocolOutputAccumulator
+	prefillFilter := transform.NewAssistantPrefillStreamFilter(
+		transform.AssistantPrefillFromPayload(body),
+	)
 	var textStreamEncoder geminiTextStreamEncoder
 	textStreamEncoder.init()
 	g.vc.StreamChat(r.Context(), actualModel, body, func(ch vertex.StreamChunk) bool {
@@ -163,6 +169,7 @@ func (g *GeminiHandler) handleGeminiStreamGenerate(w http.ResponseWriter, r *htt
 		// StreamChunk 把胜出节点 chunk 的所有权交给当前单一消费者，可直接
 		// 就地清理和补齐字段，避免每帧递归复制整棵响应对象。
 		data := ch.Data
+		prefillFilter.FilterGeminiChunk(data)
 		normalizedUsage, hasUsage := normalizeStreamingGeminiUsage(data, &lastCandidateTokenCount)
 		streamOutput.Add(outputFromGeminiChunkWithUsage(data, normalizedUsage, hasUsage))
 		if fr := cleanGeminiFinishReason(data); fr != "" {
@@ -178,6 +185,18 @@ func (g *GeminiHandler) handleGeminiStreamGenerate(w http.ResponseWriter, r *htt
 
 	if streamErrWritten {
 		return
+	}
+	if tail := prefillFilter.Finalize(); tail != "" {
+		tailChunk := map[string]any{"candidates": []any{map[string]any{
+			"index": 0,
+			"content": map[string]any{
+				"role": "model", "parts": []any{map[string]any{"text": tail}},
+			},
+		}}}
+		if !textStreamEncoder.writeData(sw, tailChunk) {
+			return
+		}
+		streamOutput.AddText(tail)
 	}
 	if !gotChunk {
 		_ = sw.writeData(map[string]any{
@@ -298,6 +317,10 @@ func (g *GeminiHandler) geminiFakeStream(ctx context.Context, sw *sseWriter, mod
 		return
 	}
 
+	transform.StripAssistantPrefillFromGemini(
+		resp,
+		transform.AssistantPrefillFromPayload(body),
+	)
 	text := geminiResponseText(resp)
 	out := completeProtocolUsageWithCountTokens(ctx, g.vc, model, body, outputFromGeminiChunk(resp))
 	chunks := splitIntoRuneChunks(text)

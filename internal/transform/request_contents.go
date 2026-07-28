@@ -76,6 +76,14 @@ func convertUserContent(content any) []any {
 
 // splitAssistantContent 把 assistant 文本切成 text / inlineData 混合 parts。
 func splitAssistantContent(content any) []any {
+	if _, ok := content.([]any); ok {
+		// OpenAI permits assistant content as a typed content-part array. Reuse
+		// the same text/media conversion as user content so pure-text arrays stay
+		// plain strings and can participate in Gemini 3.6 prefill adaptation.
+		// Media parts remain media, causing the prefill adapter to leave that real
+		// multimodal history untouched.
+		return convertUserContent(content)
+	}
 	s, ok := content.(string)
 	if !ok {
 		return []any{map[string]any{"text": content}}

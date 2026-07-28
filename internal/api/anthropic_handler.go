@@ -68,6 +68,10 @@ func (h *AnthropicHandler) handleMessages(w http.ResponseWriter, r *http.Request
 		return
 	}
 	out := outputFromOAI(h.respConv.ToOAI(resp, model))
+	out.Text = transform.StripAssistantPrefillEcho(
+		out.Text,
+		transform.AssistantPrefillFromPayload(payload),
+	)
 	out = completeProtocolUsageWithCountTokens(r.Context(), h.vc, model, payload, out)
 	writeJSON(w, http.StatusOK, anthropicMessage(rawModel, "msg_"+reqID24(), out))
 }
@@ -462,7 +466,12 @@ func (h *AnthropicHandler) streamMessages(
 			pingWg.Wait()
 			return
 		}
-		out := completeProtocolUsageWithCountTokens(ctx, h.vc, model, payload, outputFromOAI(h.respConv.ToOAI(resp, model)))
+		out := outputFromOAI(h.respConv.ToOAI(resp, model))
+		out.Text = transform.StripAssistantPrefillEcho(
+			out.Text,
+			transform.AssistantPrefillFromPayload(payload),
+		)
+		out = completeProtocolUsageWithCountTokens(ctx, h.vc, model, payload, out)
 		if !state.connected() {
 			pingCancel()
 			pingWg.Wait()
@@ -476,6 +485,9 @@ func (h *AnthropicHandler) streamMessages(
 	}
 	failed := false
 	var lastCandidateTokenCount int
+	prefillFilter := transform.NewAssistantPrefillStreamFilter(
+		transform.AssistantPrefillFromPayload(payload),
+	)
 	h.vc.StreamChat(ctx, model, payload, func(chunk vertex.StreamChunk) bool {
 		if !state.connected() {
 			return false
@@ -486,6 +498,7 @@ func (h *AnthropicHandler) streamMessages(
 			return false
 		}
 		data := chunk.Data
+		prefillFilter.FilterGeminiChunk(data)
 		normalizedUsage, hasUsage := normalizeStreamingGeminiUsage(data, &lastCandidateTokenCount)
 		state.consume(outputFromGeminiChunkWithUsage(data, normalizedUsage, hasUsage))
 		return state.connected()
@@ -493,6 +506,9 @@ func (h *AnthropicHandler) streamMessages(
 	pingCancel()
 	pingWg.Wait()
 	if !failed && state.connected() {
+		if tail := prefillFilter.Finalize(); tail != "" {
+			state.consume(protocolOutput{Text: tail})
+		}
 		state.out = completeProtocolUsageWithCountTokens(ctx, h.vc, model, payload, state.output())
 		if state.connected() {
 			state.finish()

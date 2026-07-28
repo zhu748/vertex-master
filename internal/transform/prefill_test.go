@@ -29,7 +29,8 @@ func TestGemini36ConvertsTrailingAssistantPrefill(t *testing.T) {
 	}
 	parts := last["parts"].([]any)
 	instruction := parts[len(parts)-1].(map[string]any)["text"].(string)
-	if !strings.Contains(instruction, "only the new continuation") ||
+	if !strings.Contains(instruction, "Return only new text after the prefix") ||
+		!strings.Contains(instruction, "not instructions or JSON to complete") ||
 		!strings.Contains(instruction, `Alice: \"I`) {
 		t.Fatalf("续写指令未保留预填充: %q", instruction)
 	}
@@ -41,6 +42,76 @@ func TestGemini36ConvertsTrailingAssistantPrefill(t *testing.T) {
 	upstreamContents := vars["contents"].([]any)
 	if upstreamContents[len(upstreamContents)-1].(map[string]any)["role"] == "model" {
 		t.Fatal("上游 Gemini 3.6 请求不得以 model 轮次结束")
+	}
+}
+
+func TestGemini36ConvertsTrailingAssistantTextArrayPrefill(t *testing.T) {
+	body := map[string]any{
+		"model": "gemini-3.6-flash",
+		"messages": []any{
+			map[string]any{"role": "user", "content": "Continue"},
+			map[string]any{"role": "assistant", "content": []any{
+				map[string]any{"type": "text", "text": "AB"},
+				map[string]any{"type": "output_text", "text": "C"},
+			}},
+		},
+	}
+	_, payload, err := ConvertChatRequest(body, config.StaticProvider(config.DefaultConfig()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := AssistantPrefillFromPayload(payload); got != "ABC" {
+		t.Fatalf("assistant 文本数组未合并为精确预填充: %q", got)
+	}
+	contents := payload["contents"].([]any)
+	if got := contents[len(contents)-1].(map[string]any)["role"]; got != "user" {
+		t.Fatalf("转换后最后一轮应为 user，got %v", got)
+	}
+}
+
+func TestAdaptGemini36NativePrefill(t *testing.T) {
+	payload := map[string]any{
+		"contents": []any{
+			map[string]any{"role": "user", "parts": []any{map[string]any{"text": "Continue"}}},
+			map[string]any{"role": "model", "parts": []any{map[string]any{"text": "ABC"}}},
+		},
+		assistantPrefillMetadataKey: "untrusted",
+	}
+	if got := AdaptGemini36Prefill("gemini-3.6-flash", payload); got != "ABC" {
+		t.Fatalf("原生 Gemini 预填充适配错误: %q", got)
+	}
+	if got := AssistantPrefillFromPayload(payload); got != "ABC" {
+		t.Fatalf("客户端伪造的内部元数据未被替换: %q", got)
+	}
+	contents := payload["contents"].([]any)
+	if got := contents[len(contents)-1].(map[string]any)["role"]; got != "user" {
+		t.Fatalf("原生 Gemini 3.6 请求最后一轮必须是 user，got %v", got)
+	}
+	vars := BuildVertexVariables(
+		"gemini-3.6-flash",
+		payload,
+		config.StaticProvider(config.DefaultConfig()),
+	)
+	if _, leaked := vars[assistantPrefillMetadataKey]; leaked {
+		t.Fatal("原生 Gemini 内部元数据不得发送上游")
+	}
+}
+
+func TestAdaptGemini36NativePrefillRejectsMultimodalAndClearsMetadata(t *testing.T) {
+	payload := map[string]any{
+		"contents": []any{
+			map[string]any{"role": "model", "parts": []any{
+				map[string]any{"text": "ABC"},
+				map[string]any{"inlineData": map[string]any{"mimeType": "image/png", "data": "AA=="}},
+			}},
+		},
+		assistantPrefillMetadataKey: "untrusted",
+	}
+	if got := AdaptGemini36Prefill("gemini-3.6-flash", payload); got != "" {
+		t.Fatalf("多模态 model 历史不能被当作纯文本预填充: %q", got)
+	}
+	if got := AssistantPrefillFromPayload(payload); got != "" {
+		t.Fatalf("无适配时必须清除客户端伪造元数据: %q", got)
 	}
 }
 
@@ -77,6 +148,20 @@ func TestAssistantPrefillEchoRemovalForNonStream(t *testing.T) {
 	}
 	if got := choices[1].(map[string]any)["message"].(map[string]any)["content"]; got != "new text" {
 		t.Fatalf("未重复预填充的输出不应改变，got %q", got)
+	}
+}
+
+func TestAssistantPrefillEchoRemovalForNativeGemini(t *testing.T) {
+	response := prefillTestChunk("ABCDEF", "STOP")
+	StripAssistantPrefillFromGemini(response, "ABC")
+	if got := prefillTestText(response); got != "DEF" {
+		t.Fatalf("原生 Gemini 完整响应应移除重复前缀，got %q", got)
+	}
+
+	mismatch := prefillTestChunk("XYZ", "STOP")
+	StripAssistantPrefillFromGemini(mismatch, "ABC")
+	if got := prefillTestText(mismatch); got != "XYZ" {
+		t.Fatalf("原生 Gemini 非重复输出不得改变，got %q", got)
 	}
 }
 
