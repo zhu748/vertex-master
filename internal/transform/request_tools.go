@@ -17,18 +17,19 @@ func convertTools(body, geminiPayload map[string]any) (map[string]bool, error) {
 	oaiTools, _ := body["tools"].([]any)
 	// 兼容已废弃的顶层 functions 字段（无 tools 时回退）。
 	if len(oaiTools) == 0 {
-		if fns, ok := body["functions"].([]any); ok {
+		if fns, ok := body["functions"].([]any); ok && len(fns) > 0 {
+			oaiTools = make([]any, 0, len(fns))
 			for _, f := range fns {
 				oaiTools = append(oaiTools, map[string]any{"type": "function", "function": f})
 			}
 		}
 	}
-	declared := map[string]bool{}
 	if len(oaiTools) == 0 {
-		return declared, nil
+		return nil, nil
 	}
 
-	var funcDecls []any
+	declared := make(map[string]bool, len(oaiTools))
+	funcDecls := make([]any, 0, len(oaiTools))
 	for _, t := range oaiTools {
 		f := extractOAIFunctionTool(t)
 		if f == nil {
@@ -41,7 +42,8 @@ func convertTools(body, geminiPayload map[string]any) (map[string]bool, error) {
 		}
 		if params, ok := f["parameters"].(map[string]any); ok && len(params) > 0 {
 			// 对 parameters 递归白名单清洗，剔除 Gemini 不支持的 schema 字段。
-			decl["parameters"] = cleanFunctionParameters(deepCopyAny(params))
+			// 清洗器本身按层创建新 map/slice，不会修改客户端传入的 schema。
+			decl["parameters"] = cleanFunctionParameters(params)
 		} else {
 			// 缺省 parameters 时补默认空对象 schema，满足 Gemini functionDeclarations 要求。
 			decl["parameters"] = map[string]any{"type": "object", "properties": map[string]any{}}

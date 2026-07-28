@@ -159,6 +159,14 @@ func TestConvertChatRequest_Tools(t *testing.T) {
 	if _, ok := params["properties"]; !ok {
 		t.Error("properties 应保留")
 	}
+	originalParams := body["tools"].([]any)[0].(map[string]any)["function"].(map[string]any)["parameters"].(map[string]any)
+	if _, ok := originalParams["$schema"]; !ok {
+		t.Fatal("schema 清洗修改了客户端原始请求")
+	}
+	originalCity := originalParams["properties"].(map[string]any)["city"].(map[string]any)
+	if originalCity["type"] != "string" {
+		t.Fatalf("schema 清洗修改了客户端嵌套字段: %#v", originalCity)
+	}
 	tc := payload["toolConfig"].(map[string]any)["functionCallingConfig"].(map[string]any)
 	if tc["mode"] != "ANY" {
 		t.Errorf("required → mode=%v, want ANY", tc["mode"])

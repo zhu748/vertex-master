@@ -46,9 +46,9 @@ func ConvertChatRequest(body map[string]any, cfg config.ConfigProvider) (string,
 		return "", nil, fmt.Errorf("messages 不能为空 (messages must be a non-empty array)")
 	}
 
-	contents := []any{}
+	contents := make([]any, 0, len(messagesRaw))
 	var systemParts []any
-	toolIDToName := map[string]string{}
+	var toolIDToName map[string]string
 
 	for _, msgRaw := range messagesRaw {
 		msg, ok := msgRaw.(map[string]any)
@@ -91,6 +91,9 @@ func ConvertChatRequest(body map[string]any, cfg config.ConfigProvider) (string,
 						continue
 					}
 					if parsed.id != "" {
+						if toolIDToName == nil {
+							toolIDToName = make(map[string]string)
+						}
 						toolIDToName[parsed.id] = parsed.name
 					}
 					fc := map[string]any{"name": parsed.name, "args": parsed.args}
@@ -147,7 +150,7 @@ func ConvertChatRequest(body map[string]any, cfg config.ConfigProvider) (string,
 		return "", nil, err
 	}
 
-	genCfg := map[string]any{}
+	var genCfg map[string]any
 	for _, m := range []struct{ oai, gem string }{
 		{"temperature", "temperature"},
 		{"top_p", "topP"},
@@ -157,14 +160,23 @@ func ConvertChatRequest(body map[string]any, cfg config.ConfigProvider) (string,
 		{"seed", "seed"},
 	} {
 		if v, ok := body[m.oai]; ok && v != nil {
+			if genCfg == nil {
+				genCfg = make(map[string]any, 8)
+			}
 			genCfg[m.gem] = v
 		}
 	}
 
 	if v, ok := body["logprobs"]; ok && v != nil {
+		if genCfg == nil {
+			genCfg = make(map[string]any, 8)
+		}
 		genCfg["responseLogprobs"] = isTruthy(v)
 	}
 	if v, ok := body["top_logprobs"]; ok && v != nil {
+		if genCfg == nil {
+			genCfg = make(map[string]any, 8)
+		}
 		genCfg["logprobs"] = v
 	}
 
@@ -180,11 +192,17 @@ func ConvertChatRequest(body map[string]any, cfg config.ConfigProvider) (string,
 			return "", nil, fmt.Errorf("max_tokens must be an integer >= 1")
 		}
 		if !cfg.DropMaxTokens() {
+			if genCfg == nil {
+				genCfg = make(map[string]any, 8)
+			}
 			genCfg["maxOutputTokens"] = maxTokens
 		}
 	}
 
 	if stop, ok := body["stop"]; ok && stop != nil {
+		if genCfg == nil {
+			genCfg = make(map[string]any, 8)
+		}
 		switch s := stop.(type) {
 		case string:
 			genCfg["stopSequences"] = []any{s}
@@ -195,6 +213,9 @@ func ConvertChatRequest(body map[string]any, cfg config.ConfigProvider) (string,
 
 	if rf, ok := body["response_format"].(map[string]any); ok {
 		if t, _ := rf["type"].(string); t == "json_object" || t == "json_schema" {
+			if genCfg == nil {
+				genCfg = make(map[string]any, 8)
+			}
 			genCfg["responseMimeType"] = "application/json"
 			if t == "json_schema" {
 				if js, ok := rf["json_schema"].(map[string]any); ok {
@@ -293,26 +314,6 @@ func firstPresentRaw(m map[string]any, keys ...string) any {
 		}
 	}
 	return nil
-}
-
-// deepCopyAny 深拷贝 map/slice 结构。
-func deepCopyAny(v any) any {
-	switch x := v.(type) {
-	case map[string]any:
-		out := make(map[string]any, len(x))
-		for k, val := range x {
-			out[k] = deepCopyAny(val)
-		}
-		return out
-	case []any:
-		out := make([]any, len(x))
-		for i, item := range x {
-			out[i] = deepCopyAny(item)
-		}
-		return out
-	default:
-		return v
-	}
 }
 
 // parseModelName 解析模型名：经 models.json 的 alias_map 重映射。

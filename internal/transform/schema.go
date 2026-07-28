@@ -34,7 +34,8 @@ func cleanFunctionParameters(schema any) any {
 		}
 		return out
 	case map[string]any:
-		cleaned := map[string]any{}
+		// 不按不受信任 schema 的总键数无限预分配；最终只会保留白名单字段。
+		cleaned := make(map[string]any, min(len(s), len(geminiAllowedSchemaFields)))
 		for key, value := range s {
 			if !geminiAllowedSchemaFields[key] {
 				continue
@@ -42,7 +43,7 @@ func cleanFunctionParameters(schema any) any {
 			switch key {
 			case "properties":
 				if vm, ok := value.(map[string]any); ok {
-					props := map[string]any{}
+					props := make(map[string]any, len(vm))
 					for k, v := range vm {
 						props[k] = cleanFunctionParameters(v)
 					}
@@ -82,7 +83,7 @@ func toNativeSchema(schema any) any {
 	if !ok {
 		return schema
 	}
-	out := map[string]any{}
+	out := make(map[string]any, len(m))
 	for k, v := range m {
 		if schemaUnsupportedKeys[k] {
 			continue
@@ -105,11 +106,7 @@ func toNativeSchema(schema any) any {
 	default:
 		out["type"] = "OBJECT"
 	}
-	validTypes := map[string]bool{
-		"STRING": true, "INTEGER": true, "NUMBER": true,
-		"BOOLEAN": true, "ARRAY": true, "OBJECT": true,
-	}
-	if !validTypes[out["type"].(string)] {
+	if !validNativeSchemaType(out["type"].(string)) {
 		out["type"] = "STRING"
 	}
 
@@ -145,4 +142,13 @@ func toNativeSchema(schema any) any {
 	}
 
 	return out
+}
+
+func validNativeSchemaType(value string) bool {
+	switch value {
+	case "STRING", "INTEGER", "NUMBER", "BOOLEAN", "ARRAY", "OBJECT":
+		return true
+	default:
+		return false
+	}
 }
