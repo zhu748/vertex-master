@@ -1,10 +1,42 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 )
+
+func TestServerExposesBuildInfo(t *testing.T) {
+	server := &Server{
+		mw: &middleware{keys: NewAPIKeyManager()},
+	}
+	server.SetBuildInfo("v1.2.10", "abc1234", "2026-07-27T15:00:00Z")
+
+	for _, test := range []struct {
+		name    string
+		handler http.HandlerFunc
+	}{
+		{name: "root", handler: server.handleRoot},
+		{name: "health", handler: server.handleHealth},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			test.handler(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status=%d", recorder.Code)
+			}
+			var body map[string]any
+			if err := json.NewDecoder(recorder.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body["version"] != "v1.2.10" || body["build_commit"] != "abc1234" ||
+				body["build_time"] != "2026-07-27T15:00:00Z" {
+				t.Fatalf("build info not exposed: %#v", body)
+			}
+		})
+	}
+}
 
 func TestResolveN(t *testing.T) {
 	cases := []struct { //nolint:govet

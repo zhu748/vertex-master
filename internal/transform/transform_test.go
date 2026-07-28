@@ -2,7 +2,9 @@ package transform
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/bsfdsagfadg/vertex/internal/config"
@@ -24,11 +26,18 @@ func TestSnakeToCamel(t *testing.T) {
 }
 
 func TestCamelToSnake(t *testing.T) {
-	if got := CamelToSnake("topP"); got != "top_p" {
-		t.Errorf("CamelToSnake(topP)=%q", got)
-	}
-	if got := CamelToSnake("maxOutputTokens"); got != "max_output_tokens" {
-		t.Errorf("CamelToSnake(maxOutputTokens)=%q", got)
+	for input, want := range map[string]string{
+		"topP":            "top_p",
+		"maxOutputTokens": "max_output_tokens",
+		"HTTPServer":      "httpserver",
+		"someURLValue":    "some_urlvalue",
+		"field1Value":     "field1_value",
+		"already_lower":   "already_lower",
+		"ÉcoleValue":      "école_value",
+	} {
+		if got := CamelToSnake(input); got != want {
+			t.Errorf("CamelToSnake(%q)=%q, want %q", input, got, want)
+		}
 	}
 }
 
@@ -137,13 +146,65 @@ func TestBuildVertexVariables_SafetyDefault(t *testing.T) {
 	if vars["model"] != "gemini-3.1-flash" {
 		t.Error("model")
 	}
-	ss, ok := vars["safetySettings"].([]any)
+	ss, ok := vars["safetySettings"].([]vertexSafetySetting)
 	if !ok || len(ss) != 5 {
 		t.Errorf("safetySettings=%v, want 5 BLOCK_NONE", vars["safetySettings"])
 	}
-	first := ss[0].(map[string]any)
-	if first["threshold"] != "BLOCK_NONE" {
-		t.Errorf("threshold=%v", first["threshold"])
+	first := ss[0]
+	if first.Threshold != "BLOCK_NONE" {
+		t.Errorf("threshold=%v", first.Threshold)
+	}
+	wire, err := json.Marshal(ss)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded []map[string]any
+	if err := json.Unmarshal(wire, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded) != 5 || decoded[0]["category"] != "HARM_CATEGORY_HARASSMENT" ||
+		decoded[0]["threshold"] != "BLOCK_NONE" {
+		t.Fatalf("safetySettings wire shape changed: %s", wire)
+	}
+}
+
+func TestCanonicalTextContentsCanPassThrough(t *testing.T) {
+	valid := []any{
+		map[string]any{"role": "user", "parts": []any{map[string]any{"text": "hello"}}},
+		map[string]any{"role": "model", "parts": []any{map[string]any{"text": "world"}}},
+	}
+	if !canonicalTextContentsCanPassThrough(valid) {
+		t.Fatal("canonical text contents did not use the fast path")
+	}
+
+	for name, contents := range map[string]any{
+		"legacy role": []any{map[string]any{
+			"role": "assistant", "parts": []any{map[string]any{"text": "x"}},
+		}},
+		"extra content field": []any{map[string]any{
+			"role": "user", "parts": []any{map[string]any{"text": "x"}}, "name": "user",
+		}},
+		"thought": []any{map[string]any{
+			"role": "model", "parts": []any{map[string]any{"text": "x", "thought": true}},
+		}},
+		"empty text": []any{map[string]any{
+			"role": "user", "parts": []any{map[string]any{"text": ""}},
+		}},
+		"media": []any{map[string]any{
+			"role": "user", "parts": []any{map[string]any{"inlineData": map[string]any{
+				"mimeType": "image/png", "data": "AA==",
+			}}},
+		}},
+	} {
+		if canonicalTextContentsCanPassThrough(contents) {
+			t.Errorf("%s unexpectedly used canonical text fast path", name)
+		}
+	}
+
+	cfg := config.StaticProvider(config.DefaultConfig())
+	vars := BuildVertexVariables("gemini-3.1-flash", map[string]any{"contents": valid}, cfg)
+	if !reflect.DeepEqual(vars["contents"], valid) {
+		t.Fatalf("fast path changed canonical contents:\n got: %#v\nwant: %#v", vars["contents"], valid)
 	}
 }
 
@@ -168,22 +229,22 @@ func TestBuildVertexVariables_NormalizesUnspecifiedSafetySettings(t *testing.T) 
 		},
 	}
 	vars := BuildVertexVariables("gemini-3.6-flash", payload, config.StaticProvider(cfg))
-	settings, ok := vars["safetySettings"].([]any)
+	settings, ok := vars["safetySettings"].([]vertexSafetySetting)
 	if !ok || len(settings) != 2 {
 		t.Fatalf("safetySettings=%#v", vars["safetySettings"])
 	}
-	first := settings[0].(map[string]any)
-	if first["threshold"] != "BLOCK_ONLY_HIGH" {
+	first := settings[0]
+	if first.Threshold != "BLOCK_ONLY_HIGH" {
 		t.Fatalf("configured threshold not applied: %#v", first)
 	}
-	second := settings[1].(map[string]any)
-	if second["threshold"] != "BLOCK_NONE" {
+	second := settings[1]
+	if second.Threshold != "BLOCK_NONE" {
 		t.Fatalf("empty threshold should default to BLOCK_NONE: %#v", second)
 	}
 
 	payload["safetySettings"] = []any{}
 	vars = BuildVertexVariables("gemini-3.6-flash", payload, config.StaticProvider(cfg))
-	if got := len(vars["safetySettings"].([]any)); got != len(safetyCategories) {
+	if got := len(vars["safetySettings"].([]vertexSafetySetting)); got != len(safetyCategories) {
 		t.Fatalf("empty safety settings should use defaults, got %d", got)
 	}
 }
@@ -258,15 +319,52 @@ func TestMapFinishReason(t *testing.T) {
 }
 
 func TestMergeContentBlocks(t *testing.T) {
-	merged := MergeContentBlocks([]map[string]any{
+	parts := []map[string]any{
 		{"text": "Hello "},
 		{"text": "World"},
-	})
-	if len(merged) != 1 {
-		t.Fatalf("merged len=%d, want 1", len(merged))
+		{"text": "think", "thought": true},
+		{"text": "ing", "thought": true, "thoughtSignature": "sig"},
+		{"functionCall": map[string]any{"name": "tool", "args": map[string]any{}}},
+		{"text": "Done"},
+	}
+	merged := MergeContentBlocks(parts)
+	if len(merged) != 4 {
+		t.Fatalf("merged len=%d, want 4: %#v", len(merged), merged)
 	}
 	if merged[0]["text"] != "Hello World" {
 		t.Errorf("merged text=%q", merged[0]["text"])
+	}
+	if merged[1]["text"] != "thinking" || merged[1]["thought"] != true ||
+		merged[1]["thoughtSignature"] != "sig" {
+		t.Errorf("merged thought=%#v", merged[1])
+	}
+	if _, ok := merged[2]["functionCall"]; !ok || merged[3]["text"] != "Done" {
+		t.Errorf("non-text boundary changed: %#v", merged)
+	}
+	if parts[0]["text"] != "Hello " || parts[1]["text"] != "World" {
+		t.Errorf("input parts were mutated: %#v", parts)
+	}
+
+	incremental := NewContentBlockMerger(2)
+	for _, part := range parts {
+		incremental.Add(part)
+	}
+	if got := incremental.Result(); !reflect.DeepEqual(got, merged) {
+		t.Fatalf("incremental result differs from batch merge:\n got: %#v\nwant: %#v", got, merged)
+	}
+	if got := incremental.Result(); !reflect.DeepEqual(got, merged) {
+		t.Fatalf("repeated Result changed output: %#v", got)
+	}
+}
+
+func BenchmarkMergeContentBlocksTextChunks(b *testing.B) {
+	parts := make([]map[string]any, 4096)
+	for index := range parts {
+		parts[index] = map[string]any{"text": "0123456789abcdef"}
+	}
+	b.ResetTimer()
+	for range b.N {
+		_ = MergeContentBlocks(parts)
 	}
 }
 
@@ -792,7 +890,11 @@ func TestStripGeminiIDs(t *testing.T) {
 		},
 	}
 
-	stripGeminiIDs(payload)
+	sanitized, changed := stripGeminiIDsCopy(payload, 0)
+	if !changed {
+		t.Fatal("expected Gemini IDs to be normalized")
+	}
+	payload = sanitized.(map[string]any)
 
 	contents := payload["contents"].([]any)
 	m1 := contents[0].(map[string]any)
@@ -805,5 +907,145 @@ func TestStripGeminiIDs(t *testing.T) {
 	fr := m2["parts"].([]any)[0].(map[string]any)["functionResponse"].(map[string]any)
 	if fr["id"] != "gemini-tool-call-1" {
 		t.Errorf("functionResponse.id stripping 失败: %v", fr["id"])
+	}
+}
+
+func TestBuildVertexVariablesStripsIDsWithoutMutatingInput(t *testing.T) {
+	payload := map[string]any{
+		"contents": []any{
+			map[string]any{"role": "model", "parts": []any{
+				map[string]any{"functionCall": map[string]any{
+					"id": "gemini-tool-call-1-vp12345678", "name": "lookup", "args": map[string]any{},
+				}},
+			}},
+			map[string]any{"role": "function", "parts": []any{
+				map[string]any{"functionResponse": map[string]any{
+					"id": "gemini-tool-call-1-vp12345678", "name": "lookup", "response": map[string]any{},
+				}},
+			}},
+		},
+	}
+	before, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	vars := BuildVertexVariables("gemini-3.1-flash", payload, config.StaticProvider(config.DefaultConfig()))
+	after, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("BuildVertexVariables mutated shared payload:\nbefore=%s\nafter=%s", before, after)
+	}
+
+	contents := vars["contents"].([]any)
+	call := contents[0].(map[string]any)["parts"].([]any)[0].(map[string]any)["functionCall"].(map[string]any)
+	response := contents[1].(map[string]any)["parts"].([]any)[0].(map[string]any)["functionResponse"].(map[string]any)
+	if _, exists := call["id"]; exists {
+		t.Fatalf("outbound functionCall retained internal ID: %#v", call)
+	}
+	if _, exists := response["id"]; exists {
+		t.Fatalf("outbound functionResponse retained internal ID: %#v", response)
+	}
+	sanitized, changed := stripGeminiIDsCopy(payload, 0)
+	if !changed {
+		t.Fatal("copy-on-write ID normalization did not detect suffixes")
+	}
+	sanitizedContents := sanitized.(map[string]any)["contents"].([]any)
+	sanitizedCall := sanitizedContents[0].(map[string]any)["parts"].([]any)[0].(map[string]any)["functionCall"].(map[string]any)
+	if sanitizedCall["id"] != "gemini-tool-call-1" {
+		t.Fatalf("copy-on-write ID=%v", sanitizedCall["id"])
+	}
+}
+
+func TestBuildVertexVariablesContentCopyOnWrite(t *testing.T) {
+	payload := map[string]any{
+		"contents": []any{map[string]any{
+			"role": "user",
+			"parts": []any{
+				map[string]any{"text": "plain"},
+				map[string]any{"inlineData": map[string]any{
+					"mimeType": "image/png", "data": "YWJjZA",
+				}},
+				map[string]any{
+					"text": "thinking", "thought": true,
+					"thoughtSignature": skipThoughtSentinel,
+				},
+				map[string]any{"type": "input_text", "text": "converted"},
+			},
+		}},
+	}
+	before, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	vars := BuildVertexVariables("gemini-3.1-flash", payload, config.StaticProvider(config.DefaultConfig()))
+	after, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("content copy-on-write mutated input:\nbefore=%s\nafter=%s", before, after)
+	}
+
+	contents := vars["contents"].([]any)
+	parts := contents[0].(map[string]any)["parts"].([]any)
+	if parts[0].(map[string]any)["text"] != "plain" {
+		t.Fatalf("canonical text changed: %#v", parts[0])
+	}
+	inline := parts[1].(map[string]any)["inlineData"].(map[string]any)
+	if inline["data"] != "YWJjZA==" {
+		t.Fatalf("base64 was not normalized: %#v", inline)
+	}
+	thought := parts[2].(map[string]any)
+	if thought["thoughtSignature"] != encodedSkipThoughtSentinel {
+		t.Fatalf("thought signature was not encoded: %#v", thought)
+	}
+	converted := parts[3].(map[string]any)
+	if converted["text"] != "converted" {
+		t.Fatalf("input_text was not normalized: %#v", converted)
+	}
+	if _, exists := converted["type"]; exists {
+		t.Fatalf("OpenAI part type leaked upstream: %#v", converted)
+	}
+}
+
+func TestBuildVertexVariablesConcurrentSharedPayload(t *testing.T) {
+	payload := map[string]any{"contents": []any{map[string]any{
+		"role": "model",
+		"parts": []any{map[string]any{"functionCall": map[string]any{
+			"id": "gemini-tool-call-2-vp87654321", "name": "lookup", "args": map[string]any{"q": "test"},
+		}}},
+	}}}
+	cfg := config.StaticProvider(config.DefaultConfig())
+	const workers = 32
+	errors := make(chan string, workers)
+	var group sync.WaitGroup
+	for range workers {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			for range 50 {
+				vars := BuildVertexVariables("gemini-3.1-flash", payload, cfg)
+				contents := vars["contents"].([]any)
+				call := contents[0].(map[string]any)["parts"].([]any)[0].(map[string]any)["functionCall"].(map[string]any)
+				if call["name"] != "lookup" {
+					errors <- "unexpected function call"
+					return
+				}
+			}
+		}()
+	}
+	group.Wait()
+	close(errors)
+	for message := range errors {
+		t.Error(message)
+	}
+	contents := payload["contents"].([]any)
+	call := contents[0].(map[string]any)["parts"].([]any)[0].(map[string]any)["functionCall"].(map[string]any)
+	if call["id"] != "gemini-tool-call-2-vp87654321" {
+		t.Fatalf("shared payload was mutated: %#v", call)
 	}
 }

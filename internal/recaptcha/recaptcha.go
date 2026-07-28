@@ -27,6 +27,8 @@ const (
 	recaptchaV    = "jdMmXeCQEkPbnFDy9T04NbgJ"
 	recaptchaVh   = "6581054572"
 	randomCharset = "abcdefghijklmnopqrstuvwxyz0123456789"
+	// anchor/reload 都是小型控制响应；保留充足余量同时阻止异常上游撑爆内存。
+	recaptchaResponseMaxBytes = 4 << 20
 )
 
 var (
@@ -50,6 +52,17 @@ func randomString(n int) string {
 // （即用即毁，FRESH_CONNECT 语义）。全部失败返回 ("", nil) —— 返回空值表示失败，
 // 调用方按“空则换新/重试”处理。返回非空字符串即成功。
 func FetchRecaptchaToken(net *transport.NetworkClient, proxyURI string, debugMode bool) (string, error) {
+	return FetchRecaptchaTokenContext(context.Background(), net, proxyURI, debugMode)
+}
+
+// FetchRecaptchaTokenContext 与 FetchRecaptchaToken 行为一致，但会在请求取消时
+// 立即中断当前网络读和后续重试，避免客户端断开后继续占用连接与并发额度。
+func FetchRecaptchaTokenContext(
+	ctx context.Context,
+	net *transport.NetworkClient,
+	proxyURI string,
+	debugMode bool,
+) (string, error) {
 	// 【核心修改：解析并缓存节点友好名称】
 	nodeName := nodes.GetNodeName(proxyURI)
 	if proxyURI == "" {
@@ -58,16 +71,22 @@ func FetchRecaptchaToken(net *transport.NetworkClient, proxyURI string, debugMod
 
 	start := time.Now()
 	for retry := 0; retry < 3; retry++ {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		// 【核心修改：将具体的节点名称明确输出在日志归属中】
 		if debugMode {
 			log.Printf("[Recaptcha] [节点: %s] 开始获取 reCAPTCHA token (尝试 %d/3)", nodeName, retry+1)
 		}
-		if token, ok := fetchOnce(net, proxyURI); ok {
+		if token, ok := fetchOnce(ctx, net, proxyURI); ok {
 			elapsed := time.Since(start)
 			if debugMode {
 				log.Printf("[Recaptcha] [节点: %s] 成功获取 reCAPTCHA token, 耗时: %d ms", nodeName, elapsed.Milliseconds())
 			}
 			return token, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return "", err
 		}
 	}
 	elapsed := time.Since(start)
@@ -77,7 +96,7 @@ func FetchRecaptchaToken(net *transport.NetworkClient, proxyURI string, debugMod
 	return "", nil
 }
 
-func fetchOnce(net *transport.NetworkClient, proxyURI string) (string, bool) {
+func fetchOnce(ctx context.Context, net *transport.NetworkClient, proxyURI string) (string, bool) {
 	sess, err := net.CreateSession(15, proxyURI, "recaptcha")
 	if err != nil {
 		return "", false
@@ -90,8 +109,9 @@ func fetchOnce(net *transport.NetworkClient, proxyURI string) (string, bool) {
 		recaptchaBase, siteKey, recaptchaCo, recaptchaHl, recaptchaV, cb,
 	)
 
-	// token 预取与具体请求无关（后台细流），故用 context.Background()，不随某个请求取消。
-	_, anchorBody, err := sess.DoAndRead(context.Background(), "GET", anchorURL, transport.AnchorHeaders(), nil)
+	_, anchorBody, err := sess.DoAndReadLimit(
+		ctx, "GET", anchorURL, transport.AnchorHeaders(), nil, recaptchaResponseMaxBytes,
+	)
 	if err != nil {
 		return "", false
 	}
@@ -124,7 +144,9 @@ func fetchOnce(net *transport.NetworkClient, proxyURI string) (string, bool) {
 		recaptchaBase, anchorURL, "same-origin",
 	)
 
-	status, reloadBody, err := sess.DoAndRead(context.Background(), "POST", reloadURL, header, strings.NewReader(form.Encode()))
+	status, reloadBody, err := sess.DoAndReadLimit(
+		ctx, "POST", reloadURL, header, strings.NewReader(form.Encode()), recaptchaResponseMaxBytes,
+	)
 	if err != nil {
 		return "", false
 	}

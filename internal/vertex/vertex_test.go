@@ -1,10 +1,168 @@
 package vertex
 
 import (
+	"encoding/json"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/bsfdsagfadg/vertex/internal/config"
 )
+
+var benchmarkCandidatePayload map[string]any        //nolint:gochecknoglobals
+var benchmarkCandidateBodies [5]batchGraphqlRequest //nolint:gochecknoglobals
+var benchmarkRandomString string                    //nolint:gochecknoglobals
+var benchmarkRandomString2 string                   //nolint:gochecknoglobals
+var benchmarkRandomInt64 int64                      //nolint:gochecknoglobals
+var benchmarkEncodedRequest []byte                  //nolint:gochecknoglobals
+
+func BenchmarkRandomRequestIdentifiers(b *testing.B) {
+	b.Run("tracking", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			benchmarkRandomString = randomTrackingID()
+		}
+	})
+	b.Run("page-view", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			benchmarkRandomInt64 = randomPageViewID()
+		}
+	})
+	b.Run("uuid", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			benchmarkRandomString = randomUUID()
+		}
+	})
+	b.Run("combined", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			benchmarkRandomString, benchmarkRandomString2 = randomRequestIdentifiers()
+		}
+	})
+}
+
+func TestRandomRequestIdentifierFormats(t *testing.T) {
+	for range 1000 {
+		tracking := randomTrackingID()
+		if len(tracking) != 17 || tracking[0] != 'd' {
+			t.Fatalf("tracking ID format=%q", tracking)
+		}
+		for index := 1; index < len(tracking); index++ {
+			if tracking[index] < '0' || tracking[index] > '9' {
+				t.Fatalf("tracking ID contains non-digit: %q", tracking)
+			}
+		}
+
+		pageView := randomPageViewID()
+		if pageView < 1000000000000000 || pageView >= 10000000000000000 {
+			t.Fatalf("page view ID out of range: %d", pageView)
+		}
+
+		uuid := randomUUID()
+		if len(uuid) != 36 || uuid[8] != '-' || uuid[13] != '-' || uuid[18] != '-' || uuid[23] != '-' {
+			t.Fatalf("UUID format=%q", uuid)
+		}
+		if uuid[14] != '4' || !strings.ContainsRune("89AB", rune(uuid[19])) {
+			t.Fatalf("UUID version/variant=%q", uuid)
+		}
+
+		combinedUUID, combinedTracking := randomRequestIdentifiers()
+		if len(combinedUUID) != 36 || combinedUUID[14] != '4' ||
+			len(combinedTracking) != 17 || combinedTracking[0] != 'd' {
+			t.Fatalf("combined identifier format: uuid=%q tracking=%q", combinedUUID, combinedTracking)
+		}
+	}
+}
+
+func BenchmarkPayloadForCandidateLarge(b *testing.B) {
+	parts := make([]any, 4096)
+	for index := range parts {
+		parts[index] = map[string]any{
+			"text":     "0123456789abcdef0123456789abcdef",
+			"metadata": map[string]any{"index": index, "enabled": true},
+		}
+	}
+	payload := map[string]any{
+		"contents":         []any{map[string]any{"role": "user", "parts": parts}},
+		"generationConfig": map[string]any{"temperature": 0.5, "maxOutputTokens": 2048},
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		benchmarkCandidatePayload = payloadForCandidate(payload)
+	}
+}
+
+func BenchmarkPrepareFiveCandidateRequests(b *testing.B) {
+	parts := make([]any, 1024)
+	for index := range parts {
+		parts[index] = map[string]any{
+			"text":     "0123456789abcdef0123456789abcdef",
+			"metadata": map[string]any{"index": index, "enabled": true},
+		}
+	}
+	payload := map[string]any{
+		"contents":         []any{map[string]any{"role": "user", "parts": parts}},
+		"generationConfig": map[string]any{"temperature": 0.5, "maxOutputTokens": 2048},
+	}
+	cfg := config.StaticProvider(config.DefaultConfig())
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		preparedVariables := buildRequestVariables("gemini-3.1-flash", payload, cfg)
+		for candidate := range benchmarkCandidateBodies {
+			benchmarkCandidateBodies[candidate] = buildRequestPayloadFromVariables(
+				preparedVariables, "TOKEN123",
+			)
+		}
+	}
+}
+
+func BenchmarkPrepareCanonicalTextRequest(b *testing.B) {
+	parts := make([]any, 1024)
+	for index := range parts {
+		parts[index] = map[string]any{"text": "0123456789abcdef0123456789abcdef"}
+	}
+	payload := map[string]any{
+		"contents":         []any{map[string]any{"role": "user", "parts": parts}},
+		"generationConfig": map[string]any{"temperature": 0.5, "maxOutputTokens": 2048},
+	}
+	cfg := config.StaticProvider(config.DefaultConfig())
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		preparedVariables := buildRequestVariables("gemini-3.1-flash", payload, cfg)
+		for candidate := range benchmarkCandidateBodies {
+			benchmarkCandidateBodies[candidate] = buildRequestPayloadFromVariables(
+				preparedVariables, "TOKEN123",
+			)
+		}
+	}
+}
+
+func BenchmarkPrepareAndMarshalCanonicalRequest(b *testing.B) {
+	parts := make([]any, 8)
+	for index := range parts {
+		parts[index] = map[string]any{"text": "0123456789abcdef0123456789abcdef"}
+	}
+	payload := map[string]any{
+		"contents":         []any{map[string]any{"role": "user", "parts": parts}},
+		"generationConfig": map[string]any{"temperature": 0.5, "maxOutputTokens": 2048},
+	}
+	cfg := config.StaticProvider(config.DefaultConfig())
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		body := buildRequestPayload("gemini-3.1-flash", payload, "TOKEN123", cfg)
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			b.Fatal(err)
+		}
+		benchmarkEncodedRequest = encoded
+	}
+}
 
 func TestParseErrorResponse(t *testing.T) {
 	e := parseErrorResponse(map[string]any{"error": map[string]any{
@@ -50,13 +208,13 @@ func TestBuildRequestPayload(t *testing.T) {
 		map[string]any{"role": "user", "parts": []any{map[string]any{"text": "hi"}}},
 	}}
 	body := buildRequestPayload("gemini-3.1-flash", payload, "TOKEN123", cfg)
-	if body["querySignature"] != querySignature {
+	if body.QuerySignature != querySignature {
 		t.Error("querySignature 不匹配")
 	}
-	if body["operationName"] != "StreamGenerateContentAnonymous" {
+	if body.OperationName != "StreamGenerateContentAnonymous" {
 		t.Error("operationName 不匹配")
 	}
-	vars := body["variables"].(map[string]any)
+	vars := body.Variables
 	if vars["region"] != "global" {
 		t.Errorf("region=%v, want global", vars["region"])
 	}
@@ -65,6 +223,77 @@ func TestBuildRequestPayload(t *testing.T) {
 	}
 	if vars["model"] != "gemini-3.1-flash" {
 		t.Errorf("model=%v", vars["model"])
+	}
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	requestContext, ok := decoded["requestContext"].(map[string]any)
+	if !ok || requestContext["clientVersion"] == "" || requestContext["pagePath"] == "" ||
+		requestContext["jurisdiction"] != "global" {
+		t.Fatalf("requestContext shape changed: %#v", decoded["requestContext"])
+	}
+	localization, ok := requestContext["localizationData"].(map[string]any)
+	if !ok || localization["locale"] != "zh_CN" || localization["timezone"] != "Asia/Hong_Kong" {
+		t.Fatalf("localizationData shape changed: %#v", requestContext["localizationData"])
+	}
+	for _, key := range []string{"backendOverrides", "selectedPurview"} {
+		if value, ok := requestContext[key].(map[string]any); !ok || len(value) != 0 {
+			t.Fatalf("%s must remain an empty JSON object: %#v", key, requestContext[key])
+		}
+	}
+}
+
+func TestBuildRequestPayloadFromVariablesDoesNotMutatePrepared(t *testing.T) {
+	cfg := config.StaticProvider(config.DefaultConfig())
+	payload := map[string]any{"contents": []any{
+		map[string]any{"role": "user", "parts": []any{map[string]any{"text": "hi"}}},
+	}}
+	prepared := buildRequestVariables("gemini-3.1-flash", payload, cfg)
+	first := buildRequestPayloadFromVariables(prepared, "TOKEN-A")
+	second := buildRequestPayloadFromVariables(prepared, "TOKEN-B")
+	if _, exists := prepared["recaptchaToken"]; exists {
+		t.Fatalf("prepared variables were mutated: %#v", prepared)
+	}
+	firstVariables := first.Variables
+	secondVariables := second.Variables
+	if firstVariables["recaptchaToken"] != "TOKEN-A" || secondVariables["recaptchaToken"] != "TOKEN-B" {
+		t.Fatalf("attempt tokens leaked: first=%v second=%v", firstVariables["recaptchaToken"], secondVariables["recaptchaToken"])
+	}
+}
+
+func TestBuildRequestPayloadFromVariablesConcurrent(t *testing.T) {
+	cfg := config.StaticProvider(config.DefaultConfig())
+	prepared := buildRequestVariables("gemini-3.1-flash", map[string]any{
+		"contents": []any{map[string]any{
+			"role": "user", "parts": []any{map[string]any{"text": "shared"}},
+		}},
+	}, cfg)
+
+	const workers = 32
+	var group sync.WaitGroup
+	errors := make(chan error, workers)
+	for range workers {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			body := buildRequestPayloadFromVariables(prepared, "TOKEN")
+			if _, err := json.Marshal(body); err != nil {
+				errors <- err
+			}
+		}()
+	}
+	group.Wait()
+	close(errors)
+	for err := range errors {
+		t.Error(err)
+	}
+	if _, exists := prepared["recaptchaToken"]; exists {
+		t.Fatal("concurrent attempts mutated prepared variables")
 	}
 }
 

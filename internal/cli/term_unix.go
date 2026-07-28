@@ -6,6 +6,7 @@ package cli
 import (
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"unsafe"
 )
@@ -21,13 +22,29 @@ func getTerminalWidthOS() int {
 	return 0
 }
 
-// onResizeOS listens for SIGWINCH and calls callback on terminal resize.
-func onResizeOS(callback func()) {
+// onResizeOS listens for SIGWINCH and returns an idempotent stop function.
+func onResizeOS(callback func()) func() {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGWINCH)
 	go func() {
-		ch := make(chan os.Signal, 1)
-		signal.Notify(ch, syscall.SIGWINCH)
-		for range ch {
-			callback()
+		defer close(done)
+		defer signal.Stop(ch)
+		for {
+			select {
+			case <-ch:
+				callback()
+			case <-stop:
+				return
+			}
 		}
 	}()
+	var stopOnce sync.Once
+	return func() {
+		stopOnce.Do(func() {
+			close(stop)
+			<-done
+		})
+	}
 }

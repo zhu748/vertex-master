@@ -11,6 +11,7 @@ import (
 	"math"
 	"math/rand"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -46,8 +47,9 @@ type NodeHealth struct { //nolint:govet
 }
 
 var (
-	mu                  sync.Mutex                        //nolint:gochecknoglobals
+	mu                  sync.RWMutex                      //nolint:gochecknoglobals
 	nodeList            []Node                            //nolint:gochecknoglobals
+	nodeIndexByURI      = make(map[string]int)            //nolint:gochecknoglobals
 	healthMap           = make(map[string]*NodeHealth)    //nolint:gochecknoglobals
 	subscriptionSources = make(map[string]map[int64]bool) //nolint:gochecknoglobals
 	loaded              bool                              //nolint:gochecknoglobals
@@ -147,16 +149,69 @@ func ensureLoaded() {
 	_ = sourceRows.Close()
 
 	nodeList = loadedNodes
+	rebuildNodeIndexUnsafe()
 	healthMap = loadedHealth
 	subscriptionSources = loadedSources
 	loaded = true
 	pruneHealthUnsafe()
+	for uri, health := range healthMap {
+		if decayHealthCounters(health) {
+			updateSingleNodeHealthUnsafe(uri, health)
+		}
+	}
+}
+
+// lockLoadedForRead 返回时持有 mu.RLock。首次访问需要加载数据库时先临时
+// 升级为写锁；调用方完成只读快照后必须 RUnlock。
+func lockLoadedForRead() {
+	mu.RLock()
+	if loaded {
+		return
+	}
+	mu.RUnlock()
+
+	mu.Lock()
+	ensureLoaded()
+	mu.Unlock()
+	mu.RLock()
+}
+
+func rebuildNodeIndexUnsafe() {
+	index := make(map[string]int, len(nodeList))
+	for position := range nodeList {
+		index[nodeList[position].RawURI] = position
+	}
+	nodeIndexByURI = index
+}
+
+func lookupNodeUnsafe(uri string) (Node, bool) {
+	if position, ok := nodeIndexByURI[uri]; ok &&
+		position >= 0 && position < len(nodeList) && nodeList[position].RawURI == uri {
+		return nodeList[position], true
+	}
+	for _, node := range nodeList {
+		if node.RawURI == uri {
+			return node, true
+		}
+	}
+	return Node{}, false
+}
+
+func containsNodeForUpdateUnsafe(uri string) bool {
+	if position, ok := nodeIndexByURI[uri]; ok &&
+		position >= 0 && position < len(nodeList) && nodeList[position].RawURI == uri {
+		return true
+	}
+	// 列表增删/排序后索引可能暂时陈旧；写路径发现 miss 时重建一次，
+	// 后续候选启动与名称查询恢复 O(1)。
+	rebuildNodeIndexUnsafe()
+	_, ok := nodeIndexByURI[uri]
+	return ok
 }
 
 func LoadNodes() []Node {
-	mu.Lock()
-	defer mu.Unlock()
-	ensureLoaded()
+	lockLoadedForRead()
+	defer mu.RUnlock()
 	log.Printf("[Nodes] 获取所有节点 (数量: %d)", len(nodeList))
 	out := append([]Node(nil), nodeList...)
 	for i := range out {
@@ -166,9 +221,8 @@ func LoadNodes() []Node {
 }
 
 func LoadHealth() map[string]*NodeHealth {
-	mu.Lock()
-	defer mu.Unlock()
-	ensureLoaded()
+	lockLoadedForRead()
+	defer mu.RUnlock()
 	out := make(map[string]*NodeHealth, len(healthMap))
 	for uri, health := range healthMap {
 		if health == nil {
@@ -1416,25 +1470,31 @@ func SortNodesByLatencyDesc() {
 }
 
 func GetNodeName(uri string) string {
-	mu.Lock()
-	defer mu.Unlock()
-	ensureLoaded()
-	for _, n := range nodeList {
-		if n.RawURI == uri {
-			return SafeNodeLabel(n.Name)
-		}
+	lockLoadedForRead()
+	node, found := lookupNodeUnsafe(uri)
+	mu.RUnlock()
+	if !found {
+		return "Unknown"
 	}
-	return "Unknown"
+	return SafeNodeLabel(node.Name)
 }
 
 // SafeNodeLabel returns a single-line, bounded label suitable for logs.
 // Node names may originate from untrusted subscription providers.
 func SafeNodeLabel(name string) string {
 	const maxRunes = 128
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return "Unnamed"
+	}
+	if nodeLabelAlreadySafe(trimmed, maxRunes) {
+		return trimmed
+	}
+
 	var builder strings.Builder
 	count := 0
 	spacePending := false
-	for _, r := range strings.TrimSpace(name) {
+	for _, r := range trimmed {
 		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
 			continue
 		}
@@ -1457,6 +1517,31 @@ func SafeNodeLabel(name string) string {
 		return "Unnamed"
 	}
 	return builder.String()
+}
+
+func nodeLabelAlreadySafe(name string, maxRunes int) bool {
+	count := 0
+	previousSpace := false
+	for _, r := range name {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return false
+		}
+		if unicode.IsSpace(r) {
+			// The slow path normalizes all Unicode whitespace and repeated ASCII
+			// spaces to a single ordinary space.
+			if r != ' ' || previousSpace {
+				return false
+			}
+			previousSpace = true
+		} else {
+			previousSpace = false
+		}
+		count++
+		if count > maxRunes {
+			return false
+		}
+	}
+	return true
 }
 
 func EnableNode(uri string) bool {
@@ -1567,6 +1652,17 @@ func maxInt64(a, b int64) int64 {
 	return b
 }
 
+func decayHealthCounters(health *NodeHealth) bool {
+	if health == nil ||
+		(health.SuccessCount <= 1000 && health.FailCount <= 200 && health.RecentUseCount <= 500) {
+		return false
+	}
+	health.SuccessCount /= 2
+	health.FailCount /= 2
+	health.RecentUseCount /= 2
+	return true
+}
+
 func RecordTest(uri string, ok bool, ms float64, errStr string) {
 	mu.Lock()
 	defer mu.Unlock()
@@ -1593,6 +1689,7 @@ func RecordTest(uri string, ok bool, ms float64, errStr string) {
 		cooldown := minInt(1800, 30*(1<<minInt(failures-1, 6)))
 		h.CooldownUntil = time.Now().Unix() + int64(cooldown)
 	}
+	decayHealthCounters(h)
 	updateSingleNodeHealthUnsafe(uri, h)
 }
 
@@ -1616,6 +1713,7 @@ func RecordRateLimit(uri string, cooldownSec int) {
 	h.RateLimitCount++
 	h.LastTestError = "429 Rate Limit"
 	h.LastFailAt = now
+	decayHealthCounters(h)
 	updateSingleNodeHealthUnsafe(uri, h)
 }
 
@@ -1624,14 +1722,7 @@ func RecordSelection(uri string) {
 	mu.Lock()
 	defer mu.Unlock()
 	ensureLoaded()
-	found := false
-	for _, node := range nodeList {
-		if node.RawURI == uri {
-			found = true
-			break
-		}
-	}
-	if !found {
+	if !containsNodeForUpdateUnsafe(uri) {
 		return
 	}
 	health := healthMap[uri]
@@ -1641,12 +1732,102 @@ func RecordSelection(uri string) {
 	}
 	health.LastSelectedAt = time.Now().Unix()
 	health.RecentUseCount++
+	decayHealthCounters(health)
 	updateSingleNodeHealthUnsafe(uri, health)
 }
 
 type scoredNode struct {
-	node  Node
-	score float64
+	node    Node
+	score   float64
+	last429 int64
+}
+
+// retainHighestScored 以固定容量最小堆保留最高分节点。调用方最终排序前无需
+// 关心堆内顺序；空间复杂度从 O(全部节点) 降为 O(topK)。
+func retainHighestScored(nodes []scoredNode, candidate scoredNode, limit int) []scoredNode {
+	if limit <= 0 {
+		return nodes
+	}
+	if len(nodes) < limit {
+		nodes = append(nodes, candidate)
+		if len(nodes) == limit {
+			for index := len(nodes)/2 - 1; index >= 0; index-- {
+				siftDownScoredMinHeap(nodes, index)
+			}
+		}
+		return nodes
+	}
+	if candidate.score <= nodes[0].score {
+		return nodes
+	}
+	nodes[0] = candidate
+	siftDownScoredMinHeap(nodes, 0)
+	return nodes
+}
+
+func siftDownScoredMinHeap(nodes []scoredNode, index int) {
+	for {
+		left := index*2 + 1
+		if left >= len(nodes) {
+			return
+		}
+		smallest := left
+		if right := left + 1; right < len(nodes) && nodes[right].score < nodes[left].score {
+			smallest = right
+		}
+		if nodes[index].score <= nodes[smallest].score {
+			return
+		}
+		nodes[index], nodes[smallest] = nodes[smallest], nodes[index]
+		index = smallest
+	}
+}
+
+func cooldownEarlier(left, right scoredNode) bool {
+	if left.last429 != right.last429 {
+		return left.last429 < right.last429
+	}
+	return left.score < right.score
+}
+
+// retainEarliestCooldown 用固定容量最大堆保留最早可重试的冷却节点。
+func retainEarliestCooldown(nodes []scoredNode, candidate scoredNode, limit int) []scoredNode {
+	if limit <= 0 {
+		return nodes
+	}
+	if len(nodes) < limit {
+		nodes = append(nodes, candidate)
+		if len(nodes) == limit {
+			for index := len(nodes)/2 - 1; index >= 0; index-- {
+				siftDownCooldownMaxHeap(nodes, index)
+			}
+		}
+		return nodes
+	}
+	if !cooldownEarlier(candidate, nodes[0]) {
+		return nodes
+	}
+	nodes[0] = candidate
+	siftDownCooldownMaxHeap(nodes, 0)
+	return nodes
+}
+
+func siftDownCooldownMaxHeap(nodes []scoredNode, index int) {
+	for {
+		left := index*2 + 1
+		if left >= len(nodes) {
+			return
+		}
+		latest := left
+		if right := left + 1; right < len(nodes) && cooldownEarlier(nodes[left], nodes[right]) {
+			latest = right
+		}
+		if !cooldownEarlier(nodes[index], nodes[latest]) {
+			return
+		}
+		nodes[index], nodes[latest] = nodes[latest], nodes[index]
+		index = latest
+	}
 }
 
 type NodePoolStats struct {
@@ -1660,9 +1841,8 @@ type NodePoolStats struct {
 }
 
 func GetNodePoolStats(now time.Time) NodePoolStats {
-	mu.Lock()
-	defer mu.Unlock()
-	ensureLoaded()
+	lockLoadedForRead()
+	defer mu.RUnlock()
 	stats := NodePoolStats{Total: len(nodeList)}
 	nowUnix := now.Unix()
 	for _, node := range nodeList {
@@ -1691,9 +1871,7 @@ func SelectNodesForHealthCheck(limit int, staleAfter time.Duration, now time.Tim
 	if limit <= 0 {
 		return nil
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	ensureLoaded()
+	lockLoadedForRead()
 
 	type candidate struct {
 		node     Node
@@ -1723,6 +1901,7 @@ func SelectNodesForHealthCheck(limit int, staleAfter time.Duration, now time.Tim
 			})
 		}
 	}
+	mu.RUnlock()
 	sort.SliceStable(candidates, func(i, j int) bool {
 		if candidates[i].priority != candidates[j].priority {
 			return candidates[i].priority < candidates[j].priority
@@ -1740,50 +1919,94 @@ func SelectNodesForHealthCheck(limit int, staleAfter time.Duration, now time.Tim
 }
 
 func SelectForParallel(k int, topK int, debugMode bool, stickyBonusEnabled bool) []Node {
-	mu.Lock()
-	defer mu.Unlock()
-	ensureLoaded()
 	if k <= 0 {
 		return nil
 	}
+	if topK <= 0 {
+		topK = 80
+	}
+	var stickyNodes map[string]struct{}
+	if stickyBonusEnabled {
+		stickyNodes = globalStickyPool.snapshot()
+	}
 	now := time.Now().Unix()
 
-	decayed := false
+	lockLoadedForRead()
+
+	healthyCount := 0
+	recoveringCount := 0
+	untestedCount := 0
+	cooldownCount := 0
 	for _, n := range nodeList {
 		if n.Disabled {
 			continue
 		}
 		h := healthMap[n.RawURI]
-		if h != nil {
-			if h.SuccessCount > 1000 || h.FailCount > 200 || h.RecentUseCount > 500 {
-				h.SuccessCount /= 2
-				h.FailCount /= 2
-				h.RecentUseCount /= 2
-				decayed = true
-			}
+		switch {
+		case h != nil && h.CooldownUntil > now:
+			cooldownCount++
+		case h == nil || (h.LastSuccessAt == 0 && h.LastFailAt == 0):
+			untestedCount++
+		case h.ConsecutiveFailures > 0:
+			recoveringCount++
+		default:
+			healthyCount++
 		}
 	}
-	if decayed {
-		saveHealthUnsafe()
-	}
 
-	var healthy []scoredNode
-	var recovering []scoredNode
-	var untested []scoredNode
+	healthyLimit := min(healthyCount, topK)
+	recoveringLimit := min(recoveringCount, max(0, topK-healthyCount))
+	untestedLimit := min(untestedCount, k)
+	cooldownLimit := 0
+	if healthyCount == 0 && recoveringCount == 0 && untestedCount == 0 {
+		cooldownLimit = min(cooldownCount, k)
+	}
+	// 默认 topK=80 是请求热路径。候选只在本次选择期间使用，优先放在
+	// 栈内并让健康/恢复中节点共享一块连续存储，避免每次请求分配约 7KB。
+	const inlineScoredNodeLimit = 80
+	var inlineScoredNodes [inlineScoredNodeLimit]scoredNode
+	knownLimit := healthyLimit + recoveringLimit
+	var knownStorage []scoredNode
+	if knownLimit <= len(inlineScoredNodes) {
+		knownStorage = inlineScoredNodes[:knownLimit]
+	} else {
+		knownStorage = make([]scoredNode, knownLimit)
+	}
+	healthy := knownStorage[:0:healthyLimit]
+	recovering := knownStorage[healthyLimit:healthyLimit:knownLimit]
+	untested := make([]scoredNode, 0, untestedLimit)
 	var cooldownNodes []scoredNode
+	if cooldownLimit > 0 {
+		if cooldownLimit <= len(inlineScoredNodes) {
+			cooldownNodes = inlineScoredNodes[:0:cooldownLimit]
+		} else {
+			cooldownNodes = make([]scoredNode, 0, cooldownLimit)
+		}
+	}
+	seenUntested := 0
 	for _, n := range nodeList {
 		if n.Disabled {
 			continue
 		}
 		h := healthMap[n.RawURI]
 		if h != nil && h.CooldownUntil > now {
-			cooldownNodes = append(cooldownNodes, scoredNode{n, float64(h.CooldownUntil)})
+			cooldownNodes = retainEarliestCooldown(cooldownNodes, scoredNode{
+				node: n, score: float64(h.CooldownUntil), last429: h.Last429At,
+			}, cooldownLimit)
 			continue
 		}
 		score := 100.0
 		if h == nil || (h.LastSuccessAt == 0 && h.LastFailAt == 0) {
 			// 未测试节点只占少量探索名额，不能压过已经验证可用的节点。
-			untested = append(untested, scoredNode{n, 80})
+			seenUntested++
+			item := scoredNode{node: n, score: 80}
+			if len(untested) < untestedLimit {
+				untested = append(untested, item)
+			} else if untestedLimit > 0 {
+				if index := rand.Intn(seenUntested); index < untestedLimit {
+					untested[index] = item
+				}
+			}
 			continue
 		}
 		if h != nil {
@@ -1806,33 +2029,33 @@ func SelectForParallel(k int, topK int, debugMode bool, stickyBonusEnabled bool)
 				}
 			}
 		}
-		if stickyBonusEnabled && globalStickyPool.IsSticky(n.RawURI) {
+		if _, sticky := stickyNodes[n.RawURI]; sticky {
 			score += 40
 		}
-		item := scoredNode{n, math.Max(1.0, score)}
+		item := scoredNode{node: n, score: math.Max(1.0, score)}
 		if h.ConsecutiveFailures > 0 {
-			recovering = append(recovering, item)
+			recovering = retainHighestScored(recovering, item, recoveringLimit)
 		} else {
-			healthy = append(healthy, item)
+			healthy = retainHighestScored(healthy, item, healthyLimit)
 		}
 	}
+	mu.RUnlock()
 
 	if len(healthy) == 0 && len(recovering) == 0 && len(untested) == 0 && len(cooldownNodes) > 0 {
-		sort.Slice(cooldownNodes, func(i, j int) bool {
-			hi := healthMap[cooldownNodes[i].node.RawURI]
-			hj := healthMap[cooldownNodes[j].node.RawURI]
-			li := int64(0)
-			lj := int64(0)
-			if hi != nil {
-				li = hi.Last429At
+		slices.SortFunc(cooldownNodes, func(left, right scoredNode) int {
+			if left.last429 < right.last429 {
+				return -1
 			}
-			if hj != nil {
-				lj = hj.Last429At
+			if left.last429 > right.last429 {
+				return 1
 			}
-			if li != lj {
-				return li < lj
+			if left.score < right.score {
+				return -1
 			}
-			return cooldownNodes[i].score < cooldownNodes[j].score
+			if left.score > right.score {
+				return 1
+			}
+			return 0
 		})
 		needed := k
 		if needed > len(cooldownNodes) {
@@ -1848,11 +2071,26 @@ func SelectForParallel(k int, topK int, debugMode bool, stickyBonusEnabled bool)
 		return selected
 	}
 
-	if topK <= 0 {
-		topK = 80
-	}
-	sort.Slice(healthy, func(i, j int) bool { return healthy[i].score > healthy[j].score })
-	sort.Slice(recovering, func(i, j int) bool { return recovering[i].score > recovering[j].score })
+	slices.SortFunc(healthy, func(left, right scoredNode) int {
+		switch {
+		case left.score > right.score:
+			return -1
+		case left.score < right.score:
+			return 1
+		default:
+			return 0
+		}
+	})
+	slices.SortFunc(recovering, func(left, right scoredNode) int {
+		switch {
+		case left.score > right.score:
+			return -1
+		case left.score < right.score:
+			return 1
+		default:
+			return 0
+		}
+	})
 	rand.Shuffle(len(untested), func(i, j int) { untested[i], untested[j] = untested[j], untested[i] })
 
 	if len(healthy) > topK {
@@ -1880,6 +2118,14 @@ func SelectForParallel(k int, topK int, debugMode bool, stickyBonusEnabled bool)
 			knownSelected,
 			weightedNodeSample(recovering, knownTarget-len(knownSelected))...,
 		)
+	}
+	// 没有探索名额且已选满时，knownSelected 本身就是最终顺序，直接返回可
+	// 避免再分配并复制一份结果切片。这也是全部节点健康时的常见路径。
+	if len(knownSelected) >= k {
+		if debugMode {
+			log.Printf("[Nodes] 选择并行节点 (需求: %d, 实际: %d)", k, k)
+		}
+		return knownSelected[:k]
 	}
 	untestedTarget := min(k-len(knownSelected), len(untested))
 	untestedSelected := make([]Node, untestedTarget)
@@ -1942,50 +2188,61 @@ func weightedNodeSample(candidates []scoredNode, count int) []Node {
 	if count <= 0 || len(candidates) == 0 {
 		return nil
 	}
-	pool := append([]scoredNode(nil), candidates...)
-	if count > len(pool) {
-		count = len(pool)
+	type weightedCandidate struct {
+		index  int
+		weight float64
+	}
+	const inlineCandidateLimit = 80
+	var inlineCandidates [inlineCandidateLimit]weightedCandidate
+	pool := inlineCandidates[:0]
+	if len(candidates) <= len(inlineCandidates) {
+		pool = inlineCandidates[:len(candidates)]
+	} else {
+		pool = make([]weightedCandidate, len(candidates))
+	}
+	totalWeight := 0.0
+	const tau = 40.0
+	for index, candidate := range candidates {
+		weight := math.Exp(candidate.score / tau)
+		if math.IsInf(weight, 0) || math.IsNaN(weight) {
+			weight = 1
+		}
+		pool[index] = weightedCandidate{index: index, weight: weight}
+		totalWeight += weight
+	}
+	if count > len(candidates) {
+		count = len(candidates)
 	}
 	selected := make([]Node, 0, count)
-	const tau = 40.0
 	for len(selected) < count {
-		weights := make([]float64, len(pool))
-		totalWeight := 0.0
-		for i, candidate := range pool {
-			weight := math.Exp(candidate.score / tau)
-			if math.IsInf(weight, 0) || math.IsNaN(weight) {
-				weight = 1
-			}
-			weights[i] = weight
-			totalWeight += weight
-		}
 		pick := rand.Float64() * totalWeight
 		index := len(pool) - 1
-		for i, weight := range weights {
-			pick -= weight
+		for i, candidate := range pool {
+			pick -= candidate.weight
 			if pick <= 0 {
 				index = i
 				break
 			}
 		}
-		selected = append(selected, pool[index].node)
+		selected = append(selected, candidates[pool[index].index].node)
+		totalWeight -= pool[index].weight
 		pool = append(pool[:index], pool[index+1:]...)
 	}
 	return selected
 }
 
 func GetAverageLatency() float64 {
-	mu.Lock()
-	defer mu.Unlock()
-	ensureLoaded()
+	lockLoadedForRead()
+	defer mu.RUnlock()
 	var sum float64
 	var count int
+	now := time.Now().Unix()
 	for _, n := range nodeList {
 		if n.Disabled {
 			continue
 		}
 		h := healthMap[n.RawURI]
-		if h != nil && h.LastTestMs > 0 && h.CooldownUntil <= time.Now().Unix() {
+		if h != nil && h.LastTestMs > 0 && h.CooldownUntil <= now {
 			sum += h.LastTestMs
 			count++
 		}

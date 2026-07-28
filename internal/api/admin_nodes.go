@@ -474,6 +474,7 @@ func fetchRecaptchaTokenWithSess(ctx context.Context, sess *transport.Session) e
 		recaptchaV    = "jdMmXeCQEkPbnFDy9T04NbgJ"
 		recaptchaVh   = "6581054572"
 		randomCharset = "abcdefghijklmnopqrstuvwxyz0123456789"
+		responseMax   = 4 << 20
 	)
 	var (
 		tokenRe = regexp.MustCompile(`id="recaptcha-token"[^>]*value="([^"]+)"`)
@@ -491,7 +492,9 @@ func fetchRecaptchaTokenWithSess(ctx context.Context, sess *transport.Session) e
 		recaptchaBase, siteKey, recaptchaCo, recaptchaHl, recaptchaV, cb,
 	)
 
-	_, anchorBody, err := sess.DoAndRead(ctx, "GET", anchorURL, transport.AnchorHeaders(), nil)
+	_, anchorBody, err := sess.DoAndReadLimit(
+		ctx, "GET", anchorURL, transport.AnchorHeaders(), nil, responseMax,
+	)
 	if err != nil {
 		return fmt.Errorf("GET anchor 失败: %w", err)
 	}
@@ -519,7 +522,9 @@ func fetchRecaptchaTokenWithSess(ctx context.Context, sess *transport.Session) e
 		recaptchaBase, anchorURL, "same-origin",
 	)
 
-	_, reloadBody, err := sess.DoAndRead(ctx, "POST", reloadURL, header, strings.NewReader(form.Encode()))
+	_, reloadBody, err := sess.DoAndReadLimit(
+		ctx, "POST", reloadURL, header, strings.NewReader(form.Encode()), responseMax,
+	)
 	if err != nil {
 		return fmt.Errorf("POST reload 失败: %w", err)
 	}

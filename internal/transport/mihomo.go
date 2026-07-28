@@ -20,6 +20,7 @@ type proxyInfo struct {
 	proxy      constant.Proxy
 	lastUsedAt time.Time
 	closed     bool
+	label      string
 }
 
 var (
@@ -39,7 +40,8 @@ func getOrStartProxyDialer(uri string, reqID string, debugMode bool) (func(ctx c
 	}
 	proxyMutex.Unlock()
 
-	log.Printf("[Transport] 请求ID=%s 触发代理初始化: %s", reqID, nodes.GetNodeName(uri))
+	nodeName := nodes.GetNodeName(uri)
+	log.Printf("[Transport] 请求ID=%s 触发代理初始化: %s", reqID, nodeName)
 
 	outMap, err := ParseURI(uri)
 	if err != nil {
@@ -51,17 +53,40 @@ func getOrStartProxyDialer(uri string, reqID string, debugMode bool) (func(ctx c
 		return nil, fmt.Errorf("parse proxy: %w", err)
 	}
 
-	proxyMutex.Lock()
-	if old, ok := proxyMap[uri]; ok && !old.closed {
-		old.closed = true
-		if closer, ok := old.proxy.(interface{ Close() error }); ok {
-			_ = closer.Close()
-		}
-	}
-	proxyMap[uri] = &proxyInfo{proxy: proxy, lastUsedAt: time.Now()} //nolint:exhaustruct
-	proxyMutex.Unlock()
-
+	proxy = reuseOrInstallProxy(uri, nodeName, proxy)
 	return makeDialer(proxy, debugMode), nil
+}
+
+func reuseOrInstallProxy(uri, label string, created constant.Proxy) constant.Proxy {
+	proxyMutex.Lock()
+	if existing, ok := proxyMap[uri]; ok && !existing.closed {
+		existing.lastUsedAt = time.Now()
+		selected := existing.proxy
+		proxyMutex.Unlock()
+		closeProxy(created)
+		return selected
+	}
+	proxyMap[uri] = &proxyInfo{
+		proxy: created, lastUsedAt: time.Now(), label: label,
+	} //nolint:exhaustruct
+	proxyMutex.Unlock()
+	return created
+}
+
+func closeProxy(proxy constant.Proxy) {
+	if proxy == nil {
+		return
+	}
+	if closer, ok := proxy.(interface{ Close() error }); ok {
+		_ = closer.Close()
+	}
+}
+
+func cachedProxyLabel(uri, label string) string {
+	if label != "" {
+		return label
+	}
+	return nodes.GetNodeName(uri)
 }
 
 func makeDialer(p constant.Proxy, debugMode bool) func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -98,23 +123,31 @@ func makeDialer(p constant.Proxy, debugMode bool) func(ctx context.Context, netw
 
 // RemoveProxy 主动清理代理实例 (响应面板删除节点)
 func RemoveProxy(uri string) {
+	var removed *proxyInfo
 	proxyMutex.Lock()
 	if info, ok := proxyMap[uri]; ok {
 		if !info.closed {
 			info.closed = true
-			if closer, ok := info.proxy.(interface{ Close() error }); ok {
-				_ = closer.Close()
-			}
-			log.Printf("[Transport] 代理节点已清理释放: %s", nodes.GetNodeName(uri))
+			removed = info
 		}
 		delete(proxyMap, uri)
 	}
 	proxyMutex.Unlock()
+	if removed != nil {
+		closeProxy(removed.proxy)
+		log.Printf("[Transport] 代理节点已清理释放: %s", cachedProxyLabel(uri, removed.label))
+	}
 }
 
-// StartProxyGC 启动后台空闲实例垃圾回收 (每隔 interval 扫描，超时 maxIdle 回收)
-func StartProxyGC(interval, maxIdle time.Duration) {
+// StartProxyGC 启动后台空闲实例垃圾回收，并返回幂等停止函数。
+func StartProxyGC(interval, maxIdle time.Duration) func() {
+	if interval <= 0 {
+		interval = 5 * time.Minute
+	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		defer func() {
 			if r := recover(); r != nil {
 				log.Printf("StartProxyGC panic: %v\n%s", r, debug.Stack())
@@ -122,41 +155,62 @@ func StartProxyGC(interval, maxIdle time.Duration) {
 		}()
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
-		for range ticker.C {
-			cleanupIdleProxies(maxIdle)
+		for {
+			select {
+			case <-ticker.C:
+				cleanupIdleProxies(maxIdle)
+			case <-stop:
+				return
+			}
 		}
 	}()
+	var stopOnce sync.Once
+	return func() {
+		stopOnce.Do(func() {
+			close(stop)
+			<-done
+		})
+	}
 }
 
 func cleanupIdleProxies(maxIdle time.Duration) {
+	type expiredProxy struct {
+		uri   string
+		label string
+		proxy constant.Proxy
+	}
+	var expired []expiredProxy
 	proxyMutex.Lock()
-	defer proxyMutex.Unlock()
 	now := time.Now()
 	for uri, info := range proxyMap {
 		if now.Sub(info.lastUsedAt) > maxIdle {
 			if !info.closed {
 				info.closed = true
-				if closer, ok := info.proxy.(interface{ Close() error }); ok {
-					_ = closer.Close()
-				}
-				log.Printf("[Transport] 空闲代理已清理释放: %s", nodes.GetNodeName(uri))
+				expired = append(expired, expiredProxy{uri: uri, label: info.label, proxy: info.proxy})
 			}
 			delete(proxyMap, uri)
 		}
+	}
+	proxyMutex.Unlock()
+	for _, info := range expired {
+		closeProxy(info.proxy)
+		log.Printf("[Transport] 空闲代理已清理释放: %s", cachedProxyLabel(info.uri, info.label))
 	}
 }
 
 // StopAllProxies 程序优雅退出时清理全部实例
 func StopAllProxies() {
+	var active []constant.Proxy
 	proxyMutex.Lock()
-	defer proxyMutex.Unlock()
 	for _, info := range proxyMap {
 		if !info.closed {
 			info.closed = true
-			if closer, ok := info.proxy.(interface{ Close() error }); ok {
-				_ = closer.Close()
-			}
+			active = append(active, info.proxy)
 		}
 	}
 	proxyMap = make(map[string]*proxyInfo)
+	proxyMutex.Unlock()
+	for _, proxy := range active {
+		closeProxy(proxy)
+	}
 }

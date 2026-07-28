@@ -9,22 +9,71 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"sync"
 )
+
+const maxPooledMarshalBufferCapacity = 64 << 10
+
+var marshalBufferPool = sync.Pool{ //nolint:gochecknoglobals
+	New: func() any { return new(bytes.Buffer) },
+}
+
+// Encode 将 JSON 写入 writer，不做 HTML 转义。与 json.Encoder.Encode 一样，
+// 成功时末尾包含一个换行符，适合直接嵌入流式协议缓冲。
+func Encode(writer io.Writer, value any) error {
+	enc := json.NewEncoder(writer)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(value); err != nil {
+		return fmt.Errorf("序列化 JSON: %w", err)
+	}
+	return nil
+}
 
 // Marshal 序列化为 JSON，不做 HTML 转义、不转义非 ASCII。
 func Marshal(v any) ([]byte, error) {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(v); err != nil {
-		return nil, fmt.Errorf("序列化 JSON: %w", err)
+	buf, view, err := encodeToMarshalBuffer(v)
+	if err != nil {
+		return nil, err
+	}
+	encoded := bytes.Clone(view)
+	releaseMarshalBuffer(buf)
+	return encoded, nil
+}
+
+// MarshalString 序列化为 JSON 字符串。与 Marshal 后再转换 string 相比，
+// 它只复制一次编码结果，适合函数参数等最终必须是 JSON 字符串的协议字段。
+func MarshalString(v any) (string, error) {
+	buf, view, err := encodeToMarshalBuffer(v)
+	if err != nil {
+		return "", err
+	}
+	encoded := string(view)
+	releaseMarshalBuffer(buf)
+	return encoded, nil
+}
+
+func encodeToMarshalBuffer(v any) (*bytes.Buffer, []byte, error) {
+	buf := marshalBufferPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	if err := Encode(buf, v); err != nil {
+		releaseMarshalBuffer(buf)
+		return nil, nil, err
 	}
 	// json.Encoder.Encode 会在末尾追加一个换行符，去掉以与 json.Marshal 输出一致。
 	b := buf.Bytes()
 	if n := len(b); n > 0 && b[n-1] == '\n' {
 		b = b[:n-1]
 	}
-	return b, nil
+	return buf, b, nil
+}
+
+func releaseMarshalBuffer(buf *bytes.Buffer) {
+	if buf.Cap() > maxPooledMarshalBufferCapacity {
+		return
+	}
+	buf.Reset()
+	marshalBufferPool.Put(buf)
 }
 
 // Truthy 复刻动态语言常见的真值语义，用于判断解析出的 JSON 值是否"为真"

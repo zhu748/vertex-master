@@ -8,12 +8,17 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
-// APIKeyManager 简化版 API 密钥管理器。
-type APIKeyManager struct { //nolint:govet
-	mu       sync.RWMutex
-	keys     map[string]string // api_key -> name
+type apiKeySnapshot struct {
+	keys map[string]string // api_key -> name，发布后只读。
+}
+
+// APIKeyManager 使用不可变快照服务每请求鉴权，文件更新由 writeMu 串行化。
+type APIKeyManager struct {
+	writeMu  sync.RWMutex
+	snapshot atomic.Pointer[apiKeySnapshot]
 	keysFile string
 }
 
@@ -24,7 +29,9 @@ const (
 
 // NewAPIKeyManager 构造管理器（密钥文件路径同 config 的解析策略）。
 func NewAPIKeyManager() *APIKeyManager {
-	return &APIKeyManager{keys: map[string]string{}, keysFile: keysFilePath()} //nolint:exhaustruct
+	manager := &APIKeyManager{keysFile: keysFilePath()} //nolint:exhaustruct
+	manager.snapshot.Store(&apiKeySnapshot{keys: map[string]string{}})
+	return manager
 }
 
 func keysFilePath() string {
@@ -43,10 +50,13 @@ func keysFilePath() string {
 // LoadKeys 从 config/api_keys.txt 和环境变量加载密钥。
 // 文件格式：name:api_key:description（每行），api_key 可为任意非空字符串。
 func (m *APIKeyManager) LoadKeys() bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.keys = map[string]string{}
+	m.writeMu.Lock()
+	defer m.writeMu.Unlock()
+	return m.loadKeysLocked()
+}
 
+func (m *APIKeyManager) loadKeysLocked() bool {
+	keys := make(map[string]string)
 	loaded := false
 	f, err := os.Open(m.keysFile)
 	if err != nil && !os.IsNotExist(err) {
@@ -69,7 +79,7 @@ func (m *APIKeyManager) LoadKeys() bool {
 			if key == "" || isPlaceholderAPIKey(key) {
 				continue
 			}
-			m.keys[key] = name
+			keys[key] = name
 		}
 		if errScan := sc.Err(); errScan != nil { //nolint:govet
 			return false
@@ -77,10 +87,18 @@ func (m *APIKeyManager) LoadKeys() bool {
 		loaded = true
 	}
 	if envKey := strings.TrimSpace(os.Getenv("VPROXY_API_KEY")); envKey != "" {
-		m.keys[envKey] = "environment"
+		keys[envKey] = "environment"
 		loaded = true
 	}
+	m.snapshot.Store(&apiKeySnapshot{keys: keys})
 	return loaded
+}
+
+func (m *APIKeyManager) keySnapshot() *apiKeySnapshot {
+	if snapshot := m.snapshot.Load(); snapshot != nil {
+		return snapshot
+	}
+	return &apiKeySnapshot{keys: map[string]string{}}
 }
 
 // ValidateKey 校验密钥是否有效。
@@ -88,17 +106,13 @@ func (m *APIKeyManager) ValidateKey(key string) bool {
 	if key == "" {
 		return false
 	}
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	_, ok := m.keys[strings.TrimSpace(key)]
+	_, ok := m.keySnapshot().keys[strings.TrimSpace(key)]
 	return ok
 }
 
 // GetKeyName 返回密钥对应的显示名。
 func (m *APIKeyManager) GetKeyName(key string) string {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	if n, ok := m.keys[strings.TrimSpace(key)]; ok {
+	if n, ok := m.keySnapshot().keys[strings.TrimSpace(key)]; ok {
 		return n
 	}
 	return "unknown"
@@ -106,9 +120,7 @@ func (m *APIKeyManager) GetKeyName(key string) string {
 
 // Count 返回已加载的密钥数。
 func (m *APIKeyManager) Count() int {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return len(m.keys)
+	return len(m.keySnapshot().keys)
 }
 
 // extractAPIKey 从请求提取 API key：
@@ -222,6 +234,8 @@ func (m *APIKeyManager) writeEntries(entries []apiKeyEntry) error {
 // List 返回文件密钥与环境变量托管密钥。环境变量密钥只用于生成服务端脱敏值，
 // 管理 API 不应将其明文返回给浏览器。
 func (m *APIKeyManager) List() ([]apiKeyEntry, error) {
+	m.writeMu.RLock()
+	defer m.writeMu.RUnlock()
 	entries, err := m.readEntries()
 	if err != nil {
 		return nil, err
@@ -263,6 +277,8 @@ func (m *APIKeyManager) Add(name, key, description string) error {
 	if isPlaceholderAPIKey(key) {
 		return fmt.Errorf("示例密钥不能作为有效 API Key")
 	}
+	m.writeMu.Lock()
+	defer m.writeMu.Unlock()
 	entries, err := m.readEntries()
 	if err != nil {
 		return err
@@ -277,13 +293,15 @@ func (m *APIKeyManager) Add(name, key, description string) error {
 	if errW := m.writeEntries(kept); errW != nil {
 		return errW
 	}
-	m.LoadKeys()
+	m.loadKeysLocked()
 	return nil
 }
 
 // Delete 按 name 删除一个密钥，写回文件并重载内存。返回 false 表示未找到该名称。
 // 未找到时调用方返回 404。
 func (m *APIKeyManager) Delete(name string) (bool, error) {
+	m.writeMu.Lock()
+	defer m.writeMu.Unlock()
 	entries, err := m.readEntries()
 	if err != nil {
 		return false, err
@@ -300,6 +318,6 @@ func (m *APIKeyManager) Delete(name string) (bool, error) {
 	if errW := m.writeEntries(kept); errW != nil {
 		return false, errW
 	}
-	m.LoadKeys()
+	m.loadKeysLocked()
 	return true, nil
 }

@@ -2,7 +2,6 @@ package vertex
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -13,7 +12,6 @@ import (
 
 	"github.com/bsfdsagfadg/vertex/internal/config"
 	"github.com/bsfdsagfadg/vertex/internal/recaptcha"
-	"github.com/bsfdsagfadg/vertex/internal/transform"
 	"github.com/bsfdsagfadg/vertex/internal/transport"
 )
 
@@ -45,17 +43,23 @@ func RequestIDFromContext(ctx context.Context) string {
 }
 
 type VertexAIClient struct {
-	net  *transport.NetworkClient
-	pool *recaptcha.TokenPool
-	cfg  config.ConfigProvider
+	net          *transport.NetworkClient
+	pool         *recaptcha.TokenPool
+	cfg          config.ConfigProvider
+	countCacheMu sync.Mutex
+	countCache   map[tokenCountCacheKey]tokenCountCacheEntry
+	countFlights map[tokenCountCacheKey]*tokenCountFlight
+	countMetrics tokenCountMetrics
 }
 
 func NewVertexAIClient(cfg config.ConfigProvider) *VertexAIClient {
 	net := transport.NewNetworkClient(cfg.DebugMode())
 	return &VertexAIClient{
-		net:  net,
-		pool: recaptcha.NewTokenPool(net, cfg.ProxyURL(), cfg.DebugMode()),
-		cfg:  cfg,
+		net:          net,
+		pool:         recaptcha.NewTokenPool(net, cfg.ProxyURL(), cfg.DebugMode()),
+		cfg:          cfg,
+		countCache:   make(map[tokenCountCacheKey]tokenCountCacheEntry),
+		countFlights: make(map[tokenCountCacheKey]*tokenCountFlight),
 	}
 }
 
@@ -78,11 +82,13 @@ const largePayloadThreshold = 1 << 20 // 1MB
 
 func (c *VertexAIClient) CompleteChatN(ctx context.Context, model string, geminiPayload map[string]any, n int) ([]map[string]any, error) {
 	if n > 1 {
-		if b, err := json.Marshal(geminiPayload); err == nil && len(b) > largePayloadThreshold {
-			log.Printf("[Vertex] [CompleteChatN] 大 payload (%d bytes) 降级为串行", len(b))
+		remaining := largePayloadThreshold
+		if !valueFitsBudget(geminiPayload, &remaining) {
+			log.Printf("[Vertex] [CompleteChatN] 大 payload (约超过 %d bytes) 降级为串行", largePayloadThreshold)
 			return c.completeChatNSerial(ctx, model, geminiPayload, n)
 		}
 	}
+	preparedVariables := buildRequestVariables(model, geminiPayload, c.cfg)
 
 	type res struct {
 		resp map[string]any
@@ -99,7 +105,7 @@ func (c *VertexAIClient) CompleteChatN(ctx context.Context, model string, gemini
 					results[idx] = res{err: NewInternalError(fmt.Sprintf("candidate panic: %v", rec))} //nolint:exhaustruct
 				}
 			}()
-			r, err := c.CompleteChat(ctx, model, geminiPayload)
+			r, err := c.completeChatPrepared(ctx, model, geminiPayload, preparedVariables)
 			results[idx] = res{resp: r, err: err}
 		}(i)
 	}
@@ -126,10 +132,11 @@ func (c *VertexAIClient) CompleteChatN(ctx context.Context, model string, gemini
 }
 
 func (c *VertexAIClient) completeChatNSerial(ctx context.Context, model string, geminiPayload map[string]any, n int) ([]map[string]any, error) {
+	preparedVariables := buildRequestVariables(model, geminiPayload, c.cfg)
 	var ok []map[string]any
 	var firstErr error
 	for i := 0; i < n; i++ {
-		r, err := c.CompleteChat(ctx, model, geminiPayload)
+		r, err := c.completeChatPrepared(ctx, model, geminiPayload, preparedVariables)
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err
@@ -196,76 +203,11 @@ func (c *VertexAIClient) buildCompleteResponse(r *ParseResult) (map[string]any, 
 // finishReason、usageMetadata、promptFeedback 等元数据。
 // parts 经 MergeContentBlocks 合并相邻 text 后写入 result。
 func collectChunksToParseResult(chunks []map[string]any) *ParseResult {
-	s := &ParseResult{
-		PromptFeedback: map[string]any{},
-		UsageMetadata:  map[string]any{},
-	}
-	var allParts []map[string]any
-
+	collector := newChunkCollector()
 	for _, chunk := range chunks {
-		if cands, ok := chunk["candidates"].([]any); ok && len(cands) > 0 {
-			if c, ok := cands[0].(map[string]any); ok {
-				if fr := c["finishReason"]; isTruthyAny(fr) {
-					s.FinishReason = toStr(fr)
-				}
-				if fm, ok := c["finishMessage"]; ok {
-					s.FinishMessage = fm
-				}
-				if v := c["safetyRatings"]; isTruthyAny(v) {
-					s.SafetyRatings = v
-				}
-				if v := c["citationMetadata"]; isTruthyAny(v) {
-					s.CitationMetadata = v
-				}
-				if v := c["groundingMetadata"]; isTruthyAny(v) {
-					s.GroundingMetadata = v
-				}
-				if v, ok := c["tokenCount"]; ok {
-					s.TokenCount = v
-				}
-				if v, ok := c["avgLogprobs"]; ok {
-					s.AvgLogprobs = v
-				}
-				if v, ok := c["logprobsResult"]; ok {
-					s.LogprobsResult = v
-				}
-				if v := c["index"]; v != nil {
-					s.CandidateIndex = toInt(v, 0)
-				}
-
-				if content, ok := c["content"].(map[string]any); ok {
-					if parts, ok := content["parts"].([]any); ok {
-						for _, pRaw := range parts {
-							if p, ok := pRaw.(map[string]any); ok {
-								allParts = append(allParts, p)
-							}
-						}
-					}
-				}
-			}
-		}
-
-		if pf, ok := chunk["promptFeedback"].(map[string]any); ok && len(pf) > 0 && len(s.PromptFeedback) == 0 {
-			s.PromptFeedback = pf
-		}
-		if um, ok := chunk["usageMetadata"]; ok {
-			if m := toMap(um); len(m) > 0 {
-				s.UsageMetadata = m
-			}
-		}
-		if v, ok := chunk["createTime"]; ok {
-			s.CreateTime = v
-		}
-		if v, ok := chunk["modelVersion"]; ok {
-			s.ModelVersion = v
-		}
-		if v, ok := chunk["responseId"]; ok {
-			s.ResponseID = v
-		}
+		collector.Add(chunk)
 	}
-
-	s.Parts = transform.MergeContentBlocks(allParts)
-	return s
+	return collector.Result()
 }
 
 func candidateFinish(result map[string]any) string {
@@ -278,30 +220,19 @@ func candidateFinish(result map[string]any) string {
 }
 
 func shallowCopy(m map[string]any) map[string]any {
-	out := make(map[string]any, len(m))
+	// 两个调用方都会在复制后追加一个字段（recaptchaToken / safetySettings）。
+	// 预留一个槽位，避免第一次赋值触发 map 扩容。
+	out := make(map[string]any, len(m)+1)
 	for k, v := range m {
 		out[k] = v
 	}
 	return out
 }
 
-func deepCopyAny(v any) any {
-	switch x := v.(type) {
-	case map[string]any:
-		out := make(map[string]any, len(x))
-		for k, val := range x {
-			out[k] = deepCopyAny(val)
-		}
-		return out
-	case []any:
-		out := make([]any, len(x))
-		for i, item := range x {
-			out[i] = deepCopyAny(item)
-		}
-		return out
-	default:
-		return v
-	}
+func payloadForCandidate(payload map[string]any) map[string]any {
+	// 并发候选共享只读输入；BuildVertexVariables 对需要改写的 ID 使用写时复制，
+	// safety 重试也只复制顶层 map，不会修改这里的原始 payload。
+	return payload
 }
 
 // asVertexError 提取链上的 *VertexError，返回 nil 表示不是该类错误。

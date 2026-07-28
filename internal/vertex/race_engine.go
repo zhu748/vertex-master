@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/bsfdsagfadg/vertex/internal/cli"
@@ -37,7 +35,7 @@ func safeResetTimer(t *time.Timer, d time.Duration) {
 }
 
 type raceResult[T any] struct {
-	uri     string
+	node    nodes.Node
 	val     T
 	err     error
 	elapsed time.Duration
@@ -174,45 +172,40 @@ func runRacePreferred[T any](
 	}()
 
 	resCh := make(chan raceResult[T], min(len(cands)+20, 30))
-	var active int32
+	active := 0
 	activeKeys := make(map[string]bool)
 	activeCancels := make(map[string]context.CancelFunc)
-	var mu sync.Mutex
 
-	launchNode := func(uri string) {
-		mu.Lock()
+	launchNode := func(candidate nodes.Node) bool {
+		uri := candidate.RawURI
 		if activeKeys[uri] {
-			mu.Unlock()
-			return
+			return false
 		}
 		activeKeys[uri] = true
 		nodeCtx, nodeCancel := context.WithCancel(ctxRace)
 		activeCancels[uri] = nodeCancel
-		mu.Unlock()
 
 		nodes.RecordSelection(uri)
-		atomic.AddInt32(&active, 1)
-		go func(u string) {
+		active++
+		go func(node nodes.Node) {
 			startedAt := time.Now()
-			v, err := run(nodeCtx, u)
+			v, err := run(nodeCtx, node.RawURI)
 			select {
-			case resCh <- raceResult[T]{uri: u, val: v, err: err, elapsed: time.Since(startedAt)}:
+			case resCh <- raceResult[T]{node: node, val: v, err: err, elapsed: time.Since(startedAt)}:
 			case <-ctxRace.Done():
 			}
-		}(uri)
+		}(candidate)
+		return true
 	}
 
 	cancelCandidate := func(uri string) {
-		mu.Lock()
 		if candidateCancel := activeCancels[uri]; candidateCancel != nil {
 			candidateCancel()
 			delete(activeCancels, uri)
 		}
-		mu.Unlock()
 	}
 
 	cancelOtherCandidates := func(winner string) {
-		mu.Lock()
 		for uri, candidateCancel := range activeCancels {
 			if uri == winner {
 				continue
@@ -220,10 +213,9 @@ func runRacePreferred[T any](
 			candidateCancel()
 			delete(activeCancels, uri)
 		}
-		mu.Unlock()
 	}
 
-	launchNode(cands[0].RawURI)
+	launchNode(cands[0])
 
 	delay := time.Duration(cfg.ParallelPoolDelayMs()) * time.Millisecond
 	if cfg.ParallelPoolDelayDynamic() {
@@ -252,12 +244,14 @@ func runRacePreferred[T any](
 		return zero, fmt.Errorf("all nodes failed")
 	}
 	launchNext := func() bool {
-		if nextIdx >= len(cands) || int(atomic.LoadInt32(&active)) >= maxConcurrent {
-			return false
+		for nextIdx < len(cands) && active < maxConcurrent {
+			candidate := cands[nextIdx]
+			nextIdx++
+			if launchNode(candidate) {
+				return true
+			}
 		}
-		launchNode(cands[nextIdx].RawURI)
-		nextIdx++
-		return true
+		return false
 	}
 
 	for {
@@ -272,31 +266,32 @@ func runRacePreferred[T any](
 					log.Printf("[Racing] 对冲延迟唤醒，已启动第 %d 个候选节点", nextIdx)
 				}
 			}
-			if nextIdx < len(cands) {
+			if nextIdx < len(cands) && active < maxConcurrent {
 				timer.Reset(delay)
 			}
 
 		case res := <-resCh:
-			atomic.AddInt32(&active, -1)
-			name := nodes.GetNodeName(res.uri)
+			active--
+			uri := res.node.RawURI
+			name := nodes.SafeNodeLabel(res.node.Name)
 
 			if res.err == nil {
-				recordProxyAttempt(res.uri, nil, res.elapsed)
-				stickyPool.Add(res.uri)
+				recordProxyAttempt(uri, nil, res.elapsed)
+				stickyPool.Add(uri)
 				if preferred != nil && !preferred(res.val) {
 					fallbackResults = append(fallbackResults, res.val)
-					cancelCandidate(res.uri)
+					cancelCandidate(uri)
 					if launchNext() {
 						safeResetTimer(timer, delay)
 					}
-					if atomic.LoadInt32(&active) == 0 && nextIdx >= len(cands) {
+					if active == 0 && nextIdx >= len(cands) {
 						cancel()
 						return finishWithFallback(nil)
 					}
 					continue
 				}
-				nodes.RecordProxySuccessForRequest(
-					res.uri,
+				nodes.RecordProxySuccessForNode(
+					res.node,
 					RequestIDFromContext(ctx),
 					proxyAttemptMilliseconds(res.elapsed),
 				)
@@ -306,13 +301,13 @@ func runRacePreferred[T any](
 
 				returnedOnWinPath = true
 				if rc.noCancelOnSuccess {
-					cancelOtherCandidates(res.uri)
+					cancelOtherCandidates(uri)
 				} else {
 					cancel()
 				}
 				return res.val, nil
 			}
-			cancelCandidate(res.uri)
+			cancelCandidate(uri)
 
 			if !errors.Is(res.err, context.Canceled) {
 				if cfg.DebugMode() {
@@ -325,8 +320,8 @@ func runRacePreferred[T any](
 						log.Printf("[Racing] 节点 %s 触发 429 API 限制，进入 30 秒短时歇息", name)
 					}
 				}
-				if recordProxyAttempt(res.uri, res.err, res.elapsed) {
-					stickyPool.Evict(res.uri)
+				if recordProxyAttempt(uri, res.err, res.elapsed) {
+					stickyPool.Evict(uri)
 				}
 
 				if ve != nil && !ve.IsRetryable() {
@@ -352,10 +347,10 @@ func runRacePreferred[T any](
 				}
 			}
 
-			if atomic.LoadInt32(&active) == 0 && nextIdx < len(cands) && launchNext() {
+			if active == 0 && nextIdx < len(cands) && launchNext() {
 				safeResetTimer(timer, delay)
 			}
-			if atomic.LoadInt32(&active) == 0 && nextIdx >= len(cands) {
+			if active == 0 && nextIdx >= len(cands) {
 				cancel()
 				return finishWithFallback(res.err)
 			}

@@ -7,7 +7,6 @@ import (
 	"io"
 	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/bsfdsagfadg/vertex/internal/jsonx"
 	"github.com/bsfdsagfadg/vertex/internal/transform"
@@ -33,31 +32,68 @@ type protocolOutput struct {
 	ReasoningTokens   int
 }
 
-func mergeProtocolOutput(dst *protocolOutput, chunk protocolOutput) {
-	if dst == nil {
+type protocolOutputAccumulator struct {
+	out       protocolOutput
+	text      transform.StringAccumulator
+	reasoning transform.StringAccumulator
+}
+
+func (a *protocolOutputAccumulator) Add(chunk protocolOutput) {
+	if a == nil {
 		return
 	}
-	dst.Text += chunk.Text
-	dst.Reasoning += chunk.Reasoning
-	dst.ToolCalls = append(dst.ToolCalls, chunk.ToolCalls...)
+	a.text.WriteString(chunk.Text)
+	a.reasoning.WriteString(chunk.Reasoning)
+	a.out.ToolCalls = append(a.out.ToolCalls, chunk.ToolCalls...)
 	if chunk.Finish != "" {
-		dst.Finish = chunk.Finish
+		a.out.Finish = chunk.Finish
 	}
 	if chunk.Input > 0 {
-		dst.Input = chunk.Input
+		a.out.Input = chunk.Input
 	}
 	if chunk.Output > 0 {
-		dst.Output = chunk.Output
+		a.out.Output = chunk.Output
 	}
 	if chunk.Total > 0 {
-		dst.Total = chunk.Total
+		a.out.Total = chunk.Total
 	}
 	if chunk.CachedInputTokens > 0 {
-		dst.CachedInputTokens = chunk.CachedInputTokens
+		a.out.CachedInputTokens = chunk.CachedInputTokens
 	}
 	if chunk.ReasoningTokens > 0 {
-		dst.ReasoningTokens = chunk.ReasoningTokens
+		a.out.ReasoningTokens = chunk.ReasoningTokens
 	}
+}
+
+func (a *protocolOutputAccumulator) AddText(text string) {
+	if a != nil {
+		a.text.WriteString(text)
+	}
+}
+
+func (a *protocolOutputAccumulator) Output() protocolOutput {
+	if a == nil {
+		return protocolOutput{}
+	}
+	out := a.out
+	out.Text = a.text.String()
+	out.Reasoning = a.reasoning.String()
+	return out
+}
+
+func joinProtocolTextBlocks(blocks []string, current string) string {
+	if len(blocks) == 0 {
+		return current
+	}
+	if len(blocks) == 1 && current == "" {
+		return blocks[0]
+	}
+	var accumulator transform.StringAccumulator
+	for _, block := range blocks {
+		accumulator.WriteString(block)
+	}
+	accumulator.WriteString(current)
+	return accumulator.String()
 }
 
 // normalizeProtocolUsage 只根据上游已返回的字段补齐可确定的分项，不进行本地
@@ -101,29 +137,23 @@ func completeProtocolUsageWithCountTokens(
 		needOutput = false
 	}
 
-	var inputCount, outputCount int
-	var wg sync.WaitGroup
+	contentSets := make([][]any, 0, 2)
+	inputIndex, outputIndex := -1, -1
 	if needInput {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			inputCount = vc.CountTokens(ctx, model, inputContents)
-		}()
+		inputIndex = len(contentSets)
+		contentSets = append(contentSets, inputContents)
 	}
 	if needOutput {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			outputCount = vc.CountTokens(ctx, model, outputContents)
-		}()
+		outputIndex = len(contentSets)
+		contentSets = append(contentSets, outputContents)
 	}
-	wg.Wait()
+	counts := vc.CountTokenSets(ctx, model, contentSets...)
 
-	if out.Input == 0 && inputCount > 0 {
-		out.Input = inputCount
+	if inputIndex >= 0 && inputIndex < len(counts) && counts[inputIndex] > 0 {
+		out.Input = counts[inputIndex]
 	}
-	if out.Output == 0 && outputCount > 0 {
-		out.Output = outputCount
+	if outputIndex >= 0 && outputIndex < len(counts) && counts[outputIndex] > 0 {
+		out.Output = counts[outputIndex]
 	}
 	return normalizeProtocolUsage(out)
 }
@@ -133,7 +163,10 @@ func protocolInputContents(payload map[string]any) []any {
 	if system, ok := payload["systemInstruction"].(map[string]any); ok && len(system) > 0 {
 		// CountTokens operation 仅接收 contents；用独立 user content 传入 system
 		// parts，使系统提示也由模型 tokenizer 计入，而不是在本地估算。
-		systemContent := cloneStringMap(system)
+		systemContent := make(map[string]any, len(system))
+		for key, value := range system {
+			systemContent[key] = value
+		}
 		if stringValue(systemContent["role"]) == "" {
 			systemContent["role"] = "user"
 		}
@@ -290,7 +323,17 @@ func outputFromOAI(resp map[string]any) protocolOutput {
 }
 
 func outputFromGeminiChunk(chunk map[string]any) protocolOutput {
+	return outputFromGeminiChunkWithUsage(chunk, transform.NormalizedUsage{}, false)
+}
+
+func outputFromGeminiChunkWithUsage(
+	chunk map[string]any,
+	normalizedUsage transform.NormalizedUsage,
+	hasNormalizedUsage bool,
+) protocolOutput {
 	var out protocolOutput
+	var textAccumulator transform.StringAccumulator
+	var reasoningAccumulator transform.StringAccumulator
 	candidates := anySlice(chunk["candidates"])
 	var candidate map[string]any
 	if len(candidates) > 0 {
@@ -320,25 +363,25 @@ func outputFromGeminiChunk(chunk map[string]any) protocolOutput {
 				continue
 			}
 			if protocolBoolValue(part["thought"]) {
-				out.Reasoning += text
+				reasoningAccumulator.WriteString(text)
 			} else {
-				out.Text += text
+				textAccumulator.WriteString(text)
 			}
 		}
 	}
+	out.Text = textAccumulator.String()
+	out.Reasoning = reasoningAccumulator.String()
 	if usage, ok := chunk["usageMetadata"].(map[string]any); ok {
-		normalized := transform.ConvertUsageForCandidate(usage, candidate)
-		out.Input = protocolIntValue(normalized["prompt_tokens"])
-		if output := protocolIntValue(normalized["completion_tokens"]); output > 0 {
+		if !hasNormalizedUsage {
+			normalizedUsage = transform.NormalizeUsageForCandidate(usage, candidate)
+		}
+		out.Input = normalizedUsage.PromptTokens
+		if output := normalizedUsage.CompletionTokens; output > 0 {
 			out.Output = output
 		}
-		out.Total = protocolIntValue(normalized["total_tokens"])
-		if details, ok := normalized["prompt_tokens_details"].(map[string]any); ok {
-			out.CachedInputTokens = protocolIntValue(details["cached_tokens"])
-		}
-		if details, ok := normalized["completion_tokens_details"].(map[string]any); ok {
-			out.ReasoningTokens = protocolIntValue(details["reasoning_tokens"])
-		}
+		out.Total = normalizedUsage.TotalTokens
+		out.CachedInputTokens = normalizedUsage.CachedInputTokens
+		out.ReasoningTokens = normalizedUsage.ReasoningTokens
 	}
 	if out.Total == 0 && out.Input > 0 && out.Output > 0 {
 		out.Total = out.Input + out.Output
@@ -396,11 +439,11 @@ func jsonString(v any) string {
 	if v == nil {
 		return "{}"
 	}
-	data, err := jsonx.Marshal(v)
+	data, err := jsonx.MarshalString(v)
 	if err != nil {
 		return "{}"
 	}
-	return string(data)
+	return data
 }
 
 func jsonValue(s string) any {
@@ -414,10 +457,16 @@ func jsonValue(s string) any {
 	return value
 }
 
-func namedSSE(event string, payload map[string]any) string {
-	data, err := jsonx.Marshal(payload)
-	if err != nil {
-		data = []byte(`{"type":"error","error":{"type":"api_error","message":"serialization failed"}}`)
+func namedSSE(event string, payload any) string {
+	var output strings.Builder
+	output.Grow(len(event) + 256)
+	output.WriteString("event: ")
+	output.WriteString(event)
+	output.WriteString("\ndata: ")
+	if err := jsonx.Encode(&output, payload); err != nil {
+		return "event: " + event +
+			"\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"serialization failed\"}}\n\n"
 	}
-	return "event: " + event + "\ndata: " + string(data) + "\n\n"
+	output.WriteByte('\n')
+	return output.String()
 }

@@ -96,7 +96,7 @@ func StripAssistantPrefillFromOAI(response map[string]any, prefill string) {
 // prefix candidate, then releases text immediately once a mismatch is known.
 type AssistantPrefillStreamFilter struct {
 	prefill string
-	pending string
+	matched int
 	decided bool
 	sawText bool
 }
@@ -112,31 +112,46 @@ func (f *AssistantPrefillStreamFilter) filterText(text string, final bool) strin
 	if f.decided || f.prefill == "" {
 		return text
 	}
-	f.pending += text
-	if f.pending == f.prefill {
-		f.pending = ""
+
+	previouslyMatched := f.matched
+	remaining := f.prefill[previouslyMatched:]
+	matchedNow := commonPrefixBytes(text, remaining)
+	if matchedNow == len(remaining) {
+		f.matched += matchedNow
 		f.decided = true
+		return text[matchedNow:]
+	}
+	if matchedNow < len(text) {
+		// 当前 chunk 在前缀完成前出现不匹配；之前暂存的内容一定等于
+		// prefill[:previouslyMatched]，无需逐块保存或反复复制。
+		out := text
+		if previouslyMatched > 0 {
+			out = f.prefill[:previouslyMatched] + text
+		}
+		f.matched = 0
+		f.decided = true
+		return out
+	}
+
+	// 当前 chunk 全部匹配，但完整前缀尚未结束。
+	f.matched += matchedNow
+	if !final {
 		return ""
 	}
-	if strings.HasPrefix(f.prefill, f.pending) {
-		if !final {
-			return ""
-		}
-		out := f.pending
-		f.pending = ""
-		f.decided = true
-		return out
-	}
-	if strings.HasPrefix(f.pending, f.prefill) {
-		out := strings.TrimPrefix(f.pending, f.prefill)
-		f.pending = ""
-		f.decided = true
-		return out
-	}
-	out := f.pending
-	f.pending = ""
+	out := f.prefill[:f.matched]
+	f.matched = 0
 	f.decided = true
 	return out
+}
+
+func commonPrefixBytes(left, right string) int {
+	limit := min(len(left), len(right))
+	for index := 0; index < limit; index++ {
+		if left[index] != right[index] {
+			return index
+		}
+	}
+	return limit
 }
 
 // FilterGeminiChunk mutates only ordinary text parts in a request-local chunk.

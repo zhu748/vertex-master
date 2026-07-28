@@ -140,49 +140,53 @@ func (g *GeminiHandler) handleGeminiStreamGenerate(w http.ResponseWriter, r *htt
 	hasFinish := false
 	streamErrWritten := false
 	suffix := generateVPSuffix()
-	var lastCandidate map[string]any
-	var streamOutput protocolOutput
+	var lastCandidateTokenCount int
+	var streamOutput protocolOutputAccumulator
 	g.vc.StreamChat(r.Context(), actualModel, body, func(ch vertex.StreamChunk) bool {
 		if ch.Err != nil {
 			streamErrWritten = true
 			if isSafetyBlock(ch.Err) {
-				_ = sw.write(g.geminiSSE(geminiSafetyChunk(ch.Err)))
+				_ = sw.writeData(geminiSafetyChunk(ch.Err))
 			} else {
-				_ = sw.write(g.geminiSSE(map[string]any{"error": map[string]any{
+				_ = sw.writeData(map[string]any{"error": map[string]any{
 					"code": ch.Err.Code, "message": vertex.FriendlyErrorMessage(ch.Err), "status": geminiStatusOf(ch.Err),
-				}}))
+				}})
 			}
 			return false
 		}
 		gotChunk = true
-		// StreamParallel 的 race engine 可能把同一份 chunk map 共享给多个候选
-		// goroutine 做竞速，cleanGeminiFinishReason / cleanGeminiPromptFeedback 会
-		// 修改 map，直接在 ch.Data 上改会触发 data race。这里先递归复制一份独占
-		// 的副本再修改和写出。
-		data := cloneStringMap(ch.Data)
-		normalizeStreamingGeminiUsage(data, &lastCandidate)
-		mergeProtocolOutput(&streamOutput, outputFromGeminiChunk(data))
+		// StreamChunk 把胜出节点 chunk 的所有权交给当前单一消费者，可直接
+		// 就地清理和补齐字段，避免每帧递归复制整棵响应对象。
+		data := ch.Data
+		normalizedUsage, hasUsage := normalizeStreamingGeminiUsage(data, &lastCandidateTokenCount)
+		streamOutput.Add(outputFromGeminiChunkWithUsage(data, normalizedUsage, hasUsage))
 		if fr := cleanGeminiFinishReason(data); fr != "" {
 			hasFinish = true
 		}
 		cleanGeminiPromptFeedback(data)
 		rewriteGeminiIDs(data, suffix)
-		return sw.write(g.geminiSSE(data))
+		return sw.writeData(data)
 	})
 
 	if streamErrWritten {
 		return
 	}
 	if !gotChunk {
-		_ = sw.write(g.geminiSSE(map[string]any{
+		_ = sw.writeData(map[string]any{
 			"error": map[string]any{
 				"code": 500, "message": "Upstream returned empty response (no content)", "status": "INTERNAL",
 			},
-		}))
+		})
 		return
 	}
-	streamOutput = completeProtocolUsageWithCountTokens(r.Context(), g.vc, actualModel, body, streamOutput)
-	if hasProtocolUsage(streamOutput) {
+	completedOutput := completeProtocolUsageWithCountTokens(
+		r.Context(),
+		g.vc,
+		actualModel,
+		body,
+		streamOutput.Output(),
+	)
+	if hasProtocolUsage(completedOutput) {
 		usageChunk := map[string]any{
 			"candidates": []any{map[string]any{
 				"content": map[string]any{"parts": []any{}, "role": "model"},
@@ -192,44 +196,51 @@ func (g *GeminiHandler) handleGeminiStreamGenerate(w http.ResponseWriter, r *htt
 		if !hasFinish {
 			usageChunk["candidates"].([]any)[0].(map[string]any)["finishReason"] = "STOP"
 		}
-		applyGeminiUsage(streamOutput, usageChunk)
-		_ = sw.write(g.geminiSSE(usageChunk))
+		applyGeminiUsage(completedOutput, usageChunk)
+		_ = sw.writeData(usageChunk)
 	} else if !hasFinish {
-		_ = sw.write(g.geminiSSE(map[string]any{
+		_ = sw.writeData(map[string]any{
 			"candidates": []any{map[string]any{
 				"content":      map[string]any{"parts": []any{}, "role": "model"},
 				"finishReason": "STOP",
 				"index":        0,
 			}},
-		}))
+		})
 	}
 }
 
-func normalizeStreamingGeminiUsage(data map[string]any, lastCandidate *map[string]any) {
+func normalizeStreamingGeminiUsage(data map[string]any, lastCandidateTokenCount *int) (transform.NormalizedUsage, bool) {
 	if candidate := firstGeminiCandidate(data); candidate != nil {
-		*lastCandidate = cloneStringMap(candidate)
+		for _, key := range []string{"tokenCount", "token_count"} {
+			if count := protocolIntValue(candidate[key]); count > 0 {
+				*lastCandidateTokenCount = count
+				break
+			}
+		}
 	}
-	ensureGeminiUsageCandidate(data, *lastCandidate)
+	return ensureGeminiUsageCandidate(data, *lastCandidateTokenCount)
 }
 
 // ensureGeminiUsageCandidate 兼容会忽略 metadata-only SSE 帧的 Gemini 客户端。
 // RikkaHub 的 GoogleProvider 只有在 candidates 非空时才继续解析 usageMetadata，
 // 因此对有真实 token 统计但无 candidates 的末帧补一个不含正文的空 candidate。
-func ensureGeminiUsageCandidate(data map[string]any, fallbackCandidate map[string]any) {
+func ensureGeminiUsageCandidate(data map[string]any, fallbackTokenCount int) (transform.NormalizedUsage, bool) {
 	usage, ok := data["usageMetadata"].(map[string]any)
 	if !ok || len(usage) == 0 {
-		return
+		return transform.NormalizedUsage{}, false
 	}
 	candidate := firstGeminiCandidate(data)
-	if candidate == nil {
-		candidate = fallbackCandidate
+	usageCandidate := candidate
+	if usageCandidate == nil && fallbackTokenCount > 0 {
+		// 仅 usage-only 末帧临时构造最小候选，不跨 chunk 保留可能很大的正文。
+		usageCandidate = map[string]any{"tokenCount": fallbackTokenCount}
 	}
-	normalized := transform.ConvertUsageForCandidate(usage, candidate)
-	input := protocolIntValue(normalized["prompt_tokens"])
-	output := protocolIntValue(normalized["completion_tokens"])
-	total := protocolIntValue(normalized["total_tokens"])
+	normalized := transform.NormalizeUsageForCandidate(usage, usageCandidate)
+	input := normalized.PromptTokens
+	output := normalized.CompletionTokens
+	total := normalized.TotalTokens
 	if input == 0 && output == 0 && total == 0 {
-		return
+		return normalized, true
 	}
 
 	// 补 canonical Gemini 汇总字段，让只读取顶层计数、不读取 modality details
@@ -253,6 +264,7 @@ func ensureGeminiUsageCandidate(data map[string]any, fallbackCandidate map[strin
 			},
 		}}
 	}
+	return normalized, true
 }
 
 func firstGeminiCandidate(data map[string]any) map[string]any {
@@ -269,12 +281,12 @@ func (g *GeminiHandler) geminiFakeStream(ctx context.Context, sw *sseWriter, mod
 	if vErr != nil {
 		ve := toVertexError(vErr)
 		if isSafetyBlock(ve) {
-			_ = sw.write(g.geminiSSE(geminiSafetyChunk(ve)))
+			_ = sw.writeData(geminiSafetyChunk(ve))
 			return
 		}
-		_ = sw.write(g.geminiSSE(map[string]any{"error": map[string]any{
+		_ = sw.writeData(map[string]any{"error": map[string]any{
 			"code": ve.Code, "message": vertex.FriendlyErrorMessage(ve), "status": geminiStatusOf(ve),
-		}}))
+		}})
 		return
 	}
 
@@ -287,7 +299,7 @@ func (g *GeminiHandler) geminiFakeStream(ctx context.Context, sw *sseWriter, mod
 			cand["finishReason"] = "STOP"
 		}
 		chunk := map[string]any{"candidates": []any{cand}}
-		if !sw.write(g.geminiSSE(chunk)) {
+		if !sw.writeData(chunk) {
 			return
 		}
 	}
@@ -296,7 +308,7 @@ func (g *GeminiHandler) geminiFakeStream(ctx context.Context, sw *sseWriter, mod
 			"index": 0, "content": map[string]any{"role": "model", "parts": []any{}},
 		}}}
 		applyGeminiUsage(out, usageChunk)
-		_ = sw.write(g.geminiSSE(usageChunk))
+		_ = sw.writeData(usageChunk)
 	}
 }
 
@@ -336,11 +348,7 @@ func (g *GeminiHandler) handleModelInfo(w http.ResponseWriter, modelName string)
 }
 
 func (g *GeminiHandler) geminiSSE(obj map[string]any) string {
-	data, err := jsonx.Marshal(obj)
-	if err != nil {
-		return "data: {}\n\n"
-	}
-	return "data: " + string(data) + "\n\n"
+	return sseEvent(obj)
 }
 
 func (g *GeminiHandler) geminiError(w http.ResponseWriter, status int, msg, geminiStatus string) {
@@ -385,8 +393,7 @@ func cleanGeminiFinishReason(data map[string]any) string {
 // 这里在透传前删除这个无害的占位符；只有真正的拦截原因（SAFETY / RECITATION 等）才保留。
 // 真正被拦截时 vertex 层会走 isSafetyBlock 分支返回 geminiSafetyResponse，不会走到这里。
 //
-// 调用方需保证传入的 data 是独占副本（见 shallowCloneMap / cloneStringMap），避免在
-// StreamParallel 的 race engine 共享 map 时触发 data race。
+// StreamChunk.Data 的所有权已转移给当前消费者，因此这里可以安全地就地清理。
 func cleanGeminiPromptFeedback(data map[string]any) {
 	feedback, ok := data["promptFeedback"].(map[string]any)
 	if !ok {
@@ -402,24 +409,6 @@ func cleanGeminiPromptFeedback(data map[string]any) {
 	if len(feedback) == 0 {
 		delete(data, "promptFeedback")
 	}
-}
-
-// cloneStringMap 递归复制 map[string]any（slice 和基本类型按引用共享，但每层 map
-// 都是新的），用于在清理 promptFeedback / finishReason 等嵌套字段前确保子 map 也是
-// 独占的，避免在 StreamParallel race engine 共享 map 时触发 data race。
-func cloneStringMap(m map[string]any) map[string]any {
-	if m == nil {
-		return nil
-	}
-	out := make(map[string]any, len(m))
-	for k, v := range m {
-		if sub, ok := v.(map[string]any); ok {
-			out[k] = cloneStringMap(sub)
-		} else {
-			out[k] = v
-		}
-	}
-	return out
 }
 
 func vertexErrorToGemini(e *vertex.VertexError) map[string]any {

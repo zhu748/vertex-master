@@ -1,9 +1,11 @@
 package db
 
 import (
+	"bufio"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -281,68 +283,352 @@ func validateForeignKeys(tx *sql.Tx) error {
 	}
 	return rows.Err() //nolint:wrapcheck
 }
+
+type legacyNode struct {
+	Type     string `json:"type"`
+	Name     string `json:"name"`
+	RawURI   string `json:"raw_uri"`
+	Disabled bool   `json:"disabled"`
+}
+
+type legacyNodeHealth struct { //nolint:govet
+	SuccessCount        int     `json:"success_count"`
+	FailCount           int     `json:"fail_count"`
+	ConsecutiveFailures int     `json:"consecutive_failures"`
+	LastTestMs          float64 `json:"last_test_ms"`
+	LastTestError       string  `json:"last_test_error"`
+	LastSuccessAt       int64   `json:"last_success_at"`
+	LastFailAt          int64   `json:"last_fail_at"`
+	CooldownUntil       int64   `json:"cooldown_until"`
+}
+
 func migrateFromFiles(db *sql.DB, configDir string) {
 	migratedFolder := filepath.Join(configDir, "migrated")
-
-	// Migrate nodes
 	nodesPath := filepath.Join(configDir, "nodes.json")
-	if data, err := os.ReadFile(nodesPath); err == nil {
-		var d struct {
-			Nodes []struct {
-				Type     string `json:"type"`
-				Name     string `json:"name"`
-				RawURI   string `json:"raw_uri"`
-				Disabled bool   `json:"disabled"`
-			} `json:"nodes"`
-		}
-		if errUnm := json.Unmarshal(data, &d); errUnm == nil { //nolint:govet
-			tx, _ := db.Begin()
-			stmt, _ := tx.Prepare("INSERT OR IGNORE INTO nodes (raw_uri, type, name, disabled) VALUES (?, ?, ?, ?)")
-			for _, n := range d.Nodes {
-				_, _ = stmt.Exec(n.RawURI, n.Type, n.Name, n.Disabled)
-			}
-			_ = stmt.Close()
-			_ = tx.Commit()
-			log.Printf("[DB] Migrated %d nodes from nodes.json", len(d.Nodes))
-
-			_ = os.MkdirAll(migratedFolder, 0755)
-			_ = os.Rename(nodesPath, filepath.Join(migratedFolder, "nodes.json.migrated"))
-		}
+	nodeCount, err := migrateLegacyNodesFile(db, nodesPath, migratedFolder)
+	switch {
+	case err == nil:
+		log.Printf("[DB] Migrated %d nodes from nodes.json", nodeCount)
+	case !os.IsNotExist(err):
+		log.Printf("[DB] nodes.json migration failed; source retained: %v", err)
 	}
 
-	// Migrate node_health
 	healthPath := filepath.Join(configDir, "node_health.json")
-	if data, err := os.ReadFile(healthPath); err == nil {
-		var healthMap map[string]struct { //nolint:govet
-			SuccessCount        int     `json:"success_count"`
-			FailCount           int     `json:"fail_count"`
-			ConsecutiveFailures int     `json:"consecutive_failures"`
-			LastTestMs          float64 `json:"last_test_ms"`
-			LastTestError       string  `json:"last_test_error"`
-			LastSuccessAt       int64   `json:"last_success_at"`
-			LastFailAt          int64   `json:"last_fail_at"`
-			CooldownUntil       int64   `json:"cooldown_until"`
-		}
-		if errUnm := json.Unmarshal(data, &healthMap); errUnm == nil { //nolint:govet
-			tx, _ := db.Begin()
-			stmt, _ := tx.Prepare(`INSERT OR REPLACE INTO node_health 
-				(raw_uri, success_count, fail_count, consecutive_failures, last_test_ms, last_test_error, last_success_at, last_fail_at, cooldown_until) 
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-			migrated := 0
-			for uri, h := range healthMap {
-				_, err := stmt.Exec(uri, h.SuccessCount, h.FailCount, h.ConsecutiveFailures, h.LastTestMs, h.LastTestError, h.LastSuccessAt, h.LastFailAt, h.CooldownUntil) //nolint:govet
-				if err == nil {
-					migrated++
-				}
-			}
-			_ = stmt.Close()
-			_ = tx.Commit()
-			log.Printf("[DB] Migrated %d node health records from node_health.json", migrated)
+	healthCount, skipped, err := migrateLegacyHealthFile(db, healthPath, migratedFolder)
+	switch {
+	case err == nil:
+		log.Printf("[DB] Migrated %d node health records from node_health.json", healthCount)
+	case !os.IsNotExist(err):
+		log.Printf(
+			"[DB] node_health.json migration incomplete (migrated=%d skipped=%d); source retained: %v",
+			healthCount,
+			skipped,
+			err,
+		)
+	}
+}
 
-			_ = os.MkdirAll(migratedFolder, 0755)
-			_ = os.Rename(healthPath, filepath.Join(migratedFolder, "node_health.json.migrated"))
+func migrateLegacyNodesFile(db *sql.DB, path, migratedFolder string) (int, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	count, migrateErr := migrateLegacyNodes(db, file)
+	closeErr := file.Close()
+	if migrateErr != nil {
+		return 0, fmt.Errorf("migrate %s: %w", path, migrateErr)
+	}
+	if closeErr != nil {
+		return count, fmt.Errorf("close %s after migration: %w", path, closeErr)
+	}
+	if err := archiveLegacyFile(path, migratedFolder); err != nil {
+		return count, err
+	}
+	return count, nil
+}
+
+func migrateLegacyHealthFile(db *sql.DB, path, migratedFolder string) (int, int, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, 0, err
+	}
+	migrated, skipped, migrateErr := migrateLegacyHealth(db, file)
+	closeErr := file.Close()
+	if migrateErr != nil {
+		return 0, 0, fmt.Errorf("migrate %s: %w", path, migrateErr)
+	}
+	if closeErr != nil {
+		return migrated, skipped, fmt.Errorf("close %s after migration: %w", path, closeErr)
+	}
+	if skipped > 0 {
+		return migrated, skipped, fmt.Errorf(
+			"%d health records reference nodes that were not migrated",
+			skipped,
+		)
+	}
+	if err := archiveLegacyFile(path, migratedFolder); err != nil {
+		return migrated, 0, err
+	}
+	return migrated, 0, nil
+}
+
+func migrateLegacyNodes(db *sql.DB, reader io.Reader) (int, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("begin nodes migration: %w", err)
+	}
+	stmt, err := tx.Prepare(
+		"INSERT OR IGNORE INTO nodes (raw_uri, type, name, disabled) VALUES (?, ?, ?, ?)",
+	)
+	if err != nil {
+		_ = tx.Rollback()
+		return 0, fmt.Errorf("prepare nodes migration: %w", err)
+	}
+
+	insertedCount := 0
+	_, decodeErr := decodeLegacyNodes(reader, func(node legacyNode) error {
+		result, execErr := stmt.Exec(node.RawURI, node.Type, node.Name, node.Disabled)
+		if execErr != nil {
+			return execErr
+		}
+		inserted, rowsErr := result.RowsAffected()
+		if rowsErr != nil {
+			return rowsErr
+		}
+		insertedCount += int(inserted)
+		return nil
+	})
+	closeErr := stmt.Close()
+	if decodeErr != nil {
+		_ = tx.Rollback()
+		return 0, fmt.Errorf("decode or insert nodes: %w", decodeErr)
+	}
+	if closeErr != nil {
+		_ = tx.Rollback()
+		return 0, fmt.Errorf("close nodes statement: %w", closeErr)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit nodes migration: %w", err)
+	}
+	return insertedCount, nil
+}
+
+func migrateLegacyHealth(db *sql.DB, reader io.Reader) (int, int, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return 0, 0, fmt.Errorf("begin node health migration: %w", err)
+	}
+	stmt, err := tx.Prepare(`INSERT OR REPLACE INTO node_health
+		(raw_uri, success_count, fail_count, consecutive_failures, last_test_ms,
+		 last_test_error, last_success_at, last_fail_at, cooldown_until)
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
+		WHERE EXISTS (SELECT 1 FROM nodes WHERE raw_uri = ?)`)
+	if err != nil {
+		_ = tx.Rollback()
+		return 0, 0, fmt.Errorf("prepare node health migration: %w", err)
+	}
+
+	migrated := 0
+	skipped := 0
+	decodeErr := decodeLegacyHealth(reader, func(uri string, health legacyNodeHealth) error {
+		result, execErr := stmt.Exec(
+			uri,
+			health.SuccessCount,
+			health.FailCount,
+			health.ConsecutiveFailures,
+			health.LastTestMs,
+			health.LastTestError,
+			health.LastSuccessAt,
+			health.LastFailAt,
+			health.CooldownUntil,
+			uri,
+		)
+		if execErr != nil {
+			return execErr
+		}
+		inserted, rowsErr := result.RowsAffected()
+		if rowsErr != nil {
+			return rowsErr
+		}
+		if inserted == 0 {
+			skipped++
+		} else {
+			migrated++
+		}
+		return nil
+	})
+	closeErr := stmt.Close()
+	if decodeErr != nil {
+		_ = tx.Rollback()
+		return 0, 0, fmt.Errorf("decode or insert node health: %w", decodeErr)
+	}
+	if closeErr != nil {
+		_ = tx.Rollback()
+		return 0, 0, fmt.Errorf("close node health statement: %w", closeErr)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, 0, fmt.Errorf("commit node health migration: %w", err)
+	}
+	return migrated, skipped, nil
+}
+
+func decodeLegacyNodes(reader io.Reader, visit func(legacyNode) error) (int, error) {
+	decoder := json.NewDecoder(bufio.NewReaderSize(reader, 64<<10))
+	if err := expectJSONDelimiter(decoder, '{'); err != nil {
+		return 0, err
+	}
+	foundNodes := false
+	visited := 0
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		if err != nil {
+			return 0, err
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return 0, fmt.Errorf("nodes object key is %T, want string", keyToken)
+		}
+		if key != "nodes" {
+			if err := skipJSONValue(decoder); err != nil {
+				return 0, fmt.Errorf("skip nodes.json field %q: %w", key, err)
+			}
+			continue
+		}
+		if foundNodes {
+			return 0, fmt.Errorf("duplicate nodes field")
+		}
+		foundNodes = true
+		if err := expectJSONDelimiter(decoder, '['); err != nil {
+			return 0, fmt.Errorf("nodes field: %w", err)
+		}
+		for decoder.More() {
+			var node legacyNode
+			if err := decoder.Decode(&node); err != nil {
+				return 0, err
+			}
+			if err := visit(node); err != nil {
+				return 0, err
+			}
+			visited++
+		}
+		if err := expectJSONDelimiter(decoder, ']'); err != nil {
+			return 0, err
 		}
 	}
+	if err := expectJSONDelimiter(decoder, '}'); err != nil {
+		return 0, err
+	}
+	if err := expectJSONEOF(decoder); err != nil {
+		return 0, err
+	}
+	return visited, nil
+}
+
+func decodeLegacyHealth(reader io.Reader, visit func(string, legacyNodeHealth) error) error {
+	decoder := json.NewDecoder(bufio.NewReaderSize(reader, 64<<10))
+	if err := expectJSONDelimiter(decoder, '{'); err != nil {
+		return err
+	}
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		uri, ok := keyToken.(string)
+		if !ok {
+			return fmt.Errorf("node health object key is %T, want string", keyToken)
+		}
+		var health legacyNodeHealth
+		if err := decoder.Decode(&health); err != nil {
+			return err
+		}
+		if err := visit(uri, health); err != nil {
+			return err
+		}
+	}
+	if err := expectJSONDelimiter(decoder, '}'); err != nil {
+		return err
+	}
+	return expectJSONEOF(decoder)
+}
+
+func expectJSONDelimiter(decoder *json.Decoder, expected json.Delim) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	if token != expected {
+		return fmt.Errorf("unexpected JSON token %v, want %q", token, expected)
+	}
+	return nil
+}
+
+func expectJSONEOF(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err == io.EOF {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return fmt.Errorf("unexpected trailing JSON token %v", token)
+}
+
+func skipJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, compound := token.(json.Delim)
+	if !compound {
+		return nil
+	}
+	switch delimiter {
+	case '{':
+		for decoder.More() {
+			if _, err := decoder.Token(); err != nil {
+				return err
+			}
+			if err := skipJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		return expectJSONDelimiter(decoder, '}')
+	case '[':
+		for decoder.More() {
+			if err := skipJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		return expectJSONDelimiter(decoder, ']')
+	default:
+		return fmt.Errorf("unexpected closing JSON delimiter %q", delimiter)
+	}
+}
+
+func archiveLegacyFile(path, migratedFolder string) error {
+	if err := os.MkdirAll(migratedFolder, 0755); err != nil {
+		return fmt.Errorf("create migrated folder %s: %w", migratedFolder, err)
+	}
+	baseTarget := filepath.Join(migratedFolder, filepath.Base(path)+".migrated")
+	target := baseTarget
+	for suffix := 1; ; suffix++ {
+		_, err := os.Stat(target)
+		if os.IsNotExist(err) {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("inspect legacy archive %s: %w", target, err)
+		}
+		if suffix > 10_000 {
+			return fmt.Errorf("too many legacy archives for %s", path)
+		}
+		target = fmt.Sprintf("%s.%d", baseTarget, suffix)
+	}
+	if err := os.Rename(path, target); err != nil {
+		return fmt.Errorf("archive legacy file %s to %s: %w", path, target, err)
+	}
+	return nil
 }
 
 // CloseDB closes the global database connection.

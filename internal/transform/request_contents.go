@@ -167,30 +167,32 @@ func hasRemotePrefix(url string) bool {
 
 // BuildVertexVariables 由 geminiPayload 构建发往上游的 variables。
 func BuildVertexVariables(model string, geminiPayload map[string]any, cfg config.ConfigProvider) map[string]any {
-	stripGeminiIDs(geminiPayload)
-	vars := map[string]any{}
+	if sanitized, changed := stripGeminiIDsCopy(geminiPayload, 0); changed {
+		geminiPayload = sanitized.(map[string]any)
+	}
+	vars := make(map[string]any, len(supportedVarFields)+2)
 	resolvedModel := parseModelName(model)
 	vars["model"] = resolvedModel
 
 	for _, field := range supportedVarFields {
-		if v, ok := geminiPayload[field]; ok {
-			vars[field] = v
-		} else {
-			if v, ok := geminiPayload[CamelToSnake(field)]; ok {
-				vars[field] = v
-			}
+		if value, ok := geminiPayload[field.camel]; ok {
+			vars[field.camel] = value
+		} else if value, ok := geminiPayload[field.snake]; ok {
+			vars[field.camel] = value
 		}
 	}
 
 	handleSystemInstruction(vars)
 
 	if c, ok := vars["contents"]; ok {
-		c = normalizeContents(c)
-		c = handleInlineDataCase(c)
-		c = normalizeContents(c)
-		c = HandleBase64InContents(c)
-		c = filterEmptyContents(c)
-		c = EncodeThoughtSignature(c, 0)
+		if !canonicalTextContentsCanPassThrough(c) {
+			c = normalizeContents(c)
+			c = handleInlineDataCase(c)
+			c = normalizeContents(c)
+			c = HandleBase64InContents(c)
+			c = filterEmptyContents(c)
+			c = EncodeThoughtSignature(c, 0)
+		}
 		vars["contents"] = c
 	}
 
@@ -207,9 +209,13 @@ func BuildVertexVariables(model string, geminiPayload map[string]any, cfg config
 		vars["toolConfig"] = convertToolsFormat(tc)
 	}
 
-	genCfg := buildGenerationConfig(geminiPayload)
+	genCfg, sharedGenCfg := buildGenerationConfig(geminiPayload)
 	// 在最终出站层执行，确保 OpenAI Chat/Responses、Anthropic 以及 Gemini
 	// 原生请求都一致遵守 drop_max_tokens。转换层仍负责校验兼容协议字段。
+	gemini36 := isGemini36Model(resolvedModel)
+	if len(genCfg) > 0 && sharedGenCfg && (cfg.DropMaxTokens() || gemini36) {
+		genCfg = copyMap(genCfg)
+	}
 	if cfg.DropMaxTokens() {
 		delete(genCfg, "maxOutputTokens")
 	}
@@ -225,15 +231,51 @@ func BuildVertexVariables(model string, geminiPayload map[string]any, cfg config
 	return vars
 }
 
+// canonicalTextContentsCanPassThrough 只接受最常见且已完全规范的纯文本形状。
+// 对工具、媒体、thought、额外字段、旧角色名或空文本一律回退完整归一化，
+// 因而可以安全跳过六轮递归扫描而不改变兼容行为。
+func canonicalTextContentsCanPassThrough(contents any) bool {
+	list, ok := contents.([]any)
+	if !ok {
+		return false
+	}
+	for _, rawContent := range list {
+		content, ok := rawContent.(map[string]any)
+		if !ok || len(content) != 2 {
+			return false
+		}
+		role, _ := content["role"].(string)
+		if role != "user" && role != "model" {
+			return false
+		}
+		parts, ok := content["parts"].([]any)
+		if !ok || len(parts) == 0 {
+			return false
+		}
+		for _, rawPart := range parts {
+			part, ok := rawPart.(map[string]any)
+			if !ok || len(part) != 1 {
+				return false
+			}
+			text, ok := part["text"].(string)
+			if !ok || text == "" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // normalizeSafetySettings makes native Gemini requests behave like converted
 // OpenAI requests when clients send an empty list or protobuf UNSPECIFIED
 // threshold values. Explicit, meaningful thresholds are preserved.
-func normalizeSafetySettings(raw any, cfg config.ConfigProvider) []any {
+func normalizeSafetySettings(raw any, cfg config.ConfigProvider) []vertexSafetySetting {
+	configuredSettings := cfg.SafetySettings()
 	settings, ok := raw.([]any)
 	if !ok || len(settings) == 0 {
-		return buildSafetySettings(cfg)
+		return buildSafetySettingsFromMap(configuredSettings)
 	}
-	out := make([]any, 0, len(settings))
+	out := make([]vertexSafetySetting, 0, len(settings))
 	for _, itemRaw := range settings {
 		item, ok := itemRaw.(map[string]any)
 		if !ok {
@@ -246,14 +288,14 @@ func normalizeSafetySettings(raw any, cfg config.ConfigProvider) []any {
 		threshold := strings.ToUpper(strings.TrimSpace(toString(item["threshold"])))
 		if threshold == "" || strings.Contains(threshold, "UNSPECIFIED") {
 			threshold = "BLOCK_NONE"
-			if configured, exists := cfg.SafetySettings()[category]; exists && configured != "" {
+			if configured, exists := configuredSettings[category]; exists && configured != "" {
 				threshold = configured
 			}
 		}
-		out = append(out, map[string]any{"category": category, "threshold": threshold})
+		out = append(out, vertexSafetySetting{Category: category, Threshold: threshold})
 	}
 	if len(out) == 0 {
-		return buildSafetySettings(cfg)
+		return buildSafetySettingsFromMap(configuredSettings)
 	}
 	return out
 }
@@ -311,25 +353,68 @@ func normalizeContents(contents any) any {
 	case map[string]any:
 		return []any{normalizeContent(c)}
 	case []any:
-		normalized := []any{}
+		var normalized []any
 		var pendingText []any
-		for _, item := range c {
+		ensureNormalized := func(prefixEnd int) {
+			if normalized == nil {
+				normalized = make([]any, 0, len(c))
+				normalized = append(normalized, c[:prefixEnd]...)
+			}
+		}
+		flushPending := func() {
+			if len(pendingText) == 0 {
+				return
+			}
+			normalized = append(normalized, map[string]any{"role": "user", "parts": pendingText})
+			pendingText = nil
+		}
+		for index, item := range c {
 			if s, ok := item.(string); ok {
+				ensureNormalized(index)
 				pendingText = append(pendingText, map[string]any{"text": s})
 			} else if m, ok := item.(map[string]any); ok {
 				if len(pendingText) > 0 {
-					normalized = append(normalized, map[string]any{"role": "user", "parts": pendingText})
-					pendingText = nil
+					flushPending()
 				}
-				normalized = append(normalized, normalizeContent(m))
+				normalizedContent, changed := normalizeContentCopy(m)
+				if normalized != nil {
+					normalized = append(normalized, normalizedContent)
+				} else if changed {
+					ensureNormalized(index)
+					normalized = append(normalized, normalizedContent)
+				}
+			} else {
+				ensureNormalized(index)
 			}
 		}
 		if len(pendingText) > 0 {
-			normalized = append(normalized, map[string]any{"role": "user", "parts": pendingText})
+			flushPending()
+		}
+		if normalized == nil {
+			normalized = c
 		}
 
 		// 合并相邻的具有相同 normalized 角色的 content 回合，确保角色严格交替
-		merged := []any{}
+		mergeNeeded := false
+		for index := 1; index < len(normalized); index++ {
+			current, currentOK := normalized[index].(map[string]any)
+			previous, previousOK := normalized[index-1].(map[string]any)
+			if !currentOK || !previousOK {
+				continue
+			}
+			currentRole, _ := current["role"].(string)
+			previousRole, _ := previous["role"].(string)
+			if (currentRole == "function" || currentRole == "tool") &&
+				(previousRole == "function" || previousRole == "tool") {
+				mergeNeeded = true
+				break
+			}
+		}
+		if !mergeNeeded {
+			return normalized
+		}
+
+		merged := make([]any, 0, len(normalized))
 		for _, item := range normalized {
 			m, ok := item.(map[string]any)
 			if !ok {
@@ -344,18 +429,18 @@ func normalizeContents(contents any) any {
 						if lastRole == "function" || lastRole == "tool" {
 							lastParts, _ := last["parts"].([]any)
 							currentParts, _ := m["parts"].([]any)
-							last["parts"] = append(lastParts, currentParts...)
+							combinedParts := make([]any, 0, len(lastParts)+len(currentParts))
+							combinedParts = append(combinedParts, lastParts...)
+							combinedParts = append(combinedParts, currentParts...)
+							combined := copyMap(last)
+							combined["parts"] = combinedParts
+							merged[len(merged)-1] = combined
 							continue
 						}
 					}
 				}
 			}
-			// 浅拷贝一份 map，避免在重试（第二次走 pipeline）时污染原始的 geminiPayload
-			newM := make(map[string]any, len(m))
-			for k, v := range m {
-				newM[k] = v
-			}
-			merged = append(merged, newM)
+			merged = append(merged, m)
 		}
 		return merged
 	default:
@@ -365,66 +450,117 @@ func normalizeContents(contents any) any {
 
 // normalizeContent 归一单个 content（role 映射 + content→parts + str→text）。
 func normalizeContent(content map[string]any) map[string]any {
-	n := copyMap(content)
-	_, hasContent := n["content"]
-	_, hasParts := n["parts"]
+	normalized, _ := normalizeContentCopy(content)
+	return normalized
+}
+
+func normalizeContentCopy(content map[string]any) (map[string]any, bool) {
+	n := content
+	changed := false
+	ensureCopy := func() {
+		if !changed {
+			n = copyMap(content)
+			changed = true
+		}
+	}
+	_, hasContent := content["content"]
+	_, hasParts := content["parts"]
 	switch {
 	case hasContent && !hasParts:
-		n["parts"] = normalizeParts(n["content"])
+		ensureCopy()
+		n["parts"] = normalizeParts(content["content"])
 		delete(n, "content")
 	case hasParts:
-		n["parts"] = normalizeParts(n["parts"])
+		parts, partsChanged := normalizePartsCopy(content["parts"])
+		if partsChanged {
+			ensureCopy()
+			n["parts"] = parts
+		}
 	default:
-		if t, hasText := n["text"]; hasText {
+		ensureCopy()
+		if t, hasText := content["text"]; hasText {
 			n["parts"] = []any{map[string]any{"text": toString(t)}}
 			delete(n, "text")
 		} else {
 			n["parts"] = []any{}
 		}
 	}
-	switch role, _ := n["role"].(string); role {
+	switch role, _ := content["role"].(string); role {
 	case "assistant":
+		ensureCopy()
 		n["role"] = "model"
 	case "tool":
+		ensureCopy()
 		n["role"] = "function"
 	case "":
+		ensureCopy()
 		n["role"] = "user"
 	}
-	return n
+	return n, changed
 }
 
 // normalizeParts 把 parts 归一为 part 列表。
 func normalizeParts(parts any) []any {
+	normalized, _ := normalizePartsCopy(parts)
+	return normalized
+}
+
+func normalizePartsCopy(parts any) ([]any, bool) {
 	switch p := parts.(type) {
 	case nil:
-		return []any{}
+		return []any{}, true
 	case string:
-		return []any{map[string]any{"text": p}}
+		return []any{map[string]any{"text": p}}, true
 	case map[string]any:
-		return []any{normalizePart(p)}
+		return []any{normalizePart(p)}, true
 	case []any:
-		out := []any{}
-		for _, item := range p {
-			if s, ok := item.(string); ok {
-				out = append(out, map[string]any{"text": s})
-			} else if m, ok := item.(map[string]any); ok {
-				if np := normalizePart(m); len(np) > 0 {
-					out = append(out, np)
-				}
+		var out []any
+		ensureOut := func(prefixEnd int) {
+			if out == nil {
+				out = make([]any, 0, len(p))
+				out = append(out, p[:prefixEnd]...)
 			}
 		}
-		return out
+		for index, item := range p {
+			if s, ok := item.(string); ok {
+				ensureOut(index)
+				out = append(out, map[string]any{"text": s})
+			} else if m, ok := item.(map[string]any); ok {
+				normalizedPart, changed := normalizePartCopy(m)
+				if len(normalizedPart) == 0 {
+					ensureOut(index)
+					continue
+				}
+				if out != nil {
+					out = append(out, normalizedPart)
+				} else if changed {
+					ensureOut(index)
+					out = append(out, normalizedPart)
+				}
+			} else {
+				ensureOut(index)
+			}
+		}
+		if out != nil {
+			return out, true
+		}
+		return p, false
 	default:
-		return []any{map[string]any{"text": toString(parts)}}
+		return []any{map[string]any{"text": toString(parts)}}, true
 	}
 }
 
 // normalizePart 把 OpenAI 风格 part 归一为 Gemini part。
 func normalizePart(part map[string]any) map[string]any {
+	normalized, _ := normalizePartCopy(part)
+	return normalized
+}
+
+func normalizePartCopy(part map[string]any) (map[string]any, bool) {
 	pt, _ := part["type"].(string)
 	switch pt {
 	case "text", "input_text":
-		return map[string]any{"text": toString(part["text"])}
+		return map[string]any{"text": toString(part["text"])}, true
 
 	case "image_url", "input_image":
 		var url string
@@ -436,11 +572,11 @@ func normalizePart(part map[string]any) map[string]any {
 		}
 		if strings.HasPrefix(url, "data:") {
 			if mime, data := parseDataURI(url); mime != "" && data != "" {
-				return map[string]any{"inlineData": map[string]any{"mimeType": mime, "data": data}}
+				return map[string]any{"inlineData": map[string]any{"mimeType": mime, "data": data}}, true
 			}
 		}
 		if strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") || strings.HasPrefix(url, "gs://") {
-			return map[string]any{"fileData": map[string]any{"mimeType": guessMIMEFromURI(url), "fileUri": url}}
+			return map[string]any{"fileData": map[string]any{"mimeType": guessMIMEFromURI(url), "fileUri": url}}, true
 		}
 
 	case "media", "file", "file_data":
@@ -450,7 +586,7 @@ func normalizePart(part map[string]any) map[string]any {
 			if mime == "" {
 				mime = guessMIMEFromURI(fileURI)
 			}
-			return map[string]any{"fileData": map[string]any{"mimeType": mime, "fileUri": fileURI}}
+			return map[string]any{"fileData": map[string]any{"mimeType": mime, "fileUri": fileURI}}, true
 		}
 
 	case "inline_data", "inlineData":
@@ -463,63 +599,124 @@ func normalizePart(part map[string]any) map[string]any {
 		data := toString(inline["data"])
 		mime := firstTruthyString(inline["mimeType"], inline["mime_type"], part["mimeType"], part["mime_type"])
 		if data != "" && mime != "" {
-			return map[string]any{"inlineData": map[string]any{"mimeType": mime, "data": data}}
+			return map[string]any{"inlineData": map[string]any{"mimeType": mime, "data": data}}, true
 		}
 	}
 
-	out := map[string]any{}
+	var out map[string]any
 	for k, v := range part {
 		if k == "type" {
+			if out == nil {
+				out = copyMap(part)
+			}
+			delete(out, k)
 			continue
 		}
-		out[SnakeToCamel(k)] = v
+		camelKey := SnakeToCamel(k)
+		if camelKey == k {
+			continue
+		}
+		if out == nil {
+			out = copyMap(part)
+		}
+		delete(out, k)
+		out[camelKey] = v
 	}
-	return out
+	if out != nil {
+		return out, true
+	}
+	return part, false
 }
 
 // handleInlineDataCase 递归把键 camelCase 化。
 func handleInlineDataCase(contents any) any {
+	normalized, _ := handleInlineDataCaseCopy(contents)
+	return normalized
+}
+
+func handleInlineDataCaseCopy(contents any) (any, bool) {
 	switch c := contents.(type) {
 	case []any:
-		out := make([]any, len(c))
+		var out []any
 		for i, item := range c {
-			out[i] = handleInlineDataCase(item)
+			normalized, changed := handleInlineDataCaseCopy(item)
+			if !changed {
+				continue
+			}
+			if out == nil {
+				out = append([]any(nil), c...)
+			}
+			out[i] = normalized
 		}
-		return out
+		if out != nil {
+			return out, true
+		}
+		return contents, false
 	case map[string]any:
-		out := map[string]any{}
+		var out map[string]any
 		for k, v := range c {
 			camelK := SnakeToCamel(k)
+			normalized := v
+			changed := camelK != k
 			switch camelK {
 			case "inlineData":
 				if vm, ok := v.(map[string]any); ok {
-					nid := map[string]any{}
+					var normalizedInline map[string]any
 					for ik, iv := range vm {
-						nid[SnakeToCamel(ik)] = iv
+						camelInlineKey := SnakeToCamel(ik)
+						if camelInlineKey == ik {
+							continue
+						}
+						if normalizedInline == nil {
+							normalizedInline = copyMap(vm)
+						}
+						delete(normalizedInline, ik)
+						normalizedInline[camelInlineKey] = iv
 					}
-					out["inlineData"] = nid
-					continue
+					if normalizedInline != nil {
+						normalized = normalizedInline
+						changed = true
+					}
 				}
-				out[camelK] = handleInlineDataCase(v)
 			case "functionCall":
 				if vm, ok := v.(map[string]any); ok {
-					out["functionCall"] = camelizeFunctionRef(vm, "args")
-					continue
+					normalized = camelizeFunctionRef(vm, "args")
+					changed = true
+				} else if nested, nestedChanged := handleInlineDataCaseCopy(v); nestedChanged {
+					normalized = nested
+					changed = true
 				}
-				out[camelK] = handleInlineDataCase(v)
 			case "functionResponse":
 				if vm, ok := v.(map[string]any); ok {
-					out["functionResponse"] = camelizeFunctionRef(vm, "response")
-					continue
+					normalized = camelizeFunctionRef(vm, "response")
+					changed = true
+				} else if nested, nestedChanged := handleInlineDataCaseCopy(v); nestedChanged {
+					normalized = nested
+					changed = true
 				}
-				out[camelK] = handleInlineDataCase(v)
 			default:
-				out[camelK] = handleInlineDataCase(v)
+				if nested, nestedChanged := handleInlineDataCaseCopy(v); nestedChanged {
+					normalized = nested
+					changed = true
+				}
 			}
+			if !changed {
+				continue
+			}
+			if out == nil {
+				out = copyMap(c)
+			}
+			if camelK != k {
+				delete(out, k)
+			}
+			out[camelK] = normalized
 		}
-		return out
+		if out != nil {
+			return out, true
+		}
+		return contents, false
 	default:
-		return contents
+		return contents, false
 	}
 }
 
@@ -549,14 +746,21 @@ func filterEmptyContents(contents any) any {
 		return contents
 	}
 
-	callIDMap := map[string]string{}
+	var callIDMap map[string]string
 	var lastModelFunctionCalls []string
 	responseIndex := 0
 
-	filtered := []any{}
-	for _, c := range list {
+	var filtered []any
+	ensureFiltered := func(prefixEnd int) {
+		if filtered == nil {
+			filtered = make([]any, 0, len(list))
+			filtered = append(filtered, list[:prefixEnd]...)
+		}
+	}
+	for contentIndex, c := range list {
 		cm, ok := c.(map[string]any)
 		if !ok {
+			ensureFiltered(contentIndex)
 			continue
 		}
 		role, _ := cm["role"].(string)
@@ -571,6 +775,9 @@ func filterEmptyContents(contents any) any {
 						if name, _ := fc["name"].(string); strings.TrimSpace(name) != "" {
 							lastModelFunctionCalls = append(lastModelFunctionCalls, name)
 							if fid, _ := fc["id"].(string); fid != "" {
+								if callIDMap == nil {
+									callIDMap = make(map[string]string)
+								}
 								callIDMap[fid] = name
 							}
 						}
@@ -580,9 +787,22 @@ func filterEmptyContents(contents any) any {
 		}
 
 		var cleanedParts []any
-		for _, p := range parts {
+		ensureCleanedParts := func(prefixEnd int) {
+			if cleanedParts == nil {
+				cleanedParts = make([]any, 0, len(parts))
+				cleanedParts = append(cleanedParts, parts[:prefixEnd]...)
+			}
+		}
+		for partIndex, p := range parts {
 			pm, ok := p.(map[string]any)
 			if !ok {
+				ensureCleanedParts(partIndex)
+				continue
+			}
+			if cleanPartCanPassThrough(pm) {
+				if cleanedParts != nil {
+					cleanedParts = append(cleanedParts, pm)
+				}
 				continue
 			}
 			_, isFuncResponse := pm["functionResponse"]
@@ -592,36 +812,88 @@ func filterEmptyContents(contents any) any {
 				responseIndex++
 			}
 			if cleaned, ok := cleanPartWithID(pm, lastModelFunctionCalls, idx, callIDMap); ok {
+				ensureCleanedParts(partIndex)
 				cleanedParts = append(cleanedParts, cleaned)
+			} else {
+				ensureCleanedParts(partIndex)
 			}
+		}
+		partsChanged := cleanedParts != nil
+		if !partsChanged {
+			cleanedParts = parts
 		}
 		if len(cleanedParts) > 0 {
-			nc := copyMap(cm)
-			nc["parts"] = cleanedParts
-			filtered = append(filtered, nc)
+			if partsChanged {
+				ensureFiltered(contentIndex)
+				nc := copyMap(cm)
+				nc["parts"] = cleanedParts
+				filtered = append(filtered, nc)
+			} else if filtered != nil {
+				filtered = append(filtered, cm)
+			}
+		} else {
+			ensureFiltered(contentIndex)
 		}
 	}
-	return filtered
+	if filtered != nil {
+		return filtered
+	}
+	return list
 }
 
-func stripGeminiIDs(val any) {
-	switch v := val.(type) {
-	case map[string]any:
-		for k, mv := range v {
-			if s, ok := mv.(string); ok && strings.HasPrefix(s, "gemini-tool-call-") {
-				if len(s) > 11 && strings.Contains(s, "-vp") {
-					idx := strings.LastIndex(s, "-vp")
-					if idx > 0 && len(s)-idx == 11 {
-						v[k] = s[:idx]
-					}
-				}
-			} else {
-				stripGeminiIDs(mv)
+const maxGeminiIDStripDepth = 256
+
+// stripGeminiIDsCopy 只复制包含需要清洗 ID 的祖先 map/slice。绝大多数请求
+// 不包含代理追加的 -vpXXXXXXXX 后缀，因此直接返回原树，允许并发候选安全共享。
+func stripGeminiIDsCopy(value any, depth int) (any, bool) {
+	if depth > maxGeminiIDStripDepth {
+		return value, false
+	}
+	switch typed := value.(type) {
+	case string:
+		if strings.HasPrefix(typed, "gemini-tool-call-") && len(typed) > 11 && strings.Contains(typed, "-vp") {
+			index := strings.LastIndex(typed, "-vp")
+			if index > 0 && len(typed)-index == 11 {
+				return typed[:index], true
 			}
 		}
-	case []any:
-		for _, item := range v {
-			stripGeminiIDs(item)
+		return value, false
+	case map[string]any:
+		var copied map[string]any
+		for key, child := range typed {
+			normalized, changed := stripGeminiIDsCopy(child, depth+1)
+			if !changed {
+				continue
+			}
+			if copied == nil {
+				copied = make(map[string]any, len(typed))
+				for originalKey, originalValue := range typed {
+					copied[originalKey] = originalValue
+				}
+			}
+			copied[key] = normalized
 		}
+		if copied != nil {
+			return copied, true
+		}
+		return value, false
+	case []any:
+		var copied []any
+		for index, child := range typed {
+			normalized, changed := stripGeminiIDsCopy(child, depth+1)
+			if !changed {
+				continue
+			}
+			if copied == nil {
+				copied = append([]any(nil), typed...)
+			}
+			copied[index] = normalized
+		}
+		if copied != nil {
+			return copied, true
+		}
+		return value, false
+	default:
+		return value, false
 	}
 }

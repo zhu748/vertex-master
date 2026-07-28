@@ -8,6 +8,10 @@ import (
 
 const skipThoughtSentinel = "skip_thought_signature_validator"
 
+var encodedSkipThoughtSentinel = base64.StdEncoding.EncodeToString( //nolint:gochecknoglobals
+	[]byte(skipThoughtSentinel),
+)
+
 // NormalizeBase64 规范化 base64：剥离 data URI 前缀、URL-safe 字符还原、补 padding。
 func NormalizeBase64(data string) string {
 	value := strings.TrimSpace(data)
@@ -145,6 +149,45 @@ func cleanPartWithID(part map[string]any, functionCallNames []string, responseIn
 	return nil, false
 }
 
+// cleanPartCanPassThrough 识别无需删字段、补名称或写 thoughtSignature 的标准
+// Gemini part。返回原只读 map 可避免普通文本/媒体 part 每次请求都重新分配。
+func cleanPartCanPassThrough(part map[string]any) bool {
+	hasValid := false
+	for key, value := range part {
+		switch key {
+		case "text":
+			if value == nil || toString(value) == "" {
+				return false
+			}
+			hasValid = true
+		case "inlineData":
+			inline, ok := value.(map[string]any)
+			if !ok || !truthyStr(inline["data"]) || !truthyStr(inline["mimeType"]) {
+				return false
+			}
+			hasValid = true
+		case "fileData":
+			file, ok := value.(map[string]any)
+			if !ok || !truthyStr(file["fileUri"]) || !truthyStr(file["mimeType"]) {
+				return false
+			}
+			hasValid = true
+		case "executableCode", "codeExecutionResult":
+			if !isTruthy(value) {
+				return false
+			}
+			hasValid = true
+		case "videoMetadata", "mediaResolution":
+			if !isTruthy(value) {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return hasValid
+}
+
 // fixFunctionCallArgs 拷贝 functionCall 并把字符串 args 解析为对象。
 func fixFunctionCallArgs(fc map[string]any) map[string]any {
 	fixed := copyMap(fc)
@@ -189,122 +232,218 @@ func finalizeCleanedPart(cleaned map[string]any) {
 
 // EncodeThoughtSignature 递归把 thoughtSignature 的 sentinel 值 base64 编码。
 func EncodeThoughtSignature(contents any, depth int) any {
+	encoded, _ := encodeThoughtSignatureCopy(contents, depth)
+	return encoded
+}
+
+func encodeThoughtSignatureCopy(contents any, depth int) (any, bool) {
 	const maxDepth = 64
 	if depth > maxDepth {
-		return contents
+		return contents, false
 	}
 	switch v := contents.(type) {
 	case []any:
-		out := make([]any, len(v))
+		var out []any
 		for i, item := range v {
-			out[i] = EncodeThoughtSignature(item, depth+1)
+			encoded, changed := encodeThoughtSignatureCopy(item, depth+1)
+			if !changed {
+				continue
+			}
+			if out == nil {
+				out = append([]any(nil), v...)
+			}
+			out[i] = encoded
 		}
-		return out
+		if out != nil {
+			return out, true
+		}
+		return contents, false
 	case map[string]any:
-		out := map[string]any{}
+		var out map[string]any
 		for k, val := range v {
 			if k == "parts" {
 				if parts, ok := val.([]any); ok {
-					newParts := make([]any, len(parts))
+					var newParts []any
 					for i, p := range parts {
 						if pm, ok := p.(map[string]any); ok {
-							np := copyMap(pm)
-							if sig, ok := np["thoughtSignature"].(string); ok && sig == skipThoughtSentinel {
-								np["thoughtSignature"] = base64.StdEncoding.EncodeToString([]byte(sig))
+							if sig, ok := pm["thoughtSignature"].(string); ok && sig == skipThoughtSentinel {
+								if newParts == nil {
+									newParts = append([]any(nil), parts...)
+								}
+								np := copyMap(pm)
+								np["thoughtSignature"] = encodedSkipThoughtSentinel
+								newParts[i] = np
 							}
-							newParts[i] = np
-						} else {
-							newParts[i] = p
 						}
 					}
-					out[k] = newParts
+					if newParts != nil {
+						if out == nil {
+							out = copyMap(v)
+						}
+						out[k] = newParts
+					}
 					continue
 				}
 			}
-			switch val.(type) {
-			case map[string]any, []any:
-				out[k] = EncodeThoughtSignature(val, depth+1)
-			default:
-				out[k] = val
+			if encoded, changed := encodeThoughtSignatureCopy(val, depth+1); changed {
+				if out == nil {
+					out = copyMap(v)
+				}
+				out[k] = encoded
 			}
 		}
-		return out
+		if out != nil {
+			return out, true
+		}
+		return contents, false
 	default:
-		return contents
+		return contents, false
 	}
 }
 
 // HandleBase64InContents 递归规范化 contents 中 inlineData 的 base64 数据。
 func HandleBase64InContents(contents any) any {
+	normalized, _ := handleBase64InContentsCopy(contents)
+	return normalized
+}
+
+func handleBase64InContentsCopy(contents any) (any, bool) {
 	switch v := contents.(type) {
 	case []any:
-		out := make([]any, len(v))
+		var out []any
 		for i, item := range v {
-			out[i] = HandleBase64InContents(item)
+			normalized, changed := handleBase64InContentsCopy(item)
+			if !changed {
+				continue
+			}
+			if out == nil {
+				out = append([]any(nil), v...)
+			}
+			out[i] = normalized
 		}
-		return out
+		if out != nil {
+			return out, true
+		}
+		return contents, false
 	case map[string]any:
-		out := map[string]any{}
+		var out map[string]any
 		for k, val := range v {
+			normalized := val
+			changed := false
+			handledInlineData := false
 			if k == "inlineData" {
 				if id, ok := val.(map[string]any); ok {
 					if data, ok := id["data"].(string); ok {
-						ni := copyMap(id)
-						ni["data"] = NormalizeBase64(data)
-						out[k] = ni
-						continue
+						handledInlineData = true
+						normalizedData := NormalizeBase64(data)
+						if normalizedData != data {
+							ni := copyMap(id)
+							ni["data"] = normalizedData
+							normalized = ni
+							changed = true
+						}
 					}
 				}
 			}
-			out[k] = HandleBase64InContents(val)
+			if !handledInlineData {
+				if nested, nestedChanged := handleBase64InContentsCopy(val); nestedChanged {
+					normalized = nested
+					changed = true
+				}
+			}
+			if !changed {
+				continue
+			}
+			if out == nil {
+				out = copyMap(v)
+			}
+			out[k] = normalized
 		}
-		return out
+		if out != nil {
+			return out, true
+		}
+		return contents, false
 	default:
-		return contents
+		return contents, false
 	}
+}
+
+// ContentBlockMerger 增量合并相邻同类型文本块。它让流式调用方无需先保留
+// 全部 part，再在响应结束时做第二遍扫描。
+type ContentBlockMerger struct {
+	merged  []map[string]any
+	current map[string]any
+	text    StringAccumulator
+}
+
+// NewContentBlockMerger 创建增量合并器。capacityHint 仅用于预分配最终块切片，
+// 上限与 MergeContentBlocks 原有策略一致，避免不可信输入触发过量预分配。
+func NewContentBlockMerger(capacityHint int) *ContentBlockMerger {
+	capacityHint = min(max(capacityHint, 0), 32)
+	return &ContentBlockMerger{merged: make([]map[string]any, 0, capacityHint)}
+}
+
+// Add 加入一个内容块；输入 map 不会被修改。
+func (m *ContentBlockMerger) Add(part map[string]any) {
+	if m == nil {
+		return
+	}
+	if !truthyStr(part["text"]) {
+		cleaned := cleanSimple(part)
+		if cleaned == nil {
+			return
+		}
+		m.flushText()
+		m.merged = append(m.merged, cleaned)
+		return
+	}
+
+	isThought := isTruthy(part["thought"])
+	if m.current != nil && isTruthy(m.current["thought"]) == isThought {
+		m.text.WriteString(toString(part["text"]))
+		if sig, ok := part["thoughtSignature"]; ok {
+			if _, exists := m.current["thoughtSignature"]; !exists {
+				m.current["thoughtSignature"] = sig
+			}
+		}
+		return
+	}
+
+	m.flushText()
+	m.current = make(map[string]any, 3)
+	if isThought {
+		m.current["thought"] = true
+		if sig, ok := part["thoughtSignature"]; ok {
+			m.current["thoughtSignature"] = sig
+		}
+	}
+	m.text.WriteString(toString(part["text"]))
+}
+
+// Result 刷新最后一个文本块并返回合并结果。重复调用是安全的。
+func (m *ContentBlockMerger) Result() []map[string]any {
+	if m == nil {
+		return nil
+	}
+	m.flushText()
+	return m.merged
+}
+
+func (m *ContentBlockMerger) flushText() {
+	if m.current == nil {
+		return
+	}
+	m.current["text"] = m.text.String()
+	m.merged = append(m.merged, m.current)
+	m.current = nil
+	m.text.Reset()
 }
 
 // MergeContentBlocks 合并相邻同类型文本块（thought+thought、text+text）。
 func MergeContentBlocks(parts []map[string]any) []map[string]any {
-	cleaned := make([]map[string]any, 0, len(parts))
-	for _, p := range parts {
-		if c := cleanSimple(p); c != nil {
-			cleaned = append(cleaned, c)
-		}
+	merger := NewContentBlockMerger(len(parts))
+	for _, part := range parts {
+		merger.Add(part)
 	}
-	if len(cleaned) == 0 {
-		return []map[string]any{}
-	}
-
-	merged := make([]map[string]any, 0, len(cleaned))
-	var current map[string]any
-
-	for _, part := range cleaned {
-		isText := truthyStr(part["text"])
-		if !isText {
-			merged = append(merged, part)
-			current = nil
-			continue
-		}
-		isThought := isTruthy(part["thought"])
-		if current != nil && isTruthy(current["thought"]) == isThought {
-			current["text"] = toString(current["text"]) + toString(part["text"])
-			if sig, ok := part["thoughtSignature"]; ok {
-				if _, exists := current["thoughtSignature"]; !exists {
-					current["thoughtSignature"] = sig
-				}
-			}
-		} else {
-			np := map[string]any{"text": toString(part["text"])}
-			if isThought {
-				np["thought"] = true
-				if sig, ok := part["thoughtSignature"]; ok {
-					np["thoughtSignature"] = sig
-				}
-			}
-			merged = append(merged, np)
-			current = np
-		}
-	}
-	return merged
+	return merger.Result()
 }

@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -171,6 +172,70 @@ func WriteSettings(updates map[string]any) error {
 	return nil
 }
 
+// writeSettingsIfUnchanged applies normalization results only while the
+// corresponding on-disk values still match the snapshot Load observed. This
+// prevents a delayed normalization goroutine from overwriting a newer admin
+// update to the same setting.
+func writeSettingsIfUnchanged(expected, updates map[string]any) error {
+	settingsWriteMu.Lock()
+	defer settingsWriteMu.Unlock()
+
+	path := configPath()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("读取待归一化配置 %s: %w", path, err)
+	}
+	raw := map[string]any{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return fmt.Errorf("解析待归一化配置 %s: %w", path, err)
+	}
+
+	changed := false
+	for key, value := range updates {
+		original, tracked := expected[key]
+		current, exists := raw[key]
+		if !tracked || !exists || !settingValuesEqual(current, original) {
+			continue
+		}
+		raw[key] = value
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+
+	if err := writeJSONFile(path, raw); err != nil {
+		return err
+	}
+	InvalidateCache()
+	return nil
+}
+
+func settingValuesEqual(left, right any) bool {
+	leftNumber, leftIsNumber := settingNumber(left)
+	rightNumber, rightIsNumber := settingNumber(right)
+	if leftIsNumber && rightIsNumber {
+		return leftNumber == rightNumber
+	}
+	return reflect.DeepEqual(left, right)
+}
+
+func settingNumber(value any) (float64, bool) {
+	switch v := value.(type) {
+	case int:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	case float64:
+		return v, true
+	case json.Number:
+		number, err := v.Float64()
+		return number, err == nil
+	default:
+		return 0, false
+	}
+}
+
 func clampIntSetting(raw map[string]any, key string, minimum, maximum int) {
 	var value int
 	switch v := raw[key].(type) {
@@ -228,20 +293,30 @@ func Load() AppConfig {
 			log.Printf("[Config] 解析 config.json 失败: %v", errUnm)
 		} else {
 			normalized := map[string]any{}
+			expected := map[string]any{}
+			recordNormalization := func(key string, original, value int) {
+				if _, recorded := expected[key]; !recorded {
+					expected[key] = original
+				}
+				normalized[key] = value
+			}
 			// 自动补偿 RequestTimeout 默认值
 			if cfg.RequestTimeout <= 0 {
+				original := cfg.RequestTimeout
 				cfg.RequestTimeout = 180
-				normalized["request_timeout"] = cfg.RequestTimeout
+				recordNormalization("request_timeout", original, cfg.RequestTimeout)
 			} else if cfg.RequestTimeout > 1800 {
 				log.Printf("[Config] 警告: 请求超时配置过高 (%d)，已限制为上限 1800", cfg.RequestTimeout)
+				original := cfg.RequestTimeout
 				cfg.RequestTimeout = 1800
-				normalized["request_timeout"] = cfg.RequestTimeout
+				recordNormalization("request_timeout", original, cfg.RequestTimeout)
 			}
 			normalize := func(key string, target *int, minimum, maximum, fallback int) {
-				value := clampInt(*target, minimum, maximum, fallback)
-				if value != *target {
+				original := *target
+				value := clampInt(original, minimum, maximum, fallback)
+				if value != original {
 					*target = value
-					normalized[key] = value
+					recordNormalization(key, original, value)
 				}
 			}
 			normalize("parallel_pool_size", &cfg.ParallelPoolSize, 1, 20, 5)
@@ -270,18 +345,27 @@ func Load() AppConfig {
 				cfg.ProxyHealthCheckConcurrency,
 				cfg.ProxyHealthCheckTimeoutSeconds,
 			); cfg.ProxyHealthCheckBatchSize > maximum {
+				original := cfg.ProxyHealthCheckBatchSize
 				cfg.ProxyHealthCheckBatchSize = maximum
-				normalized["proxy_health_check_batch_size"] = maximum
+				recordNormalization("proxy_health_check_batch_size", original, maximum)
 			}
 			if cfg.ProxyFailoverMaxAttempts < cfg.ParallelPoolSize {
+				original := cfg.ProxyFailoverMaxAttempts
 				cfg.ProxyFailoverMaxAttempts = cfg.ParallelPoolSize
-				normalized["proxy_failover_max_attempts"] = cfg.ProxyFailoverMaxAttempts
+				recordNormalization(
+					"proxy_failover_max_attempts",
+					original,
+					cfg.ProxyFailoverMaxAttempts,
+				)
 			}
 			if len(normalized) > 0 {
-				// 异步回写，避免阻塞加载，并保留未知字段
-				go func(updates map[string]any) {
-					_ = WriteSettings(updates)
-				}(normalized)
+				// 异步回写，避免阻塞加载；仅修改仍与本次读取一致的值，
+				// 防止覆盖管理员在此期间提交的新配置。
+				go func(expectedValues, updates map[string]any) {
+					if err := writeSettingsIfUnchanged(expectedValues, updates); err != nil {
+						log.Printf("[Config] 自动回写归一化配置失败: %v", err)
+					}
+				}(expected, normalized)
 			}
 			log.Printf("[Config] 成功加载配置文件 config.json")
 		}

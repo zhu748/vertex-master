@@ -18,9 +18,18 @@ var safetyCategories = []string{ //nolint:gochecknoglobals
 	"HARM_CATEGORY_CIVIC_INTEGRITY",
 }
 
-// supportedVarFields 是从 geminiPayload 透传进 variables 的字段（统一 camelCase）。
-var supportedVarFields = []string{ //nolint:gochecknoglobals
-	"contents", "tools", "toolConfig", "systemInstruction", "safetySettings", "generationConfig",
+// supportedVarFields 是从 geminiPayload 透传进 variables 的字段及其 snake_case
+// 别名。固定表避免每个请求重复做正则键转换。
+var supportedVarFields = []struct { //nolint:gochecknoglobals
+	camel string
+	snake string
+}{
+	{camel: "contents", snake: "contents"},
+	{camel: "tools", snake: "tools"},
+	{camel: "toolConfig", snake: "tool_config"},
+	{camel: "systemInstruction", snake: "system_instruction"},
+	{camel: "safetySettings", snake: "safety_settings"},
+	{camel: "generationConfig", snake: "generation_config"},
 }
 
 // ConvertChatRequest 将 OpenAI ChatCompletion 请求体转为 (model, geminiPayload)。

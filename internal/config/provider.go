@@ -20,6 +20,8 @@ type ConfigProvider interface {
 	VertexAPIKey() string
 	CountTokensQuerySignature() string
 
+	// SafetySettings returns the immutable map from the active configuration
+	// snapshot. Callers must not mutate it.
 	SafetySettings() map[string]string
 
 	ParallelPoolEnabled() bool
@@ -83,24 +85,17 @@ func (d dynamicConfig) MaxSpillMB() int                   { return Load().MaxSpi
 func (d dynamicConfig) RequestTimeout() int               { return Load().RequestTimeout }
 func (d dynamicConfig) VertexAPIKey() string              { return Load().VertexAPIKey }
 func (d dynamicConfig) CountTokensQuerySignature() string { return Load().CountTokensQuerySignature }
-func (d dynamicConfig) SafetySettings() map[string]string {
-	c := Load()
-	out := make(map[string]string, len(c.SafetySettings))
-	for k, v := range c.SafetySettings {
-		out[k] = v
-	}
-	return out
-}
-func (d dynamicConfig) ParallelPoolEnabled() bool      { return Load().ParallelPoolEnabled }
-func (d dynamicConfig) StickyNodePriority() bool       { return Load().StickyNodePriority }
-func (d dynamicConfig) ParallelPoolRetryEnabled() bool { return Load().ParallelPoolRetryEnabled }
-func (d dynamicConfig) ParallelPoolSize() int          { return Load().ParallelPoolSize }
-func (d dynamicConfig) ParallelPoolDelayDynamic() bool { return Load().ParallelPoolDelayDynamic }
-func (d dynamicConfig) ParallelPoolDelayMs() int       { return Load().ParallelPoolDelayMs }
-func (d dynamicConfig) ProxyFailoverMaxAttempts() int  { return Load().ProxyFailoverMaxAttempts }
-func (d dynamicConfig) ActiveNodeURI() string          { return Load().ActiveNodeURI }
-func (d dynamicConfig) ParallelNodeTopK() int          { return Load().ParallelNodeTopK }
-func (d dynamicConfig) ProxyHealthCheckEnabled() bool  { return Load().ProxyHealthCheckEnabled }
+func (d dynamicConfig) SafetySettings() map[string]string { return Load().SafetySettings }
+func (d dynamicConfig) ParallelPoolEnabled() bool         { return Load().ParallelPoolEnabled }
+func (d dynamicConfig) StickyNodePriority() bool          { return Load().StickyNodePriority }
+func (d dynamicConfig) ParallelPoolRetryEnabled() bool    { return Load().ParallelPoolRetryEnabled }
+func (d dynamicConfig) ParallelPoolSize() int             { return Load().ParallelPoolSize }
+func (d dynamicConfig) ParallelPoolDelayDynamic() bool    { return Load().ParallelPoolDelayDynamic }
+func (d dynamicConfig) ParallelPoolDelayMs() int          { return Load().ParallelPoolDelayMs }
+func (d dynamicConfig) ProxyFailoverMaxAttempts() int     { return Load().ProxyFailoverMaxAttempts }
+func (d dynamicConfig) ActiveNodeURI() string             { return Load().ActiveNodeURI }
+func (d dynamicConfig) ParallelNodeTopK() int             { return Load().ParallelNodeTopK }
+func (d dynamicConfig) ProxyHealthCheckEnabled() bool     { return Load().ProxyHealthCheckEnabled }
 func (d dynamicConfig) ProxyHealthCheckIntervalMinutes() int {
 	return Load().ProxyHealthCheckIntervalMinutes
 }

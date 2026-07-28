@@ -264,7 +264,7 @@ func addLogLine(text string) {
 
 // ─── 公共 API ───
 
-func InitTracker(fileLogger io.Writer) {
+func InitTracker(fileLogger io.Writer) func() {
 	additionalLogWriter = fileLogger
 	fileInfo, err := osStdout.Stat()
 	if err == nil && (fileInfo.Mode()&os.ModeCharDevice) != 0 {
@@ -274,7 +274,7 @@ func InitTracker(fileLogger io.Writer) {
 
 		log.SetOutput(logInterceptor{})
 
-		onResizeOS(func() {
+		stopResizeWatcher := onResizeOS(func() {
 			mu.Lock()
 			newW := getTerminalWidth()
 			if newW != terminalWidth {
@@ -284,30 +284,55 @@ func InitTracker(fileLogger io.Writer) {
 			mu.Unlock()
 		})
 
+		stopTicker := make(chan struct{})
+		tickerDone := make(chan struct{})
 		go func() {
+			defer close(tickerDone)
 			ticker := time.NewTicker(120 * time.Millisecond)
 			defer ticker.Stop()
-			for range ticker.C {
-				mu.Lock()
-				spinnerIdx = (spinnerIdx + 1) % len(spinners)
-				if envW := getTerminalWidth(); envW != terminalWidth {
-					terminalWidth = envW
-					needsRedraw = true
+			for {
+				select {
+				case <-ticker.C:
+					mu.Lock()
+					spinnerIdx = (spinnerIdx + 1) % len(spinners)
+					if envW := getTerminalWidth(); envW != terminalWidth {
+						terminalWidth = envW
+						needsRedraw = true
+					}
+					if needsRedraw || len(activeReqs) > 0 {
+						drawTUI()
+					}
+					mu.Unlock()
+				case <-stopTicker:
+					return
 				}
-				if needsRedraw || len(activeReqs) > 0 {
-					drawTUI()
-				}
-				mu.Unlock()
 			}
 		}()
 
 		printBanner()
+		var stopOnce sync.Once
+		return func() {
+			stopOnce.Do(func() {
+				stopResizeWatcher()
+				close(stopTicker)
+				<-tickerDone
+				mu.Lock()
+				enabled = false
+				mu.Unlock()
+				if fileLogger != nil {
+					log.SetOutput(io.MultiWriter(os.Stderr, fileLogger))
+				} else {
+					log.SetOutput(os.Stderr)
+				}
+			})
+		}
 	} else {
 		// Non-TTY environment (e.g. Docker without -it), TUI is disabled.
 		// We still need to write logs to both os.Stderr and the fileLogger.
 		if fileLogger != nil {
 			log.SetOutput(io.MultiWriter(os.Stderr, fileLogger))
 		}
+		return func() {}
 	}
 }
 

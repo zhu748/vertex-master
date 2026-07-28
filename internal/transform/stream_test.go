@@ -1,9 +1,67 @@
 package transform
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
+
+var benchmarkSSELineResult string         //nolint:gochecknoglobals
+var benchmarkRealtimeChunkResult []string //nolint:gochecknoglobals
+
+func BenchmarkSSELine(b *testing.B) {
+	payload := map[string]any{
+		"id":      "chatcmpl-benchmark",
+		"object":  "chat.completion.chunk",
+		"created": int64(1234567890),
+		"model":   "gemini-benchmark",
+		"choices": []any{map[string]any{
+			"index":         0,
+			"delta":         map[string]any{"content": strings.Repeat("x", 256)},
+			"finish_reason": nil,
+		}},
+	}
+	b.ReportAllocs()
+	for range b.N {
+		benchmarkSSELineResult = sseLine(payload)
+	}
+}
+
+func BenchmarkConvertRealtimeChunkMultiEvent(b *testing.B) {
+	chunk := map[string]any{
+		"candidates": []any{map[string]any{
+			"content": map[string]any{"parts": []any{
+				map[string]any{"text": strings.Repeat("r", 128), "thought": true},
+				map[string]any{"text": strings.Repeat("x", 256)},
+			}},
+			"finishReason": "STOP",
+		}},
+		"usageMetadata": map[string]any{
+			"promptTokenCount":     100,
+			"candidatesTokenCount": 50,
+			"totalTokenCount":      150,
+		},
+	}
+	b.ReportAllocs()
+	for range b.N {
+		benchmarkRealtimeChunkResult = ConvertRealtimeChunk(chunk, "gemini-benchmark", "benchmark", true)
+	}
+}
+
+func BenchmarkConvertRealtimeChunkText(b *testing.B) {
+	chunk := map[string]any{
+		"candidates": []any{map[string]any{
+			"content": map[string]any{"parts": []any{
+				map[string]any{"text": strings.Repeat("x", 256)},
+			}},
+			"finishReason": FinishReasonUnspecified,
+		}},
+	}
+	b.ReportAllocs()
+	for range b.N {
+		benchmarkRealtimeChunkResult = ConvertRealtimeChunk(chunk, "gemini-benchmark", "benchmark", false)
+	}
+}
 
 // 真流式增量转换：首帧带 role delta，内容帧带 content delta，UNSPECIFIED 不发 finish。
 func TestConvertRealtimeChunk_FirstAndContent(t *testing.T) {
@@ -66,6 +124,9 @@ func TestConvertRealtimeChunk_RealFinishWithUsage(t *testing.T) {
 	if len(events) != 3 {
 		t.Fatalf("events=%d, want 3\n%v", len(events), events)
 	}
+	if strings.Contains(events[0], `"usage"`) || strings.Contains(events[1], `"usage"`) {
+		t.Fatalf("复用事件对象时 usage 泄漏到前序帧: %v", events)
+	}
 	finishEvt := events[1]
 	if !strings.Contains(finishEvt, `"finish_reason":"stop"`) {
 		t.Errorf("应发 finish_reason=stop: %s", finishEvt)
@@ -75,6 +136,61 @@ func TestConvertRealtimeChunk_RealFinishWithUsage(t *testing.T) {
 		!strings.Contains(usageEvt, `"usage"`) ||
 		!strings.Contains(usageEvt, `"total_tokens":15`) {
 		t.Errorf("应发送独立 usage 统计帧: %s", usageEvt)
+	}
+}
+
+func TestOpenAIStreamEncoderMatchesCompatibilityOutput(t *testing.T) {
+	encoder := NewOpenAIStreamEncoder("m", "r")
+	chunks := []struct {
+		chunk   map[string]any
+		isFirst bool
+	}{
+		{
+			isFirst: true,
+			chunk: map[string]any{
+				"candidates": []any{map[string]any{
+					"content": map[string]any{"parts": []any{
+						map[string]any{"text": "thinking", "thought": true},
+						map[string]any{"text": "answer"},
+					}},
+					"finishReason": "STOP",
+				}},
+				"usageMetadata": map[string]any{
+					"promptTokenCount": 11, "candidatesTokenCount": 7, "totalTokenCount": 18,
+				},
+			},
+		},
+		{
+			chunk: map[string]any{"candidates": []any{map[string]any{
+				"content":      map[string]any{"parts": []any{map[string]any{"text": "next"}}},
+				"finishReason": FinishReasonUnspecified,
+			}}},
+		},
+	}
+	for index, test := range chunks {
+		var got []string
+		result, ok := encoder.Emit(test.chunk, test.isFirst, func(payload any) bool {
+			got = append(got, sseLine(payload))
+			return true
+		})
+		if !ok {
+			t.Fatalf("chunk %d unexpectedly aborted", index)
+		}
+		want := ConvertRealtimeChunk(test.chunk, "m", "r", test.isFirst)
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("chunk %d direct events differ:\n got: %q\nwant: %q", index, got, want)
+		}
+		if index == 0 && (!result.HasContent || !result.HasFinish) {
+			t.Fatalf("first chunk flags=%+v, want content and finish", result)
+		}
+		if index == 1 {
+			if !result.HasContent || result.HasFinish {
+				t.Fatalf("second chunk flags=%+v, want content without finish", result)
+			}
+			if strings.Contains(got[0], `"usage"`) {
+				t.Fatalf("usage leaked from prior chunk: %s", got[0])
+			}
+		}
 	}
 }
 

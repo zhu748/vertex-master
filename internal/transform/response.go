@@ -91,10 +91,10 @@ func GeminiResponsesToOAIJSON(geminiResponses []map[string]any, model string) ma
 
 		if usageMeta, ok := resp["usageMetadata"].(map[string]any); ok {
 			anyUsage = true
-			u := ConvertUsageForCandidate(usageMeta, candidate)
-			totalPrompt += numOf(u["prompt_tokens"])
-			totalCompletion += numOf(u["completion_tokens"])
-			totalTokens += numOf(u["total_tokens"])
+			u := NormalizeUsageForCandidate(usageMeta, candidate)
+			totalPrompt += u.PromptTokens
+			totalCompletion += u.CompletionTokens
+			totalTokens += u.TotalTokens
 		}
 	}
 
@@ -123,12 +123,34 @@ func ConvertUsage(meta map[string]any) map[string]any {
 	return ConvertUsageForCandidate(meta, nil)
 }
 
+// NormalizedUsage is the allocation-free value representation shared by
+// protocol adapters before a concrete OpenAI-compatible JSON map is needed.
+type NormalizedUsage struct {
+	PromptTokens          int
+	CompletionTokens      int
+	TotalTokens           int
+	CachedInputTokens     int
+	PromptAudioTokens     int
+	PromptTextTokens      int
+	ReasoningTokens       int
+	CompletionImageTokens int
+	CompletionAudioTokens int
+	CompletionTextTokens  int
+}
+
 // ConvertUsageForCandidate 把 Gemini usageMetadata 转成 OpenAI usage，并利用候选项
 // tokenCount 补齐部分匿名/预览模型只返回 totalTokenCount 时缺失的输出分项。
 func ConvertUsageForCandidate(meta, candidate map[string]any) map[string]any {
-	promptDetailList := usageDetailList(meta, "promptTokensDetails", "prompt_tokens_details")
-	toolDetailList := usageDetailList(meta, "toolUsePromptTokensDetails", "tool_use_prompt_tokens_details")
-	candidateDetailList := usageDetailList(meta, "candidatesTokensDetails", "candidates_tokens_details")
+	return NormalizeUsageForCandidate(meta, candidate).OpenAIMap()
+}
+
+// NormalizeUsageForCandidate reads Gemini usage metadata into a value type.
+// It intentionally does not construct temporary maps so high-frequency stream
+// consumers can inspect accounting without allocating on every frame.
+func NormalizeUsageForCandidate(meta, candidate map[string]any) NormalizedUsage {
+	promptDetailList := usageDetailValues(meta, "promptTokensDetails", "prompt_tokens_details")
+	toolDetailList := usageDetailValues(meta, "toolUsePromptTokensDetails", "tool_use_prompt_tokens_details")
+	candidateDetailList := usageDetailValues(meta, "candidatesTokensDetails", "candidates_tokens_details")
 
 	promptBase := usageCount(meta, "promptTokenCount", "prompt_token_count", "prompt_tokens")
 	if promptBase == 0 {
@@ -163,48 +185,86 @@ func ConvertUsageForCandidate(meta, candidate map[string]any) map[string]any {
 			completion = total - prompt
 		}
 	}
-	result := map[string]any{
-		"prompt_tokens":     prompt,
-		"completion_tokens": completion,
-		"total_tokens":      total,
+	result := NormalizedUsage{
+		PromptTokens:      prompt,
+		CompletionTokens:  completion,
+		TotalTokens:       total,
+		CachedInputTokens: usageCount(meta, "cachedContentTokenCount", "cached_content_token_count"),
+		ReasoningTokens:   thoughts,
 	}
 
-	promptDetails := map[string]any{}
-	if c := usageCount(meta, "cachedContentTokenCount", "cached_content_token_count"); c > 0 {
-		promptDetails["cached_tokens"] = c
-	}
-	for _, d := range promptDetailList {
+	for _, raw := range promptDetailList {
+		d, _ := raw.(map[string]any)
+		if d == nil {
+			continue
+		}
 		count := usageDetailCount(d)
-		switch strings.ToUpper(toString(d["modality"])) {
-		case "AUDIO":
-			promptDetails["audio_tokens"] = numOf(promptDetails["audio_tokens"]) + count
-		case "TEXT":
-			promptDetails["text_tokens"] = numOf(promptDetails["text_tokens"]) + count
+		modality := toString(d["modality"])
+		switch {
+		case strings.EqualFold(modality, "AUDIO"):
+			result.PromptAudioTokens += count
+		case strings.EqualFold(modality, "TEXT"):
+			result.PromptTextTokens += count
 		}
 	}
-	if len(promptDetails) > 0 {
+
+	for _, raw := range candidateDetailList {
+		d, _ := raw.(map[string]any)
+		if d == nil {
+			continue
+		}
+		count := usageDetailCount(d)
+		modality := toString(d["modality"])
+		switch {
+		case strings.EqualFold(modality, "IMAGE"):
+			result.CompletionImageTokens += count
+		case strings.EqualFold(modality, "AUDIO"):
+			result.CompletionAudioTokens += count
+		case strings.EqualFold(modality, "TEXT"):
+			result.CompletionTextTokens += count
+		}
+	}
+
+	return result
+}
+
+// OpenAIMap materializes the wire-compatible OpenAI usage object only at the
+// serialization boundary.
+func (u NormalizedUsage) OpenAIMap() map[string]any {
+	result := map[string]any{
+		"prompt_tokens":     u.PromptTokens,
+		"completion_tokens": u.CompletionTokens,
+		"total_tokens":      u.TotalTokens,
+	}
+	if u.CachedInputTokens > 0 || u.PromptAudioTokens > 0 || u.PromptTextTokens > 0 {
+		promptDetails := make(map[string]any, 3)
+		if u.CachedInputTokens > 0 {
+			promptDetails["cached_tokens"] = u.CachedInputTokens
+		}
+		if u.PromptAudioTokens > 0 {
+			promptDetails["audio_tokens"] = u.PromptAudioTokens
+		}
+		if u.PromptTextTokens > 0 {
+			promptDetails["text_tokens"] = u.PromptTextTokens
+		}
 		result["prompt_tokens_details"] = promptDetails
 	}
-
-	completionDetails := map[string]any{}
-	if t := thoughts; t > 0 {
-		completionDetails["reasoning_tokens"] = t
-	}
-	for _, d := range candidateDetailList {
-		count := usageDetailCount(d)
-		switch strings.ToUpper(toString(d["modality"])) {
-		case "IMAGE":
-			completionDetails["image_tokens"] = numOf(completionDetails["image_tokens"]) + count
-		case "AUDIO":
-			completionDetails["audio_tokens"] = numOf(completionDetails["audio_tokens"]) + count
-		case "TEXT":
-			completionDetails["text_tokens"] = numOf(completionDetails["text_tokens"]) + count
+	if u.ReasoningTokens > 0 || u.CompletionImageTokens > 0 || u.CompletionAudioTokens > 0 || u.CompletionTextTokens > 0 {
+		completionDetails := make(map[string]any, 4)
+		if u.ReasoningTokens > 0 {
+			completionDetails["reasoning_tokens"] = u.ReasoningTokens
 		}
-	}
-	if len(completionDetails) > 0 {
+		if u.CompletionImageTokens > 0 {
+			completionDetails["image_tokens"] = u.CompletionImageTokens
+		}
+		if u.CompletionAudioTokens > 0 {
+			completionDetails["audio_tokens"] = u.CompletionAudioTokens
+		}
+		if u.CompletionTextTokens > 0 {
+			completionDetails["text_tokens"] = u.CompletionTextTokens
+		}
 		result["completion_tokens_details"] = completionDetails
 	}
-
 	return result
 }
 
@@ -217,9 +277,9 @@ func usageCount(values map[string]any, keys ...string) int {
 	return 0
 }
 
-func usageDetailList(meta map[string]any, keys ...string) []map[string]any {
+func usageDetailValues(meta map[string]any, keys ...string) []any {
 	for _, key := range keys {
-		if details := asMapSlice(meta[key]); len(details) > 0 {
+		if details, ok := meta[key].([]any); ok && len(details) > 0 {
 			return details
 		}
 	}
@@ -230,10 +290,12 @@ func usageDetailCount(detail map[string]any) int {
 	return usageCount(detail, "tokenCount", "tokens", "token_count")
 }
 
-func sumUsageDetails(details []map[string]any) int {
+func sumUsageDetails(details []any) int {
 	total := 0
-	for _, detail := range details {
-		total += usageDetailCount(detail)
+	for _, raw := range details {
+		if detail, ok := raw.(map[string]any); ok {
+			total += usageDetailCount(detail)
+		}
 	}
 	return total
 }

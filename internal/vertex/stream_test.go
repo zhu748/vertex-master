@@ -1,12 +1,114 @@
 package vertex
 
 import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bsfdsagfadg/vertex/internal/config"
+	"github.com/bsfdsagfadg/vertex/internal/recaptcha"
 )
+
+func BenchmarkScanStreamFrames(b *testing.B) {
+	const frameCount = 64
+	var raw strings.Builder
+	for index := range frameCount {
+		raw.WriteString(wrap(`{"candidates":[{"content":{"parts":[{"text":"chunk-` +
+			fmt.Sprintf("%02d", index) +
+			`"}],"role":"model"},"finishReason":"FINISH_REASON_UNSPECIFIED"}]}`))
+	}
+	payload := []byte(raw.String())
+	b.ReportAllocs()
+	b.SetBytes(int64(len(payload)))
+	b.ResetTimer()
+	for range b.N {
+		count := 0
+		err := scanStream(bytes.NewReader(payload), func(map[string]any) (bool, error) {
+			count++
+			return false, nil
+		})
+		if err != nil || count != frameCount {
+			b.Fatalf("scan err=%v count=%d", err, count)
+		}
+	}
+}
+
+func BenchmarkProcessStreamFrames(b *testing.B) {
+	const frameCount = 64
+	var raw strings.Builder
+	for index := range frameCount {
+		raw.WriteString(wrap(`{"candidates":[{"content":{"parts":[{"text":"chunk-` +
+			fmt.Sprintf("%02d", index) +
+			`"}],"role":"model"},"finishReason":"FINISH_REASON_UNSPECIFIED"}]}`))
+	}
+	payload := []byte(raw.String())
+	b.ReportAllocs()
+	b.SetBytes(int64(len(payload)))
+	b.ResetTimer()
+	for range b.N {
+		emitted := 0
+		err := scanStreamRaw(bytes.NewReader(payload), func(raw []byte) (bool, error) {
+			return processStreamingJSON(raw, func(map[string]any) bool {
+				emitted++
+				return true
+			})
+		})
+		if err != nil || emitted != frameCount {
+			b.Fatalf("process err=%v emitted=%d", err, emitted)
+		}
+	}
+}
+
+func BenchmarkProcessDirtyTextStreamFrames(b *testing.B) {
+	const frameCount = 64
+	var raw strings.Builder
+	for index := range frameCount {
+		raw.WriteString(wrap(`{"candidates":[{"content":{"parts":[{"data":"text","text":"chunk-` +
+			fmt.Sprintf("%02d", index) +
+			`","thought":false,"thoughtSignature":"","fileData":{},"functionCall":{},"functionResponse":{},"inlineData":{}}],"role":"model"},"finishReason":"FINISH_REASON_UNSPECIFIED","index":0}]}`))
+	}
+	payload := []byte(raw.String())
+	b.ReportAllocs()
+	b.SetBytes(int64(len(payload)))
+	b.ResetTimer()
+	for range b.N {
+		emitted := 0
+		err := scanStreamRaw(bytes.NewReader(payload), func(raw []byte) (bool, error) {
+			return processStreamingJSON(raw, func(map[string]any) bool {
+				emitted++
+				return true
+			})
+		})
+		if err != nil || emitted != frameCount {
+			b.Fatalf("process err=%v emitted=%d", err, emitted)
+		}
+	}
+}
+
+func TestScanStreamLargeSingleReadBatchPreservesOrder(t *testing.T) {
+	const frameCount = 1024
+	var raw strings.Builder
+	for index := range frameCount {
+		fmt.Fprintf(&raw, `{"index":%d}`, index)
+	}
+
+	seen := 0
+	err := scanStream(strings.NewReader(raw.String()), func(object map[string]any) (bool, error) {
+		if got := int(object["index"].(float64)); got != seen {
+			t.Fatalf("frame %d index=%d", seen, got)
+		}
+		seen++
+		return false, nil
+	})
+	if err != nil || seen != frameCount {
+		t.Fatalf("scan err=%v seen=%d", err, seen)
+	}
+}
 
 func TestEffectiveMaxRetriesDefaultsTo429RetryInParallelPool(t *testing.T) {
 	cfg := config.DefaultConfig()
@@ -25,22 +127,95 @@ func TestEffectiveMaxRetriesDefaultsTo429RetryInParallelPool(t *testing.T) {
 	}
 }
 
-// collectStream 把 scanStream 跑到底，收集所有 emit 出来的 chunk，返回 (chunks, 终止错误)。
-// onObject 用 processStreamingObject 的真实逻辑，确保测的是端到端的流式提取 + finishReason 过滤。
+func TestStreamingCancellationStopsTokenFetch(t *testing.T) {
+	started := make(chan struct{})
+	client := NewVertexAIClient(config.StaticProvider(config.DefaultConfig()))
+	client.SetTokenPool(recaptcha.NewTokenPoolCustomContext(
+		func(ctx context.Context, _ string) (string, error) {
+			close(started)
+			<-ctx.Done()
+			return "", ctx.Err()
+		},
+	))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	yielded := 0
+	go func() {
+		client.executeStreamingWithRetries(ctx, "gemini-test", map[string]any{}, "", func(StreamChunk) bool {
+			yielded++
+			return true
+		})
+		close(done)
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("stream token fetch did not start")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("stream did not stop after cancellation")
+	}
+	if yielded != 0 {
+		t.Fatalf("canceled stream yielded %d chunks", yielded)
+	}
+}
+
+// collectStream 把生产使用的原始帧扫描跑到底，收集所有 emit 出来的 chunk。
 func collectStream(t *testing.T, raw string) (emitted []map[string]any, stopped bool, scanErr error) {
 	t.Helper()
 	emit := func(ch map[string]any) bool {
 		emitted = append(emitted, ch)
 		return true
 	}
-	scanErr = scanStream(strings.NewReader(raw), func(obj map[string]any) (bool, error) {
-		stop, err := processStreamingObject(obj, emit)
+	scanErr = scanStreamRaw(strings.NewReader(raw), func(frame []byte) (bool, error) {
+		stop, err := processStreamingJSON(frame, emit)
 		if stop {
 			stopped = true
 		}
 		return stop, err
 	})
 	return
+}
+
+func TestScanStreamRejectsOversizedObjects(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{name: "complete", raw: `{"value":"` + strings.Repeat("x", 128) + `"}`},
+		{name: "incomplete", raw: `{"value":"` + strings.Repeat("x", 128)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			called := false
+			err := scanStreamWithLimit(strings.NewReader(test.raw), 64, func(map[string]any) (bool, error) {
+				called = true
+				return false, nil
+			})
+			if !errors.Is(err, errStreamObjectTooLarge) || !strings.Contains(err.Error(), "exceeds 64 byte limit") {
+				t.Fatalf("oversized scan error=%v", err)
+			}
+			if called {
+				t.Fatal("oversized object reached callback")
+			}
+		})
+	}
+}
+
+func TestScanStreamAcceptsObjectAtLimit(t *testing.T) {
+	raw := `{"ok":true}`
+	called := false
+	err := scanStreamWithLimit(strings.NewReader(raw), len(raw), func(map[string]any) (bool, error) {
+		called = true
+		return false, nil
+	})
+	if err != nil || !called {
+		t.Fatalf("exact-limit object: called=%v err=%v", called, err)
+	}
 }
 
 // wrap 把一段 candidates JSON 包成匿名 batchGraphql 的 results.data.ui.streamGenerateContentAnonymous 结构。
@@ -120,8 +295,8 @@ func TestScanStream_SplitAcrossReads(t *testing.T) {
 	raw := wrap(`{"candidates":[{"content":{"parts":[{"text":"split me"}],"role":"model"},"finishReason":"STOP"}]}`)
 	// 逐字节投喂（最极端的分片），状态机必须能正确续扫。
 	emitted := []map[string]any{}
-	err := scanStream(&splitReader{data: []byte(raw), chunk: 1}, func(obj map[string]any) (bool, error) {
-		stop, err := processStreamingObject(obj, func(ch map[string]any) bool {
+	err := scanStreamRaw(&splitReader{data: []byte(raw), chunk: 1}, func(frame []byte) (bool, error) {
+		stop, err := processStreamingJSON(frame, func(ch map[string]any) bool {
 			emitted = append(emitted, ch)
 			return true
 		})
@@ -150,6 +325,26 @@ func TestScanStream_BracesInsideString(t *testing.T) {
 	}
 	if got := firstPartText(emitted[0]); got != `a {nested} "quote" } brace` {
 		t.Errorf("text=%q（转义/字符串内花括号处理错误）", got)
+	}
+}
+
+func TestProcessStreamingJSONFallbackPreservesErrorsAndAlternateFormatting(t *testing.T) {
+	_, err := processStreamingJSON(
+		[]byte(`{"results":[{"errors":[{"message":"Failed to verify action"}]}]}`),
+		func(map[string]any) bool { return true },
+	)
+	if ve := asVertexError(err); ve == nil || ve.Kind != "auth" {
+		t.Fatalf("fallback error=%v, want auth", err)
+	}
+
+	formatted := []byte(` { "results": [ { "data": { "ui": { "streamGenerateContentAnonymous": { "candidates": [ { "content": { "parts": [ { "text": "formatted" } ] } } ] } } } } ] } `)
+	var emitted map[string]any
+	stop, err := processStreamingJSON(formatted, func(chunk map[string]any) bool {
+		emitted = chunk
+		return true
+	})
+	if err != nil || stop || emitted == nil || firstPartText(emitted) != "formatted" {
+		t.Fatalf("formatted fallback stop=%v err=%v emitted=%#v", stop, err, emitted)
 	}
 }
 
@@ -230,6 +425,107 @@ func TestExtractChunk_AttachesMetadata(t *testing.T) {
 	}
 	if chunk["modelVersion"] != "gemini-3.1-flash" {
 		t.Errorf("modelVersion=%v", chunk["modelVersion"])
+	}
+}
+
+func TestExtractChunkCleansOwnedDataInPlace(t *testing.T) {
+	part := map[string]any{
+		"data":     "text",
+		"text":     "hello",
+		"fileData": map[string]any{},
+	}
+	content := map[string]any{
+		"parts":    []any{part},
+		"internal": "discard",
+	}
+	candidate := map[string]any{"content": content, "finishReason": "STOP"}
+	data := map[string]any{
+		"candidates": []any{candidate},
+		"unknown":    "discard",
+	}
+
+	chunk := extractChunk(data)
+	if chunk == nil {
+		t.Fatal("owned data should produce a chunk")
+	}
+	if _, ok := chunk["unknown"]; ok {
+		t.Fatalf("unknown root field leaked into chunk: %#v", chunk)
+	}
+	if _, ok := content["internal"]; ok {
+		t.Fatalf("unknown content field was not pruned: %#v", content)
+	}
+	if content["role"] != "model" {
+		t.Fatalf("default role=%v, want model", content["role"])
+	}
+	if _, ok := part["data"]; ok {
+		t.Fatalf("protobuf oneof marker was not removed: %#v", part)
+	}
+	if _, ok := part["fileData"]; ok {
+		t.Fatalf("empty fileData was not removed: %#v", part)
+	}
+
+	// JSON 帧取得唯一所有权后应复用 candidate/content/part，而不是重新复制。
+	part["ownershipProbe"] = true
+	returnedCandidates := chunk["candidates"].([]any)
+	returnedCandidate := returnedCandidates[0].(map[string]any)
+	returnedContent := returnedCandidate["content"].(map[string]any)
+	returnedParts := returnedContent["parts"].([]any)
+	if returnedParts[0].(map[string]any)["ownershipProbe"] != true {
+		t.Fatal("cleaned part did not retain transferred ownership")
+	}
+}
+
+func TestExtractChunkCanonicalFrameDoesNotAllocate(t *testing.T) {
+	data := map[string]any{"candidates": []any{map[string]any{
+		"content": map[string]any{
+			"role":  "model",
+			"parts": []any{map[string]any{"text": "hello"}},
+		},
+	}}}
+	if allocations := testing.AllocsPerRun(100, func() {
+		if chunk := extractChunk(data); chunk == nil {
+			t.Fatal("canonical frame unexpectedly disappeared")
+		}
+	}); allocations != 0 {
+		t.Fatalf("canonical extractChunk allocated %.1f times", allocations)
+	}
+}
+
+func TestExtractChunkWritesCompactedSliceHeaders(t *testing.T) {
+	content := map[string]any{
+		"role": "model",
+		"parts": []any{
+			map[string]any{"text": "hello"},
+			map[string]any{"thought": true},
+		},
+	}
+	data := map[string]any{"candidates": []any{
+		map[string]any{"content": content},
+		"invalid",
+	}}
+	chunk := extractChunk(data)
+	candidates := chunk["candidates"].([]any)
+	if len(candidates) != 1 {
+		t.Fatalf("candidate header was not compacted: %#v", candidates)
+	}
+	parts := candidates[0].(map[string]any)["content"].(map[string]any)["parts"].([]any)
+	if len(parts) != 1 || parts[0].(map[string]any)["text"] != "hello" {
+		t.Fatalf("parts header was not compacted: %#v", parts)
+	}
+}
+
+func TestCleanStreamCandidatesCompactsMixedValues(t *testing.T) {
+	candidate := map[string]any{"finishReason": "STOP"}
+	values := []any{"invalid", candidate, float64(3)}
+	cleaned := cleanStreamCandidates(values)
+	if len(cleaned) != 1 {
+		t.Fatalf("cleaned candidates=%#v, want one map", cleaned)
+	}
+	if cleaned[0].(map[string]any)["finishReason"] != "STOP" {
+		t.Fatalf("valid candidate changed: %#v", cleaned[0])
+	}
+	if values[1] != nil || values[2] != nil {
+		t.Fatalf("compacted tail should release references: %#v", values)
 	}
 }
 

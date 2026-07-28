@@ -92,6 +92,62 @@ func TestWriteSettingsMergesAndPreservesUnknown(t *testing.T) {
 	InvalidateCache() // 清理，避免影响其它测试
 }
 
+func TestWriteSettingsIfUnchangedPreservesNewerAdminValue(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("VPROXY_CONFIG", path)
+	InvalidateCache()
+	t.Cleanup(InvalidateCache)
+
+	initial := map[string]any{
+		"parallel_pool_size": 0,
+		"request_timeout":    0,
+		"custom_setting":     "keep-me",
+	}
+	if err := writeJSONFile(path, initial); err != nil {
+		t.Fatal(err)
+	}
+
+	// 模拟 Load 读取旧值后、异步归一化落盘前管理员更新了同一字段。
+	newer := map[string]any{
+		"parallel_pool_size": 10,
+		"request_timeout":    0,
+		"max_request_mb":     2048,
+		"custom_setting":     "keep-me",
+	}
+	if err := writeJSONFile(path, newer); err != nil {
+		t.Fatal(err)
+	}
+
+	err := writeSettingsIfUnchanged(
+		map[string]any{"parallel_pool_size": 0, "request_timeout": 0},
+		map[string]any{"parallel_pool_size": 5, "request_timeout": 180},
+	)
+	if err != nil {
+		t.Fatalf("writeSettingsIfUnchanged: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := map[string]any{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if raw["parallel_pool_size"] != float64(10) {
+		t.Fatalf("管理员的新值不应被旧归一化任务覆盖，got %v", raw["parallel_pool_size"])
+	}
+	if raw["request_timeout"] != float64(180) {
+		t.Fatalf("未变化的旧值仍应完成归一化，got %v", raw["request_timeout"])
+	}
+	if raw["max_request_mb"] != float64(2048) {
+		t.Fatalf("后台归一化不应顺带修改未跟踪的字段，got %v", raw["max_request_mb"])
+	}
+	if raw["custom_setting"] != "keep-me" {
+		t.Fatalf("未知字段应保留，got %v", raw["custom_setting"])
+	}
+}
+
 // TestWriteModelsRoundTrip 验证 WriteModels：写盘 + 热重载，BaseModels/AliasMap 立即读到新值。
 func TestWriteModelsRoundTrip(t *testing.T) {
 	dir := t.TempDir()

@@ -5,8 +5,21 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/bsfdsagfadg/vertex/internal/config"
 	"github.com/bsfdsagfadg/vertex/internal/vertex"
 )
+
+func TestMetricsBodyIncludesTokenCountStats(t *testing.T) {
+	vc := vertex.NewVertexAIClient(config.StaticProvider(config.DefaultConfig()))
+	body := metricsBody(vc)
+	stats, ok := body["token_count"].(vertex.TokenCountStats)
+	if !ok {
+		t.Fatalf("token_count stats missing: %#v", body)
+	}
+	if stats.CacheHits != 0 || stats.UpstreamQueries != 0 || stats.CacheEntries != 0 {
+		t.Fatalf("new client token stats should be empty: %#v", stats)
+	}
+}
 
 // TestWithMetrics 验证 withMetrics 中间件行为：
 // 设 X-Request-Id、注入 context、跳过健康检查端点。

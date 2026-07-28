@@ -117,7 +117,7 @@ func (h *AnthropicHandler) readAnthropicBody(w http.ResponseWriter, r *http.Requ
 }
 
 func anthropicToChatRequest(body map[string]any) (map[string]any, error) {
-	chat := map[string]any{}
+	chat := make(map[string]any, 12)
 	for _, pair := range [][2]string{
 		{"max_tokens", "max_completion_tokens"}, {"temperature", "temperature"},
 		{"top_p", "top_p"}, {"top_k", "top_k"}, {"stop_sequences", "stop"},
@@ -130,13 +130,13 @@ func anthropicToChatRequest(body map[string]any) (map[string]any, error) {
 		chat["thinking"] = thinking
 	}
 
-	messages := []any{}
-	if system := anthropicText(body["system"]); system != "" {
-		messages = append(messages, map[string]any{"role": "system", "content": system})
-	}
 	rawMessages, ok := body["messages"].([]any)
 	if !ok || len(rawMessages) == 0 {
 		return nil, fmt.Errorf("messages must be a non-empty array")
+	}
+	messages := make([]any, 0, len(rawMessages)+1)
+	if system := anthropicText(body["system"]); system != "" {
+		messages = append(messages, map[string]any{"role": "system", "content": system})
 	}
 	for _, raw := range rawMessages {
 		message, _ := raw.(map[string]any)
@@ -153,11 +153,11 @@ func anthropicToChatRequest(body map[string]any) (map[string]any, error) {
 		if role != "user" && role != "assistant" {
 			return nil, fmt.Errorf("message role %q must be 'user' or 'assistant'", role)
 		}
-		converted, err := anthropicMessageToChat(role, message["content"])
+		var err error
+		messages, err = appendAnthropicMessageToChat(messages, role, message["content"])
 		if err != nil {
 			return nil, err
 		}
-		messages = append(messages, converted...)
 	}
 	if len(messages) == 0 {
 		return nil, fmt.Errorf("messages did not contain supported content")
@@ -165,7 +165,7 @@ func anthropicToChatRequest(body map[string]any) (map[string]any, error) {
 	chat["messages"] = messages
 
 	if rawTools, ok := body["tools"].([]any); ok {
-		tools := []any{}
+		tools := make([]any, 0, len(rawTools))
 		for _, raw := range rawTools {
 			tool, _ := raw.(map[string]any)
 			if tool == nil || stringValue(tool["name"]) == "" {
@@ -202,7 +202,8 @@ func anthropicText(v any) string {
 	if text, ok := v.(string); ok {
 		return text
 	}
-	var values []string
+	var inline [8]string
+	values := inline[:0]
 	for _, raw := range anySlice(v) {
 		block, _ := raw.(map[string]any)
 		if stringValue(block["type"]) == "text" {
@@ -212,12 +213,12 @@ func anthropicText(v any) string {
 	return strings.Join(values, "\n")
 }
 
-func anthropicMessageToChat(role string, content any) ([]any, error) {
+func appendAnthropicMessageToChat(result []any, role string, content any) ([]any, error) {
 	if text, ok := content.(string); ok {
-		return []any{map[string]any{"role": role, "content": text}}, nil
+		return append(result, map[string]any{"role": role, "content": text}), nil
 	}
 	if role == "assistant" {
-		var text strings.Builder
+		var text transform.StringAccumulator
 		toolCalls := []any{}
 		for _, raw := range anySlice(content) {
 			block, _ := raw.(map[string]any)
@@ -235,10 +236,9 @@ func anthropicMessageToChat(role string, content any) ([]any, error) {
 		if len(toolCalls) > 0 {
 			msg["tool_calls"] = toolCalls
 		}
-		return []any{msg}, nil
+		return append(result, msg), nil
 	}
 
-	result := []any{}
 	regular := []any{}
 	flushRegular := func() {
 		if len(regular) > 0 {
@@ -302,11 +302,23 @@ func anthropicMessage(model, id string, out protocolOutput) map[string]any {
 		"id": id, "type": "message", "role": "assistant", "model": model,
 		"content": content, "stop_reason": anthropicStopReason(out.Finish, len(out.ToolCalls) > 0),
 		"stop_sequence": nil,
-		"usage": map[string]any{
-			"input_tokens": out.Input, "output_tokens": out.Output,
-			"cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
-		},
+		"usage":         anthropicUsage(out),
 	}
+}
+
+func anthropicUsage(out protocolOutput) map[string]any {
+	totalInput := max(out.Input, 0)
+	cacheRead := min(max(out.CachedInputTokens, 0), totalInput)
+	usage := map[string]any{
+		"input_tokens":                totalInput - cacheRead,
+		"output_tokens":               max(out.Output, 0),
+		"cache_creation_input_tokens": 0,
+		"cache_read_input_tokens":     cacheRead,
+	}
+	if thinking := min(max(out.ReasoningTokens, 0), max(out.Output, 0)); thinking > 0 {
+		usage["output_tokens_details"] = map[string]any{"thinking_tokens": thinking}
+	}
+	return usage
 }
 
 func anthropicStopReason(finish string, hasTools bool) string {
@@ -373,43 +385,72 @@ func (h *AnthropicHandler) streamMessages(
 		return
 	}
 	failed := false
-	var lastCandidate map[string]any
+	var lastCandidateTokenCount int
 	h.vc.StreamChat(ctx, model, payload, func(chunk vertex.StreamChunk) bool {
 		if chunk.Err != nil {
 			state.fail(chunk.Err)
 			failed = true
 			return false
 		}
-		data := cloneStringMap(chunk.Data)
-		normalizeStreamingGeminiUsage(data, &lastCandidate)
-		state.consume(outputFromGeminiChunk(data))
+		data := chunk.Data
+		normalizedUsage, hasUsage := normalizeStreamingGeminiUsage(data, &lastCandidateTokenCount)
+		state.consume(outputFromGeminiChunkWithUsage(data, normalizedUsage, hasUsage))
 		return true
 	})
 	pingCancel()
 	pingWg.Wait()
 	if !failed {
-		state.out = completeProtocolUsageWithCountTokens(ctx, h.vc, model, payload, state.out)
+		state.out = completeProtocolUsageWithCountTokens(ctx, h.vc, model, payload, state.output())
 		state.finish()
 	}
 }
 
 type anthropicStreamState struct {
-	sw            *sseWriter
-	id            string
-	model         string
-	index         int
-	openType      string
-	text          string
-	blockThinking string
-	out           protocolOutput
-	mu            sync.Mutex // 保护 sw 的并发写（ping goroutine 与主回调可能竞争）
+	sw                  *sseWriter
+	id                  string
+	model               string
+	index               int
+	openType            string
+	text                transform.StringAccumulator
+	blockThinking       transform.StringAccumulator
+	reasoningBlocks     []string
+	reasoningCache      string
+	reasoningCacheValid bool
+	deltaEvent          anthropicContentBlockDeltaEvent
+	out                 protocolOutput
+	mu                  sync.Mutex // 保护 sw 的并发写（ping goroutine 与主回调可能竞争）
+}
+
+type anthropicContentBlockDeltaEvent struct {
+	Type  string                     `json:"type"`
+	Index int                        `json:"index"`
+	Delta anthropicContentBlockDelta `json:"delta"`
+}
+
+type anthropicContentBlockDelta struct {
+	Type        string `json:"type"`
+	Text        string `json:"text,omitempty"`
+	Thinking    string `json:"thinking,omitempty"`
+	Signature   string `json:"signature,omitempty"`
+	PartialJSON string `json:"partial_json,omitempty"`
 }
 
 func (s *anthropicStreamState) emit(event string, fields map[string]any) {
 	fields["type"] = event
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_ = s.sw.write(namedSSE(event, fields))
+	_ = s.sw.writeNamed(event, fields)
+}
+
+func (s *anthropicStreamState) emitContentBlockDelta(delta anthropicContentBlockDelta) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.deltaEvent = anthropicContentBlockDeltaEvent{
+		Type:  "content_block_delta",
+		Index: s.index,
+		Delta: delta,
+	}
+	_ = s.sw.writeNamed("content_block_delta", &s.deltaEvent)
 }
 
 // emitPing 发送一个 Anthropic 协议的 ping 保活事件。
@@ -423,10 +464,7 @@ func (s *anthropicStreamState) start() {
 	s.emit("message_start", map[string]any{"message": map[string]any{
 		"id": s.id, "type": "message", "role": "assistant", "model": s.model,
 		"content": []any{}, "stop_reason": nil, "stop_sequence": nil,
-		"usage": map[string]any{
-			"input_tokens": 0, "output_tokens": 0,
-			"cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
-		},
+		"usage": anthropicUsage(protocolOutput{}),
 	}})
 }
 
@@ -440,6 +478,12 @@ func (s *anthropicStreamState) consume(chunk protocolOutput) {
 	if chunk.Total > 0 {
 		s.out.Total = chunk.Total
 	}
+	if chunk.CachedInputTokens > 0 {
+		s.out.CachedInputTokens = chunk.CachedInputTokens
+	}
+	if chunk.ReasoningTokens > 0 {
+		s.out.ReasoningTokens = chunk.ReasoningTokens
+	}
 	if chunk.Finish != "" {
 		s.out.Finish = chunk.Finish
 	}
@@ -447,16 +491,16 @@ func (s *anthropicStreamState) consume(chunk protocolOutput) {
 		if s.openType != "thinking" {
 			s.closeBlock()
 			s.openType = "thinking"
-			s.blockThinking = ""
+			s.blockThinking.Reset()
 			s.emit("content_block_start", map[string]any{
 				"index": s.index, "content_block": map[string]any{"type": "thinking", "thinking": "", "signature": ""},
 			})
 		}
-		s.emit("content_block_delta", map[string]any{
-			"index": s.index, "delta": map[string]any{"type": "thinking_delta", "thinking": chunk.Reasoning},
+		s.emitContentBlockDelta(anthropicContentBlockDelta{
+			Type: "thinking_delta", Thinking: chunk.Reasoning,
 		})
-		s.blockThinking += chunk.Reasoning
-		s.out.Reasoning += chunk.Reasoning
+		s.blockThinking.WriteString(chunk.Reasoning)
+		s.reasoningCacheValid = false
 	}
 	if chunk.Text != "" {
 		if s.openType != "text" {
@@ -466,11 +510,8 @@ func (s *anthropicStreamState) consume(chunk protocolOutput) {
 				"index": s.index, "content_block": map[string]any{"type": "text", "text": ""},
 			})
 		}
-		s.text += chunk.Text
-		s.out.Text += chunk.Text
-		s.emit("content_block_delta", map[string]any{
-			"index": s.index, "delta": map[string]any{"type": "text_delta", "text": chunk.Text},
-		})
+		s.text.WriteString(chunk.Text)
+		s.emitContentBlockDelta(anthropicContentBlockDelta{Type: "text_delta", Text: chunk.Text})
 	}
 	for _, tc := range chunk.ToolCalls {
 		s.closeBlock()
@@ -480,10 +521,8 @@ func (s *anthropicStreamState) consume(chunk protocolOutput) {
 				"type": "tool_use", "id": tc.ID, "name": tc.Name, "input": map[string]any{},
 			},
 		})
-		s.emit("content_block_delta", map[string]any{
-			"index": s.index, "delta": map[string]any{
-				"type": "input_json_delta", "partial_json": tc.Arguments,
-			},
+		s.emitContentBlockDelta(anthropicContentBlockDelta{
+			Type: "input_json_delta", PartialJSON: tc.Arguments,
 		})
 		s.emit("content_block_stop", map[string]any{"index": s.index})
 		s.index++
@@ -498,13 +537,12 @@ func (s *anthropicStreamState) closeBlock() {
 	if s.openType == "thinking" {
 		// Claude Code SDK 要求 thinking 块在 content_block_stop 前必须有非空
 		// signature_delta。连续思考增量必须共享同一个块，并对完整块签名。
-		s.emit("content_block_delta", map[string]any{
-			"index": s.index,
-			"delta": map[string]any{
-				"type": "signature_delta", "signature": thinkingSignature(s.blockThinking),
-			},
+		thinking := s.blockThinking.String()
+		s.emitContentBlockDelta(anthropicContentBlockDelta{
+			Type: "signature_delta", Signature: thinkingSignature(thinking),
 		})
-		s.blockThinking = ""
+		s.reasoningBlocks = append(s.reasoningBlocks, thinking)
+		s.blockThinking.Reset()
 	}
 	s.emit("content_block_stop", map[string]any{"index": s.index})
 	s.index++
@@ -513,17 +551,30 @@ func (s *anthropicStreamState) closeBlock() {
 
 func (s *anthropicStreamState) finish() {
 	s.closeBlock()
+	s.out = s.output()
 	s.emit("message_delta", map[string]any{
 		"delta": map[string]any{
 			"stop_reason":   anthropicStopReason(s.out.Finish, len(s.out.ToolCalls) > 0),
 			"stop_sequence": nil,
 		},
-		"usage": map[string]any{
-			"input_tokens": s.out.Input, "output_tokens": s.out.Output,
-			"cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
-		},
+		"usage": anthropicUsage(s.out),
 	})
 	s.emit("message_stop", map[string]any{})
+}
+
+func (s *anthropicStreamState) output() protocolOutput {
+	out := s.out
+	out.Text = s.text.String()
+	if !s.reasoningCacheValid {
+		current := ""
+		if s.openType == "thinking" {
+			current = s.blockThinking.String()
+		}
+		s.reasoningCache = joinProtocolTextBlocks(s.reasoningBlocks, current)
+		s.reasoningCacheValid = true
+	}
+	out.Reasoning = s.reasoningCache
+	return out
 }
 
 // thinkingSignature 生成一个伪签名供 Claude Code SDK 校验。

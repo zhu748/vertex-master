@@ -4,23 +4,196 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/bsfdsagfadg/vertex/internal/config"
 )
 
+var benchmarkSelectedNodes []Node //nolint:gochecknoglobals
+
 func resetState() {
 	mu.Lock()
 	defer mu.Unlock()
 	nodeList = nil
+	nodeIndexByURI = make(map[string]int)
 	healthMap = make(map[string]*NodeHealth)
 	subscriptionSources = make(map[string]map[int64]bool)
 	loaded = false
 	// 彻底清除物理磁盘缓存，防止测试间的数据污染
 	_ = os.Remove(filepath.Join(config.ConfigDir(), "nodes.json"))
 	_ = os.Remove(filepath.Join(config.ConfigDir(), "node_health.json"))
+}
+
+func BenchmarkWeightedNodeSample80Choose10(b *testing.B) {
+	candidates := make([]scoredNode, 80)
+	for index := range candidates {
+		candidates[index] = scoredNode{
+			node: Node{
+				Name:   fmt.Sprintf("node-%d", index),
+				RawURI: fmt.Sprintf("http://node-%d.invalid:8080", index),
+			},
+			score: float64(50 + index%25),
+		}
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		benchmarkSelectedNodes = weightedNodeSample(candidates, 10)
+	}
+}
+
+func BenchmarkSelectForParallelLargePool(b *testing.B) {
+	const nodeCount = 5000
+	nodes := make([]Node, nodeCount)
+	health := make(map[string]*NodeHealth, nodeCount)
+	sticky := NewStickyNodePool()
+	for index := range nodes {
+		uri := fmt.Sprintf("http://node-%d.invalid:8080", index)
+		nodes[index] = Node{Name: fmt.Sprintf("node-%d", index), RawURI: uri}
+		health[uri] = &NodeHealth{
+			SuccessCount:  20 + index%50,
+			LastTestMs:    float64(20 + index%200),
+			LastSuccessAt: time.Now().Unix(),
+		}
+		if index%50 == 0 {
+			sticky.Add(uri)
+		}
+	}
+
+	mu.Lock()
+	previousNodes, previousIndex, previousHealth, previousLoaded := nodeList, nodeIndexByURI, healthMap, loaded
+	previousSticky := globalStickyPool
+	nodeList, healthMap, loaded = nodes, health, true
+	rebuildNodeIndexUnsafe()
+	globalStickyPool = sticky
+	mu.Unlock()
+	b.Cleanup(func() {
+		mu.Lock()
+		nodeList, nodeIndexByURI, healthMap, loaded = previousNodes, previousIndex, previousHealth, previousLoaded
+		globalStickyPool = previousSticky
+		mu.Unlock()
+	})
+
+	b.Run("serial", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			_ = SelectForParallel(10, 80, false, true)
+		}
+	})
+	b.Run("parallel", func(b *testing.B) {
+		b.ReportAllocs()
+		b.RunParallel(func(pb *testing.PB) {
+			for pb.Next() {
+				_ = SelectForParallel(10, 80, false, true)
+			}
+		})
+	})
+}
+
+func BenchmarkRecordSelectionLargePool(b *testing.B) {
+	const nodeCount = 5000
+	nodes := make([]Node, nodeCount)
+	for index := range nodes {
+		uri := fmt.Sprintf("http://record-node-%d.invalid:8080", index)
+		nodes[index] = Node{Name: fmt.Sprintf("node-%d", index), RawURI: uri}
+	}
+	target := nodes[len(nodes)-1].RawURI
+
+	mu.Lock()
+	previousNodes, previousIndex, previousHealth, previousLoaded := nodeList, nodeIndexByURI, healthMap, loaded
+	nodeList, healthMap, loaded = nodes, make(map[string]*NodeHealth), true
+	rebuildNodeIndexUnsafe()
+	mu.Unlock()
+	b.Cleanup(func() {
+		mu.Lock()
+		nodeList, nodeIndexByURI, healthMap, loaded = previousNodes, previousIndex, previousHealth, previousLoaded
+		mu.Unlock()
+	})
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		RecordSelection(target)
+	}
+}
+
+func TestWeightedNodeSampleIsUniqueBoundedAndDoesNotMutateInput(t *testing.T) {
+	candidates := []scoredNode{
+		{node: Node{Name: "one", RawURI: "http://one.invalid"}, score: 1},
+		{node: Node{Name: "two", RawURI: "http://two.invalid"}, score: 20},
+		{node: Node{Name: "three", RawURI: "http://three.invalid"}, score: 100},
+	}
+	original := append([]scoredNode(nil), candidates...)
+	selected := weightedNodeSample(candidates, 10)
+	if len(selected) != len(candidates) {
+		t.Fatalf("selected length = %d, want %d", len(selected), len(candidates))
+	}
+	seen := make(map[string]bool, len(selected))
+	for _, node := range selected {
+		if seen[node.RawURI] {
+			t.Fatalf("node selected more than once: %q", node.RawURI)
+		}
+		seen[node.RawURI] = true
+	}
+	for index := range candidates {
+		if candidates[index] != original[index] {
+			t.Fatalf("input candidate %d mutated: got %#v, want %#v", index, candidates[index], original[index])
+		}
+	}
+	if got := weightedNodeSample(candidates, 0); got != nil {
+		t.Fatalf("zero count returned %#v, want nil", got)
+	}
+}
+
+func TestWeightedNodeSampleAboveInlineCapacity(t *testing.T) {
+	const candidateCount = 128
+	candidates := make([]scoredNode, candidateCount)
+	for index := range candidates {
+		uri := fmt.Sprintf("http://overflow-%d.invalid", index)
+		candidates[index] = scoredNode{node: Node{Name: uri, RawURI: uri}, score: float64(index + 1)}
+	}
+	original := append([]scoredNode(nil), candidates...)
+	selected := weightedNodeSample(candidates, 32)
+	if len(selected) != 32 {
+		t.Fatalf("selected length=%d, want 32", len(selected))
+	}
+	seen := make(map[string]bool, len(selected))
+	for _, node := range selected {
+		if seen[node.RawURI] {
+			t.Fatalf("node selected more than once above inline capacity: %q", node.RawURI)
+		}
+		seen[node.RawURI] = true
+	}
+	for index := range candidates {
+		if candidates[index] != original[index] {
+			t.Fatalf("overflow input candidate %d mutated", index)
+		}
+	}
+}
+
+func TestRetainHighestScoredKeepsOnlyTopK(t *testing.T) {
+	var retained []scoredNode
+	for _, score := range []float64{4, 1, 9, 3, 8, 2, 10, 7, 5, 6} {
+		retained = retainHighestScored(retained, scoredNode{
+			node: Node{RawURI: fmt.Sprintf("score-%.0f", score)}, score: score,
+		}, 4)
+	}
+	if len(retained) != 4 {
+		t.Fatalf("retained=%d, want 4", len(retained))
+	}
+	sort.Slice(retained, func(i, j int) bool { return retained[i].score > retained[j].score })
+	for index, want := range []float64{10, 9, 8, 7} {
+		if retained[index].score != want {
+			t.Fatalf("retained[%d]=%v, want %v: %#v", index, retained[index].score, want, retained)
+		}
+	}
+	if got := retainHighestScored(nil, scoredNode{score: 1}, 0); got != nil {
+		t.Fatalf("zero limit retained %#v", got)
+	}
 }
 
 func TestNodesLifecycle(t *testing.T) {
@@ -298,6 +471,31 @@ func TestSelectForParallelCooldownFallback(t *testing.T) {
 	}
 }
 
+func TestSelectForParallelAllCooldownKeepsEarliestK(t *testing.T) {
+	resetState()
+	defer resetState()
+
+	now := time.Now().Unix()
+	list := []Node{
+		{RawURI: "late", Name: "late"},
+		{RawURI: "early", Name: "early"},
+		{RawURI: "middle", Name: "middle"},
+	}
+	if err := MergeNodes(list); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	healthMap["late"] = &NodeHealth{LastFailAt: now, CooldownUntil: now + 300, Last429At: now + 30}
+	healthMap["early"] = &NodeHealth{LastFailAt: now, CooldownUntil: now + 100, Last429At: now + 10}
+	healthMap["middle"] = &NodeHealth{LastFailAt: now, CooldownUntil: now + 200, Last429At: now + 20}
+	mu.Unlock()
+
+	selected := SelectForParallel(2, 80, false, false)
+	if len(selected) != 2 || selected[0].RawURI != "early" || selected[1].RawURI != "middle" {
+		t.Fatalf("cooldown fallback=%#v, want early then middle", selected)
+	}
+}
+
 func TestSelectForParallelLimitsUntestedExploration(t *testing.T) {
 	resetState()
 	defer resetState()
@@ -325,6 +523,172 @@ func TestSelectForParallelLimitsUntestedExploration(t *testing.T) {
 	}
 	if untestedCount != 2 {
 		t.Fatalf("expected 20%% exploration, got %d untested nodes in %#v", untestedCount, selected)
+	}
+}
+
+func TestSelectForParallelAboveInlineCandidateCapacity(t *testing.T) {
+	resetState()
+	defer resetState()
+
+	const nodeCount = 160
+	now := time.Now().Unix()
+	list := make([]Node, nodeCount)
+	health := make(map[string]*NodeHealth, nodeCount)
+	for index := range list {
+		uri := fmt.Sprintf("healthy-%d", index)
+		list[index] = Node{RawURI: uri, Name: uri}
+		health[uri] = &NodeHealth{
+			SuccessCount:  index + 1,
+			LastSuccessAt: now,
+		}
+	}
+	mu.Lock()
+	nodeList, healthMap, loaded = list, health, true
+	rebuildNodeIndexUnsafe()
+	mu.Unlock()
+
+	selected := SelectForParallel(20, 128, false, false)
+	if len(selected) != 20 {
+		t.Fatalf("selected %d nodes above inline capacity, want 20", len(selected))
+	}
+	seen := make(map[string]bool, len(selected))
+	for _, node := range selected {
+		if seen[node.RawURI] {
+			t.Fatalf("selected duplicate node %q: %#v", node.RawURI, selected)
+		}
+		seen[node.RawURI] = true
+	}
+}
+
+func TestHealthCountersDecayAtMutation(t *testing.T) {
+	resetState()
+	defer resetState()
+	const uri = "decay-node"
+	if err := MergeNodes([]Node{{RawURI: uri, Name: uri}}); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	healthMap[uri] = &NodeHealth{
+		SuccessCount:   1000,
+		FailCount:      10,
+		RecentUseCount: 20,
+	}
+	mu.Unlock()
+
+	RecordTest(uri, true, 10, "")
+	health := LoadHealth()[uri]
+	if health == nil || health.SuccessCount != 500 || health.FailCount != 5 || health.RecentUseCount != 10 {
+		t.Fatalf("health counters were not decayed atomically: %#v", health)
+	}
+}
+
+func TestSelectForParallelSharesReadLock(t *testing.T) {
+	resetState()
+	defer resetState()
+	if err := MergeNodes([]Node{{RawURI: "read-node", Name: "read-node"}}); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	loaded = true
+	mu.Unlock()
+
+	mu.RLock()
+	done := make(chan []Node, 1)
+	go func() {
+		done <- SelectForParallel(1, 80, false, false)
+	}()
+	select {
+	case selected := <-done:
+		mu.RUnlock()
+		if len(selected) != 1 || selected[0].RawURI != "read-node" {
+			t.Fatalf("unexpected selection: %#v", selected)
+		}
+	case <-time.After(time.Second):
+		mu.RUnlock()
+		t.Fatal("read-only selection blocked behind another reader")
+	}
+}
+
+func TestSelectForParallelConcurrentWithHealthUpdates(t *testing.T) {
+	resetState()
+	defer resetState()
+	list := make([]Node, 100)
+	for index := range list {
+		uri := fmt.Sprintf("concurrent-%d", index)
+		list[index] = Node{RawURI: uri, Name: uri}
+	}
+	if err := MergeNodes(list); err != nil {
+		t.Fatal(err)
+	}
+	for _, node := range list {
+		RecordTest(node.RawURI, true, 20, "")
+	}
+	mu.Lock()
+	previousSticky := globalStickyPool
+	globalStickyPool = NewStickyNodePool()
+	mu.Unlock()
+	defer func() {
+		mu.Lock()
+		globalStickyPool = previousSticky
+		mu.Unlock()
+	}()
+
+	var workers sync.WaitGroup
+	for worker := range 8 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for iteration := range 100 {
+				if worker%2 == 0 {
+					selected := SelectForParallel(5, 80, false, true)
+					if len(selected) == 0 {
+						t.Errorf("iteration %d returned no nodes", iteration)
+						return
+					}
+				} else if worker == 7 {
+					node := list[iteration%len(list)]
+					if iteration%2 == 0 {
+						globalStickyPool.Add(node.RawURI)
+					} else {
+						globalStickyPool.Evict(node.RawURI)
+					}
+				} else {
+					node := list[(worker+iteration)%len(list)]
+					RecordSelection(node.RawURI)
+				}
+			}
+		}()
+	}
+	workers.Wait()
+}
+
+func TestNodeURIIndexSelfHealsAfterListMutation(t *testing.T) {
+	resetState()
+	defer resetState()
+
+	mu.Lock()
+	nodeList = []Node{
+		{RawURI: "removed", Name: "removed"},
+		{RawURI: "kept", Name: "kept"},
+	}
+	healthMap = make(map[string]*NodeHealth)
+	loaded = true
+	rebuildNodeIndexUnsafe()
+	// 模拟删除/重排后尚未触发索引重建：kept 从下标 1 移到 0。
+	nodeList = []Node{{RawURI: "kept", Name: "kept-renamed"}}
+	mu.Unlock()
+
+	RecordSelection("kept")
+	RecordSelection("removed")
+	health := LoadHealth()
+	if health["kept"] == nil || health["kept"].RecentUseCount != 1 {
+		t.Fatalf("kept node was not recorded after index rebuild: %#v", health["kept"])
+	}
+	if health["removed"] != nil {
+		t.Fatalf("removed node created orphan health: %#v", health["removed"])
+	}
+	if got := GetNodeName("kept"); got != "kept-renamed" {
+		t.Fatalf("indexed node name=%q", got)
 	}
 }
 
@@ -366,5 +730,19 @@ func TestSafeNodeLabelIsSingleLineAndBounded(t *testing.T) {
 	}
 	if got == "" {
 		t.Fatal("safe node label must not be empty")
+	}
+}
+
+func TestSafeNodeLabelPreservesCleanNameWithoutAllocation(t *testing.T) {
+	const name = "benchmark-node-2047"
+	if got := SafeNodeLabel(name); got != name {
+		t.Fatalf("SafeNodeLabel(%q) = %q", name, got)
+	}
+	if allocations := testing.AllocsPerRun(100, func() {
+		if got := SafeNodeLabel(name); got != name {
+			t.Fatalf("SafeNodeLabel(%q) = %q", name, got)
+		}
+	}); allocations != 0 {
+		t.Fatalf("clean node label allocated %.1f times", allocations)
 	}
 }

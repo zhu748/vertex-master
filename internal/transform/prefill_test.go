@@ -114,6 +114,21 @@ func TestAssistantPrefillStreamFilterPreservesMismatchAndPartialFinish(t *testin
 	}
 }
 
+func TestAssistantPrefillStreamFilterPreservesPartialThenMidChunkMismatch(t *testing.T) {
+	filter := NewAssistantPrefillStreamFilter("Alice:")
+	first := prefillTestChunk("Al", FinishReasonUnspecified)
+	filter.FilterGeminiChunk(first)
+	if got := prefillTestText(first); got != "" {
+		t.Fatalf("partial prefix should remain buffered, got %q", got)
+	}
+
+	second := prefillTestChunk("icX and more", "STOP")
+	filter.FilterGeminiChunk(second)
+	if got := prefillTestText(second); got != "AlicX and more" {
+		t.Fatalf("mid-chunk mismatch lost buffered bytes, got %q", got)
+	}
+}
+
 func TestAssistantPrefillStreamFilterFinishOnlyChunk(t *testing.T) {
 	filter := NewAssistantPrefillStreamFilter("Alice:")
 	first := prefillTestChunk("Ali", FinishReasonUnspecified)
@@ -140,6 +155,21 @@ func TestAssistantPrefillStreamFilterFinalizeReleasesPartial(t *testing.T) {
 	}
 	if got := filter.Finalize(); got != "" {
 		t.Fatalf("重复结束不得重复输出，got %q", got)
+	}
+}
+
+func BenchmarkAssistantPrefillStreamFilterSingleByteChunks(b *testing.B) {
+	prefix := strings.Repeat("x", 32<<10)
+	b.SetBytes(int64(len(prefix)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		filter := NewAssistantPrefillStreamFilter(prefix)
+		for index := range prefix {
+			if got := filter.filterText(prefix[index:index+1], false); got != "" {
+				b.Fatal("matching prefix should remain buffered")
+			}
+		}
 	}
 }
 

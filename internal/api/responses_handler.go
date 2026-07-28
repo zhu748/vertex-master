@@ -86,7 +86,7 @@ func (h *ResponsesHandler) handleResponses(w http.ResponseWriter, r *http.Reques
 }
 
 func responsesToChatRequest(body map[string]any) (map[string]any, error) {
-	chat := map[string]any{}
+	chat := make(map[string]any, min(len(body), 12))
 	for _, pair := range [][2]string{
 		{"temperature", "temperature"}, {"top_p", "top_p"},
 		{"max_output_tokens", "max_completion_tokens"}, {"parallel_tool_calls", "parallel_tool_calls"},
@@ -130,13 +130,17 @@ func responsesToChatRequest(body map[string]any) (map[string]any, error) {
 		chat[responsesNamespaceToolsKey] = namespaceTools
 	}
 
-	messages := []any{}
-	if instructions := responseInstructions(body["instructions"]); instructions != "" {
-		messages = append(messages, map[string]any{"role": "system", "content": instructions})
-	}
 	input, ok := body["input"]
 	if !ok || input == nil {
 		return nil, fmt.Errorf("missing required field 'input'")
+	}
+	messageCapacity := 2
+	if inputItems, isArray := input.([]any); isArray {
+		messageCapacity = len(inputItems) + 1
+	}
+	messages := make([]any, 0, messageCapacity)
+	if instructions := responseInstructions(body["instructions"]); instructions != "" {
+		messages = append(messages, map[string]any{"role": "system", "content": instructions})
 	}
 	switch value := input.(type) {
 	case string:
@@ -148,7 +152,7 @@ func responsesToChatRequest(body map[string]any) (map[string]any, error) {
 		if len(value) == 0 {
 			return nil, fmt.Errorf("'input' must not be empty")
 		}
-		pendingToolCalls := []any{}
+		var pendingToolCalls []any
 		flushToolCalls := func() {
 			if len(pendingToolCalls) == 0 {
 				return
@@ -227,17 +231,24 @@ func responsesToChatRequest(body map[string]any) (map[string]any, error) {
 }
 
 func convertResponsesTools(raw any) ([]any, map[string]responsesNamespacedTool, error) {
-	converted := []any{}
-	namespaced := map[string]responsesNamespacedTool{}
-	seenNames := map[string]bool{}
+	rawTools := anySlice(raw)
+	if len(rawTools) == 0 {
+		return nil, nil, nil
+	}
+	converted := make([]any, 0, len(rawTools))
+	var namespaced map[string]responsesNamespacedTool
+	var seenNames map[string]struct{}
 	appendFunction := func(tool map[string]any, name string) error {
 		if name == "" {
 			return fmt.Errorf("function tool is missing required field 'name'")
 		}
-		if seenNames[name] {
+		if _, exists := seenNames[name]; exists {
 			return fmt.Errorf("duplicate Responses function tool name %q", name)
 		}
-		seenNames[name] = true
+		if seenNames == nil {
+			seenNames = make(map[string]struct{}, len(rawTools))
+		}
+		seenNames[name] = struct{}{}
 		fn := map[string]any{"name": name}
 		for _, key := range []string{"description", "parameters", "strict"} {
 			if value, exists := tool[key]; exists {
@@ -248,7 +259,7 @@ func convertResponsesTools(raw any) ([]any, map[string]responsesNamespacedTool, 
 		return nil
 	}
 
-	for _, rawTool := range anySlice(raw) {
+	for _, rawTool := range rawTools {
 		tool, _ := rawTool.(map[string]any)
 		if tool == nil {
 			continue
@@ -265,7 +276,8 @@ func convertResponsesTools(raw any) ([]any, map[string]responsesNamespacedTool, 
 			}
 			// Codex 可能只发送 namespace 声明而不附带子工具（例如内置
 			// collaboration）。这种声明无法由 Gemini 调用，安全忽略即可。
-			for _, rawNested := range anySlice(tool["tools"]) {
+			nestedTools := anySlice(tool["tools"])
+			for _, rawNested := range nestedTools {
 				nested, _ := rawNested.(map[string]any)
 				if nested == nil {
 					continue
@@ -274,6 +286,9 @@ func convertResponsesTools(raw any) ([]any, map[string]responsesNamespacedTool, 
 				flatName := flattenResponsesToolName(namespace, name)
 				if err := appendFunction(nested, flatName); err != nil {
 					return nil, nil, err
+				}
+				if namespaced == nil {
+					namespaced = make(map[string]responsesNamespacedTool, len(nestedTools))
 				}
 				namespaced[flatName] = responsesNamespacedTool{Namespace: namespace, Name: name}
 			}
@@ -311,11 +326,12 @@ func responseInstructions(v any) string {
 	if s, ok := v.(string); ok {
 		return s
 	}
-	var parts []string
+	var inline [8]string
+	parts := inline[:0]
 	for _, raw := range anySlice(v) {
 		if item, ok := raw.(map[string]any); ok {
-			if text := stringValue(item["text"]); text != "" {
-				parts = append(parts, text)
+			if value := stringValue(item["text"]); value != "" {
+				parts = append(parts, value)
 			}
 		}
 	}
@@ -326,8 +342,9 @@ func responseContentToChat(v any) (any, error) {
 	if s, ok := v.(string); ok {
 		return s, nil
 	}
-	var content []any
-	for _, raw := range anySlice(v) {
+	rawContent := anySlice(v)
+	content := make([]any, 0, len(rawContent))
+	for _, raw := range rawContent {
 		item, _ := raw.(map[string]any)
 		if item == nil {
 			continue
@@ -457,20 +474,20 @@ func (h *ResponsesHandler) streamResponses(
 	}
 
 	failed := false
-	var lastCandidate map[string]any
+	var lastCandidateTokenCount int
 	h.vc.StreamChat(ctx, model, payload, func(chunk vertex.StreamChunk) bool {
 		if chunk.Err != nil {
 			state.fail(chunk.Err)
 			failed = true
 			return false
 		}
-		data := cloneStringMap(chunk.Data)
-		normalizeStreamingGeminiUsage(data, &lastCandidate)
-		state.consume(outputFromGeminiChunk(data))
+		data := chunk.Data
+		normalizedUsage, hasUsage := normalizeStreamingGeminiUsage(data, &lastCandidateTokenCount)
+		state.consume(outputFromGeminiChunkWithUsage(data, normalizedUsage, hasUsage))
 		return true
 	})
 	if !failed {
-		state.out = completeProtocolUsageWithCountTokens(ctx, h.vc, model, payload, state.out)
+		state.out = completeProtocolUsageWithCountTokens(ctx, h.vc, model, payload, state.output())
 		state.finish()
 	}
 }
@@ -484,17 +501,45 @@ type responsesStreamState struct {
 	sequence       int
 	outputIndex    int
 	textID         string
-	text           string
+	text           transform.StringAccumulator
+	textBlocks     []string
+	textCache      string
+	textCacheValid bool
 	textOpen       bool
+	textDeltaEvent responsesOutputTextDeltaEvent
 	items          []any
 	out            protocolOutput
+}
+
+type responsesOutputTextDeltaEvent struct {
+	Type           string `json:"type"`
+	SequenceNumber int    `json:"sequence_number"`
+	ItemID         string `json:"item_id"`
+	OutputIndex    int    `json:"output_index"`
+	ContentIndex   int    `json:"content_index"`
+	Delta          string `json:"delta"`
+	Logprobs       []any  `json:"logprobs"`
 }
 
 func (s *responsesStreamState) emit(event string, fields map[string]any) {
 	s.sequence++
 	fields["type"] = event
 	fields["sequence_number"] = s.sequence
-	_ = s.sw.write(namedSSE(event, fields))
+	_ = s.sw.writeNamed(event, fields)
+}
+
+func (s *responsesStreamState) emitTextDelta(delta string) {
+	s.sequence++
+	s.textDeltaEvent = responsesOutputTextDeltaEvent{
+		Type:           "response.output_text.delta",
+		SequenceNumber: s.sequence,
+		ItemID:         s.textID,
+		OutputIndex:    s.outputIndex,
+		ContentIndex:   0,
+		Delta:          delta,
+		Logprobs:       []any{},
+	}
+	_ = s.sw.writeNamed("response.output_text.delta", &s.textDeltaEvent)
 }
 
 func (s *responsesStreamState) responseObject(status string, out protocolOutput) map[string]any {
@@ -537,7 +582,7 @@ func (s *responsesStreamState) consume(chunk protocolOutput) {
 		if !s.textOpen {
 			s.textOpen = true
 			s.textID = "msg_" + reqID24()
-			s.text = ""
+			s.text.Reset()
 			s.emit("response.output_item.added", map[string]any{
 				"output_index": s.outputIndex,
 				"item": map[string]any{
@@ -550,12 +595,9 @@ func (s *responsesStreamState) consume(chunk protocolOutput) {
 				"part": map[string]any{"type": "output_text", "text": "", "annotations": []any{}, "logprobs": []any{}},
 			})
 		}
-		s.text += chunk.Text
-		s.out.Text += chunk.Text
-		s.emit("response.output_text.delta", map[string]any{
-			"item_id": s.textID, "output_index": s.outputIndex, "content_index": 0,
-			"delta": chunk.Text, "logprobs": []any{},
-		})
+		s.text.WriteString(chunk.Text)
+		s.textCacheValid = false
+		s.emitTextDelta(chunk.Text)
 	}
 	for _, tc := range chunk.ToolCalls {
 		s.closeText()
@@ -587,11 +629,13 @@ func (s *responsesStreamState) closeText() {
 	if !s.textOpen {
 		return
 	}
-	part := map[string]any{"type": "output_text", "text": s.text, "annotations": []any{}, "logprobs": []any{}}
+	text := s.text.String()
+	s.textBlocks = append(s.textBlocks, text)
+	part := map[string]any{"type": "output_text", "text": text, "annotations": []any{}, "logprobs": []any{}}
 	// Codex CLI SDK 严格解析 output_text.done 事件，期望 logprobs 和 annotations 字段都存在。
 	s.emit("response.output_text.done", map[string]any{
 		"item_id": s.textID, "output_index": s.outputIndex, "content_index": 0,
-		"text": s.text, "annotations": []any{}, "logprobs": []any{},
+		"text": text, "annotations": []any{}, "logprobs": []any{},
 	})
 	s.emit("response.content_part.done", map[string]any{
 		"item_id": s.textID, "output_index": s.outputIndex, "content_index": 0, "part": part,
@@ -604,10 +648,12 @@ func (s *responsesStreamState) closeText() {
 	s.items = append(s.items, item)
 	s.outputIndex++
 	s.textOpen = false
+	s.text.Reset()
 }
 
 func (s *responsesStreamState) finish() {
 	s.closeText()
+	s.out = s.output()
 	if len(s.items) == 0 {
 		s.out.Text = ""
 		s.items = responseOutputItems(s.out)
@@ -625,7 +671,21 @@ func (s *responsesStreamState) finish() {
 }
 
 func (s *responsesStreamState) fail(err *vertex.VertexError) {
-	resp := s.responseObject("failed", s.out)
+	resp := s.responseObject("failed", s.output())
 	resp["error"] = map[string]any{"code": err.Kind, "message": vertex.FriendlyErrorMessage(err)}
 	s.emit("response.failed", map[string]any{"response": resp})
+}
+
+func (s *responsesStreamState) output() protocolOutput {
+	out := s.out
+	if !s.textCacheValid {
+		current := ""
+		if s.textOpen {
+			current = s.text.String()
+		}
+		s.textCache = joinProtocolTextBlocks(s.textBlocks, current)
+		s.textCacheValid = true
+	}
+	out.Text = s.textCache
+	return out
 }

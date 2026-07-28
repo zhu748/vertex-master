@@ -41,135 +41,315 @@ func reqID() string {
 }
 
 // sseLine 把对象序列化成一条 SSE 数据行。
-func sseLine(obj map[string]any) string {
-	data, err := jsonx.Marshal(obj)
-	if err != nil {
+func sseLine(obj any) string {
+	var line strings.Builder
+	line.Grow(256)
+	line.WriteString("data: ")
+	if err := jsonx.Encode(&line, obj); err != nil {
 		return "data: {}\n\n"
 	}
-	return "data: " + string(data) + "\n\n"
+	line.WriteByte('\n')
+	return line.String()
 }
 
-// ConvertRealtimeChunk 把单个 Gemini 增量 dict 转为 OAI SSE 事件字符串列表。
-func ConvertRealtimeChunk(chunk map[string]any, model, requestID string, isFirst bool) []string {
+// OpenAI 流事件的形状固定，使用结构体可避免 encoding/json 在每个增量上
+// 反射遍历多层 map。ToolCalls 和 Usage 保持动态类型，以兼容扩展字段。
+type openAIStreamEvent struct {
+	ID      string               `json:"id"`
+	Object  string               `json:"object"`
+	Created int64                `json:"created"`
+	Model   string               `json:"model"`
+	Choices []openAIStreamChoice `json:"choices"`
+	Usage   map[string]any       `json:"usage,omitempty"`
+}
+
+type openAIStreamChoice struct {
+	Index        int               `json:"index"`
+	Delta        openAIStreamDelta `json:"delta"`
+	FinishReason *string           `json:"finish_reason"`
+}
+
+type openAIStreamDelta struct {
+	Role             string `json:"role,omitempty"`
+	ReasoningContent string `json:"reasoning_content,omitempty"`
+	Content          string `json:"content,omitempty"`
+	ToolCalls        []any  `json:"tool_calls,omitempty"`
+}
+
+func setOpenAIStreamChoice(event *openAIStreamEvent, delta openAIStreamDelta, finishReason *string) {
+	if cap(event.Choices) == 0 {
+		event.Choices = make([]openAIStreamChoice, 1)
+	} else {
+		event.Choices = event.Choices[:1]
+	}
+	event.Choices[0] = openAIStreamChoice{
+		Index:        0,
+		Delta:        delta,
+		FinishReason: finishReason,
+	}
+}
+
+type openAIStreamPrepared struct {
+	candidate  map[string]any
+	usage      map[string]any
+	text       string
+	reasoning  string
+	finish     string
+	toolCalls  []any
+	eventCount int
+	isFirst    bool
+	hasFinish  bool
+	hasUsage   bool
+}
+
+// OpenAIStreamEncoder 在单个请求内复用固定事件和 choices 存储。API 层可把事件
+// 直接编码到响应缓冲，避免每个正文 chunk 先创建临时 SSE 字符串。
+type OpenAIStreamEncoder struct {
+	event openAIStreamEvent
+}
+
+func NewOpenAIStreamEncoder(model, requestID string) *OpenAIStreamEncoder {
+	return &OpenAIStreamEncoder{event: openAIStreamEvent{
+		ID:      "chatcmpl-" + requestID,
+		Object:  "chat.completion.chunk",
+		Model:   model,
+		Choices: make([]openAIStreamChoice, 1),
+	}}
+}
+
+func prepareOpenAIStreamChunk(chunk map[string]any, isFirst bool) openAIStreamPrepared {
 	candidate := firstCandidate(chunk)
 	parts := candidateParts(candidate)
 	finish, _ := candidate["finishReason"].(string)
-
-	created := time.Now().Unix()
-	base := func() map[string]any {
-		return map[string]any{
-			"id":      "chatcmpl-" + requestID,
-			"object":  "chat.completion.chunk",
-			"created": created,
-			"model":   model,
-		}
-	}
-	var events []string
-
-	if isFirst {
-		b := base()
-		b["choices"] = []any{map[string]any{"index": 0, "delta": map[string]any{"role": "assistant"}, "finish_reason": nil}}
-		events = append(events, sseLine(b))
-	}
-
 	text, toolCalls, reasoning := ExtractParts(parts, true)
+	usageMeta, hasUsage := chunk["usageMetadata"].(map[string]any)
+	hasUsage = hasUsage && len(usageMeta) > 0
+	hasFinish := finish != "" && finish != FinishReasonUnspecified
 
+	prepared := openAIStreamPrepared{
+		candidate: candidate,
+		usage:     usageMeta,
+		text:      text,
+		reasoning: reasoning,
+		finish:    finish,
+		toolCalls: toolCalls,
+		isFirst:   isFirst,
+		hasFinish: hasFinish,
+		hasUsage:  hasUsage,
+	}
+	if isFirst {
+		prepared.eventCount++
+	}
 	if reasoning != "" {
-		b := base()
-		b["choices"] = []any{map[string]any{"index": 0, "delta": map[string]any{"reasoning_content": reasoning}, "finish_reason": nil}}
-		events = append(events, sseLine(b))
+		prepared.eventCount++
 	}
 	if text != "" {
-		b := base()
-		b["choices"] = []any{map[string]any{"index": 0, "delta": map[string]any{"content": text}, "finish_reason": nil}}
-		events = append(events, sseLine(b))
+		prepared.eventCount++
 	}
 	if len(toolCalls) > 0 {
-		b := base()
-		b["choices"] = []any{map[string]any{"index": 0, "delta": map[string]any{"tool_calls": toolCalls}, "finish_reason": nil}}
-		events = append(events, sseLine(b))
+		prepared.eventCount++
+	}
+	if hasFinish {
+		prepared.eventCount++
+	}
+	if hasUsage {
+		prepared.eventCount++
+	}
+	return prepared
+}
+
+// Emit 把 chunk 转换为类型化事件并同步交给 emit。返回 false 表示写出方中止。
+func (e *OpenAIStreamEncoder) Emit(
+	chunk map[string]any,
+	isFirst bool,
+	emit func(payload any) bool,
+) (StreamEventResult, bool) {
+	if e == nil || emit == nil {
+		return StreamEventResult{}, false
+	}
+	prepared := prepareOpenAIStreamChunk(chunk, isFirst)
+	result := StreamEventResult{
+		HasContent: prepared.text != "" || prepared.reasoning != "" || len(prepared.toolCalls) > 0,
+		HasFinish:  prepared.hasFinish,
+	}
+	return result, e.emitPrepared(prepared, emit)
+}
+
+func (e *OpenAIStreamEncoder) emitPrepared(prepared openAIStreamPrepared, emit func(payload any) bool) bool {
+	if prepared.eventCount == 0 {
+		return true
+	}
+	e.event.Created = time.Now().Unix()
+	e.event.Usage = nil
+
+	if prepared.isFirst {
+		setOpenAIStreamChoice(&e.event, openAIStreamDelta{Role: "assistant"}, nil)
+		if !emit(&e.event) {
+			return false
+		}
 	}
 
-	if finish != "" && finish != FinishReasonUnspecified {
-		oaiFinish := MapFinishReason(finish, len(toolCalls) > 0)
-		finishEvt := base()
-		choice := map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": oaiFinish}
-		finishEvt["choices"] = []any{choice}
-		events = append(events, sseLine(finishEvt))
+	if prepared.reasoning != "" {
+		setOpenAIStreamChoice(&e.event, openAIStreamDelta{ReasoningContent: prepared.reasoning}, nil)
+		if !emit(&e.event) {
+			return false
+		}
+	}
+	if prepared.text != "" {
+		setOpenAIStreamChoice(&e.event, openAIStreamDelta{Content: prepared.text}, nil)
+		if !emit(&e.event) {
+			return false
+		}
+	}
+	if len(prepared.toolCalls) > 0 {
+		setOpenAIStreamChoice(&e.event, openAIStreamDelta{ToolCalls: prepared.toolCalls}, nil)
+		if !emit(&e.event) {
+			return false
+		}
+	}
+
+	if prepared.hasFinish {
+		oaiFinish := MapFinishReason(prepared.finish, len(prepared.toolCalls) > 0)
+		setOpenAIStreamChoice(&e.event, openAIStreamDelta{}, &oaiFinish)
+		if !emit(&e.event) {
+			return false
+		}
 	}
 
 	// Gemini 经常把 usageMetadata 放在没有 candidates/finishReason 的独立末帧。
 	// OpenAI 兼容客户端期望它是 [DONE] 前 choices=[] 的独立统计块；不要把
 	// usage 绑定到 finish 帧，否则 ChatBox、SillyTavern 等客户端可能看不到用量。
-	if usageMeta, ok := chunk["usageMetadata"].(map[string]any); ok && len(usageMeta) > 0 {
-		usageEvt := base()
-		usageEvt["choices"] = []any{}
-		usageEvt["usage"] = ConvertUsageForCandidate(usageMeta, candidate)
-		events = append(events, sseLine(usageEvt))
+	if prepared.hasUsage {
+		e.event.Choices = e.event.Choices[:0]
+		e.event.Usage = ConvertUsageForCandidate(prepared.usage, prepared.candidate)
+		if !emit(&e.event) {
+			return false
+		}
 	}
+	return true
+}
 
+// ConvertRealtimeChunk 把单个 Gemini 增量 dict 转为 OAI SSE 事件字符串列表。
+// 它保留给自定义转换器和测试；默认 HTTP 流使用 OpenAIStreamEncoder 直写。
+func ConvertRealtimeChunk(chunk map[string]any, model, requestID string, isFirst bool) []string {
+	prepared := prepareOpenAIStreamChunk(chunk, isFirst)
+	if prepared.eventCount == 0 {
+		return nil
+	}
+	encoder := NewOpenAIStreamEncoder(model, requestID)
+	events := make([]string, 0, prepared.eventCount)
+	encoder.emitPrepared(prepared, func(payload any) bool {
+		events = append(events, sseLine(payload))
+		return true
+	})
 	return events
 }
 
 // ExtractParts 从 Gemini parts 提取 (text_content, tool_calls, reasoning_content)。
 func ExtractParts(parts []any, forStream bool) (string, []any, string) {
-	var texts []string
-	var thoughts []string
+	// 绝大多数流帧只有一个纯文本 part；先处理这一形状，避免为两个通用
+	// 累积器清零较大的内联存储。工具和图片仍按原优先级走完整路径。
+	if len(parts) == 1 {
+		if part, ok := parts[0].(map[string]any); ok {
+			_, hasFunctionCall := namedFunctionCall(part)
+			_, _, hasImage := inlineImageData(part)
+			if !hasFunctionCall && !hasImage {
+				if text := toString(part["text"]); text != "" {
+					if isTruthy(part["thought"]) {
+						return "", nil, text
+					}
+					return text, nil, ""
+				}
+			}
+		}
+	}
+
+	var textParts StringAccumulator
+	var thoughtParts StringAccumulator
 	var toolCalls []any
-	var images []string
+	type inlineImage struct {
+		mime string
+		data string
+	}
+	var images []inlineImage
+	imageBytes := 0
 
 	for _, pRaw := range parts {
 		part, ok := pRaw.(map[string]any)
 		if !ok {
 			continue
 		}
-		hasText := toString(part["text"]) != ""
-		isThought := isTruthy(part["thought"])
-
-		switch {
-		case isFunctionCallWithName(part):
-			fc, _ := part["functionCall"].(map[string]any)
+		if fc, ok := namedFunctionCall(part); ok {
 			args := fc["args"]
 			if args == nil {
 				args = map[string]any{}
 			}
-			argBytes, _ := jsonx.Marshal(args)
+			arguments, _ := jsonx.MarshalString(args)
 			tc := map[string]any{
 				"index": len(toolCalls),
 				"id":    "call_" + reqID(),
 				"type":  "function",
 				"function": map[string]any{
 					"name":      toString(fc["name"]),
-					"arguments": string(argBytes),
+					"arguments": arguments,
 				},
 			}
 			if !forStream {
 				delete(tc, "index")
 			}
 			toolCalls = append(toolCalls, tc)
-		case hasInlineImage(part):
-			id, _ := part["inlineData"].(map[string]any)
-			mime := toString(firstNonEmpty(id["mimeType"], id["mime_type"]))
-			data := toString(id["data"])
-			images = append(images, "\n![image](data:"+mime+";base64,"+data+")")
-		case isThought && hasText:
-			thoughts = append(thoughts, toString(part["text"]))
-		case hasText:
-			texts = append(texts, toString(part["text"]))
-		case hasKey(part, "executableCode"):
+			continue
+		}
+		if mime, data, ok := inlineImageData(part); ok {
+			images = append(images, inlineImage{mime: mime, data: data})
+			imageBytes += len("\n![image](data:") + len(mime) + len(";base64,") + len(data) + len(")")
+			continue
+		}
+
+		text := toString(part["text"])
+		if text != "" {
+			if isTruthy(part["thought"]) {
+				thoughtParts.WriteString(text)
+			} else {
+				textParts.WriteString(text)
+			}
+			continue
+		}
+		if hasKey(part, "executableCode") {
 			if ec, ok := part["executableCode"].(map[string]any); ok {
 				lang := strings.ToLower(toString(ec["codeLanguage"]))
-				texts = append(texts, "```"+lang+"\n"+toString(ec["code"])+"\n```")
+				textParts.WriteString("```")
+				textParts.WriteString(lang)
+				textParts.WriteString("\n")
+				textParts.WriteString(toString(ec["code"]))
+				textParts.WriteString("\n```")
 			}
-		case hasKey(part, "codeExecutionResult"):
+		} else if hasKey(part, "codeExecutionResult") {
 			if cer, ok := part["codeExecutionResult"].(map[string]any); ok {
-				texts = append(texts, "```output\n"+toString(cer["output"])+"\n```")
+				textParts.WriteString("```output\n")
+				textParts.WriteString(toString(cer["output"]))
+				textParts.WriteString("\n```")
 			}
 		}
 	}
 
-	textContent := strings.Join(texts, "") + strings.Join(images, "")
-	reasoning := strings.Join(thoughts, "")
+	textContent := ""
+	if imageBytes > 0 {
+		var textBuilder strings.Builder
+		textBuilder.Grow(textParts.Len() + imageBytes)
+		textParts.AppendTo(&textBuilder)
+		for _, image := range images {
+			textBuilder.WriteString("\n![image](data:")
+			textBuilder.WriteString(image.mime)
+			textBuilder.WriteString(";base64,")
+			textBuilder.WriteString(image.data)
+			textBuilder.WriteByte(')')
+		}
+		textContent = textBuilder.String()
+	} else {
+		textContent = textParts.String()
+	}
+	reasoning := thoughtParts.String()
 	if len(toolCalls) == 0 {
 		return textContent, nil, reasoning
 	}
@@ -196,20 +376,20 @@ func candidateParts(candidate map[string]any) []any {
 	return nil
 }
 
-func isFunctionCallWithName(part map[string]any) bool {
+func namedFunctionCall(part map[string]any) (map[string]any, bool) {
 	if fc, ok := part["functionCall"].(map[string]any); ok {
-		return truthyStr(fc["name"])
+		return fc, truthyStr(fc["name"])
 	}
-	return false
+	return nil, false
 }
 
-func hasInlineImage(part map[string]any) bool {
+func inlineImageData(part map[string]any) (string, string, bool) {
 	if id, ok := part["inlineData"].(map[string]any); ok {
 		mime := toString(firstNonEmpty(id["mimeType"], id["mime_type"]))
 		data := toString(id["data"])
-		return mime != "" && data != "" && strings.HasPrefix(mime, "image/")
+		return mime, data, mime != "" && data != "" && strings.HasPrefix(mime, "image/")
 	}
-	return false
+	return "", "", false
 }
 
 func hasKey(m map[string]any, k string) bool {

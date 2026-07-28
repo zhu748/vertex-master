@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	cryptorand "crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
@@ -241,20 +242,35 @@ func adminRequestOriginAllowed(r *http.Request) bool {
 	return strings.EqualFold(parsed.Scheme, scheme) && strings.EqualFold(parsed.Host, r.Host)
 }
 
-func StartAdminSessionCleanup(interval time.Duration) {
+func StartAdminSessionCleanup(interval time.Duration) func() {
 	if interval <= 0 {
 		interval = time.Hour
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		t := time.NewTicker(interval)
 		defer t.Stop()
-		for range t.C {
-			if n := cleanupAdminSessions(); n > 0 {
-				log.Printf("[Admin] 已清理 %d 个过期会话 token", n)
+		for {
+			select {
+			case <-t.C:
+				if n := cleanupAdminSessions(); n > 0 {
+					log.Printf("[Admin] 已清理 %d 个过期会话 token", n)
+				}
+				cleanupAdminLoginAttempts(time.Now())
+			case <-ctx.Done():
+				return
 			}
-			cleanupAdminLoginAttempts(time.Now())
 		}
 	}()
+	var stopOnce sync.Once
+	return func() {
+		stopOnce.Do(func() {
+			cancel()
+			<-done
+		})
+	}
 }
 
 func EnsureAdminPassword() {

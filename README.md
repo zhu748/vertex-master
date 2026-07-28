@@ -104,7 +104,7 @@ $env:DISABLE_PROMPT_CACHING = "1"
 claude --model gemini-3.6-flash
 ```
 
-当前兼容 Messages 流式/非流式、系统提示、多模态输入、并行 Tool Use / Tool Result、Extended Thinking 事件、ping 保活、token 统计和 `/v1/messages/count_tokens`。其中 count_tokens 为本地近似估算；Anthropic Prompt Caching 不会产生真实缓存收益，因此建议禁用。
+当前兼容 Messages 流式/非流式、系统提示、多模态输入、并行 Tool Use / Tool Result、Extended Thinking 事件、ping 保活、token 统计和 `/v1/messages/count_tokens`。其中 token 数由匿名 Vertex `CountTokens` operation 精确计算，不使用本地启发式估算；Anthropic Prompt Caching 不会产生真实缓存收益，因此建议禁用。
 
 > 两种 CLI 的本地工具均由 CLI 自己执行，本项目只负责模型协议转换。OpenAI/Anthropic 的服务端托管工具不在支持范围内。
 

@@ -1,7 +1,6 @@
 package vertex
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -24,26 +23,36 @@ import (
 // 发 OAI error 事件 + [DONE]）。
 type StreamChunk struct {
 	// Data 是清洗后的 Gemini 增量（candidates/usageMetadata/...），Err==nil 时有效。
+	// 所有权随 chunk 转移给单一消费者；回调可以就地修改，发送方不会再复用该 map。
 	Data map[string]any
 	// Err 非 nil 表示重试耗尽、对外报错（yield error dict）。
 	Err *VertexError
 }
 
+const (
+	upstreamErrorBodyMaxBytes = 1 << 20
+	maxStreamObjectBytes      = 64 << 20
+	maxRetainedStreamBuffer   = 4 << 20
+	initialStreamBufferBytes  = 16 << 10
+	maxPooledStreamBuffer     = 64 << 10
+)
+
+var errStreamObjectTooLarge = errors.New("upstream stream object too large")
+
 // StreamChat 真流式入口。
 //
 // 通过 yield 回调推送增量：回调返回 false 表示客户端断开/上层要求停止，立即终止。
-// 单 session复用 + response 排干防串流。重试逻辑与非流式对齐，但 content_yielded 后
+// 单 session 复用；提前停止时立即关闭 response。重试逻辑与非流式对齐，但 content_yielded 后
 // 不再重试（已发出的内容不能重来）。ctx 取消（客户端断开/关闭）时干净结束流：
 // 重试退避被打断、上游流连接中断，不再空转。
 func (c *VertexAIClient) StreamChat(ctx context.Context, model string, geminiPayload map[string]any, yield func(StreamChunk) bool) {
+	preparedVariables := buildRequestVariables(model, geminiPayload, c.cfg)
 	op := func(ctx context.Context, proxyURI string) <-chan StreamChunk {
 		ch := make(chan StreamChunk, 64)
-		// 深度拷贝 geminiPayload，防止并发竞速（StreamParallel / RunRace）时
-		// 多个节点协程同时修改或读取同一个 map（引发 concurrent map read and map write 恐慌）
-		copiedPayload := deepCopyAny(geminiPayload).(map[string]any)
+		// 候选共享请求级只读 variables；每次 attempt 只复制顶层并注入 token。
 		go func() {
 			defer close(ch)
-			c.executeStreamingWithRetries(ctx, model, copiedPayload, proxyURI, func(chunk StreamChunk) bool {
+			c.executeStreamingWithPreparedVariables(ctx, model, preparedVariables, proxyURI, func(chunk StreamChunk) bool {
 				select {
 				case ch <- chunk:
 					return true
@@ -58,6 +67,16 @@ func (c *VertexAIClient) StreamChat(ctx context.Context, model string, geminiPay
 }
 
 func (c *VertexAIClient) executeStreamingWithRetries(ctx context.Context, model string, geminiPayload map[string]any, proxyURI string, yield func(StreamChunk) bool) {
+	c.executeStreamingWithPreparedVariables(
+		ctx,
+		model,
+		buildRequestVariables(model, geminiPayload, c.cfg),
+		proxyURI,
+		yield,
+	)
+}
+
+func (c *VertexAIClient) executeStreamingWithPreparedVariables(ctx context.Context, model string, preparedVariables map[string]any, proxyURI string, yield func(StreamChunk) bool) {
 	cfg := c.cfg
 	maxRetries := effectiveMaxRetries(
 		cfg.MaxRetries(),
@@ -68,6 +87,7 @@ func (c *VertexAIClient) executeStreamingWithRetries(ctx context.Context, model 
 	var lastError *VertexError
 
 	reqID := RequestIDFromContext(ctx)
+	nodeName := nodes.GetNodeName(proxyURI)
 	sess, err := c.net.CreateSession(cfg.RequestTimeout(), proxyURI, reqID)
 	if err != nil {
 		yield(StreamChunk{Err: NewInternalError("create session: " + err.Error())})
@@ -83,9 +103,12 @@ func (c *VertexAIClient) executeStreamingWithRetries(ctx context.Context, model 
 
 retryLoop:
 	for attempt <= maxRetries {
-		log.Printf("[Vertex] [StreamChat] 开始尝试 (Attempt %d/%d), 模型=%s, 请求ID=%s, 代理=%s", attempt, maxRetries, model, reqID, nodes.GetNodeName(proxyURI))
+		log.Printf("[Vertex] [StreamChat] 开始尝试 (Attempt %d/%d), 模型=%s, 请求ID=%s, 代理=%s", attempt, maxRetries, model, reqID, nodeName)
 		if recaptchaToken == "" {
-			tok, _ := c.pool.GetTokenWithProxy(proxyURI)
+			tok, tokenErr := c.pool.GetTokenWithProxyContext(ctx, proxyURI)
+			if tokenErr != nil && ctx.Err() != nil {
+				return
+			}
 			recaptchaToken = tok
 			isFirstAuth = true
 		}
@@ -108,7 +131,7 @@ retryLoop:
 		// BLOCKED_REASON_UNSPECIFIED 字段当成真正拦截，提前 return false 中断流，
 		// 导致后续真正的内容 chunk 永远收不到 —— 客户端表现为 200 OK 但无内容。
 		chunkCount := 0
-		attemptErr := c.executeStreamingAttempt(ctx, sess, model, geminiPayload, recaptchaToken, isFirstAuth, func(ch map[string]any) bool {
+		attemptErr := c.executeStreamingAttempt(ctx, sess, model, nodeName, preparedVariables, recaptchaToken, isFirstAuth, func(ch map[string]any) bool {
 			chunkCount++
 			contentYielded = true
 			return yield(StreamChunk{Data: ch})
@@ -153,7 +176,7 @@ retryLoop:
 		case ve != nil && ve.Kind == "ratelimit":
 			lastError = ve
 			if contentYielded || attempt >= maxRetries {
-				log.Printf("[Vertex] [StreamChat] (Attempt %d/%d) 节点 %s 触发 429 失败, 请求ID=%s, 代理=%s", attempt, maxRetries, model, reqID, nodes.GetNodeName(proxyURI))
+				log.Printf("[Vertex] [StreamChat] (Attempt %d/%d) 节点 %s 触发 429 失败, 请求ID=%s, 代理=%s", attempt, maxRetries, model, reqID, nodeName)
 				break retryLoop
 			}
 			// 429：销毁旧 session 重建新的，换 token。
@@ -171,7 +194,7 @@ retryLoop:
 			if wait <= 0 {
 				wait = min(10, 1+attempt)
 			}
-			log.Printf("[Vertex] [StreamChat] (Attempt %d/%d) 节点 %s 触发 429 将重试 (延迟 %ds), 请求ID=%s, 代理=%s", attempt, maxRetries, model, wait, reqID, nodes.GetNodeName(proxyURI))
+			log.Printf("[Vertex] [StreamChat] (Attempt %d/%d) 节点 %s 触发 429 将重试 (延迟 %ds), 请求ID=%s, 代理=%s", attempt, maxRetries, model, wait, reqID, nodeName)
 			attempt++
 			if err := sleepCtx(ctx, time.Duration(wait)*time.Second); err != nil {
 				break retryLoop
@@ -181,10 +204,10 @@ retryLoop:
 			lastError = ve
 			// 【关键改动】：如果是网络不通等内部错误，直接熔断并停止重试。
 			if ve.Kind == "internal" || !ve.IsRetryable() || contentYielded || attempt >= maxRetries {
-				log.Printf("[Vertex] [StreamChat] (Attempt %d/%d) 节点 %s 触发异常错误失败: [%s] %s, 请求ID=%s, 代理=%s", attempt, maxRetries, model, ve.Kind, ve.Message, reqID, nodes.GetNodeName(proxyURI))
+				log.Printf("[Vertex] [StreamChat] (Attempt %d/%d) 节点 %s 触发异常错误失败: [%s] %s, 请求ID=%s, 代理=%s", attempt, maxRetries, model, ve.Kind, ve.Message, reqID, nodeName)
 				break retryLoop
 			}
-			log.Printf("[Vertex] [StreamChat] (Attempt %d/%d) 节点 %s 触发异常错误将重试: [%s] %s, 请求ID=%s, 代理=%s", attempt, maxRetries, model, ve.Kind, ve.Message, reqID, nodes.GetNodeName(proxyURI))
+			log.Printf("[Vertex] [StreamChat] (Attempt %d/%d) 节点 %s 触发异常错误将重试: [%s] %s, 请求ID=%s, 代理=%s", attempt, maxRetries, model, ve.Kind, ve.Message, reqID, nodeName)
 			attempt++
 			if err := sleepCtx(ctx, backoff(attempt)); err != nil {
 				break retryLoop
@@ -215,11 +238,11 @@ func effectiveMaxRetries(configured int, parallelPoolEnabled, parallelPoolRetryE
 // emit 回调把清洗后的 Gemini chunk 推给上层；
 // emit 返回 false（客户端断开）时扫描正常停止、返回 nil（StreamChat 据 chunkCount>0 收尾，不重试）。
 // ctx 绑定 to 上游流连接：ctx 取消时 Body.Read 报错，scanStream 干净结束（返回 nil，不 panic）。
-func (c *VertexAIClient) executeStreamingAttempt(ctx context.Context, sess *transport.Session, model string, geminiPayload map[string]any, recaptchaToken string, _ bool, emit func(map[string]any) bool) error {
+func (c *VertexAIClient) executeStreamingAttempt(ctx context.Context, sess *transport.Session, model, nodeName string, preparedVariables map[string]any, recaptchaToken string, _ bool, emit func(map[string]any) bool) error {
 	reqID := RequestIDFromContext(ctx)
-	log.Printf("[Vertex] [executeStreamingAttempt] 准备发送流式请求: 模型=%s, 请求ID=%s, 代理=%s", model, reqID, nodes.GetNodeName(sess.ProxyURI))
+	log.Printf("[Vertex] [executeStreamingAttempt] 准备发送流式请求: 模型=%s, 请求ID=%s, 代理=%s", model, reqID, nodeName)
 	cfg := c.cfg
-	newBody := buildRequestPayload(model, geminiPayload, recaptchaToken, cfg)
+	newBody := buildRequestPayloadFromVariables(preparedVariables, recaptchaToken)
 	// 上游请求 payload 序列化到 spool 缓冲（大媒体自动落盘）。流式：请求体在 DoStream 发送期被读取，
 	// 缓冲存活到本函数返回（整个流消费完）后由 defer Close 删除临时文件。
 	buf, err := spool.EncodeJSON(newBody)
@@ -240,20 +263,25 @@ func (c *VertexAIClient) executeStreamingAttempt(ctx context.Context, sess *tran
 	if err != nil {
 		return NewInternalError("upstream request: " + err.Error())
 	}
-	defer sr.Close() // 排干 → close，防串流。
+	defer sr.Close() // 提前停止或出错时立即中断上游 body。
 
 	// HTTP 错误：读完 error body 后按状态映射（与非流式 executeCompleteRequest 一致）。
 	if sr.StatusCode != 200 {
-		var buf bytes.Buffer
-		_, _ = buf.ReadFrom(sr.Body)
-		errText := buf.String()
+		errorBody, readErr := transport.ReadAllLimit(sr.Body, upstreamErrorBodyMaxBytes)
+		errText := string(errorBody)
+		if errors.Is(readErr, transport.ErrResponseBodyTooLarge) {
+			sr.Close()
+			errText += "\n[upstream error body truncated]"
+		} else if readErr != nil {
+			return NewInternalError("read upstream error response: " + readErr.Error())
+		}
 		if cfg.DebugMode() {
 			debugReq, _ := json.Marshal(newBody)
 			log.Printf("[DEBUG] [StreamChat] HTTP 报错! 状态码: %d", sr.StatusCode)
 			log.Printf("[DEBUG] [StreamChat] 完整请求体: %s", string(debugReq))
 			log.Printf("[DEBUG] [StreamChat] 上游回复: %s", errText)
 		} else if sr.StatusCode == 400 {
-			debugBody, _ := json.Marshal(newBody["variables"])
+			debugBody, _ := json.Marshal(newBody.Variables)
 			log.Printf("[Vertex] [Stream] 收到 400 Bad Request, Variables Payload: %s", string(debugBody))
 		}
 
@@ -270,17 +298,19 @@ func (c *VertexAIClient) executeStreamingAttempt(ctx context.Context, sess *tran
 	}
 
 	// 增量扫描上游流，逐个完整 JSON 对象提取 chunk。不能在真实 finishReason 后立即
-	// 停止：Gemini 可能把 usageMetadata 放在随后的独立末帧。sr.Close 本来就会排干
-	// response body，因此读到 EOF 不会额外扩大原有的等待窗口。
-	scanErr := scanStream(sr.Body, func(obj map[string]any) (stop bool, err error) {
+	// 停止：Gemini 可能把 usageMetadata 放在随后的独立末帧，因此正常路径仍读到 EOF。
+	scanErr := scanStreamRaw(sr.Body, func(raw []byte) (stop bool, err error) {
 		// 从单个上游对象提取（可能多个）chunk，逐个 emit。
-		return processStreamingObject(obj, emit)
+		return processStreamingJSON(raw, emit)
 	})
 
 	if scanErr != nil && cfg.DebugMode() && !errors.Is(scanErr, context.Canceled) {
 		debugReq, _ := json.Marshal(newBody)
 		log.Printf("[DEBUG] [StreamChat] 扫描流数据报错! error: %v", scanErr)
 		log.Printf("[DEBUG] [StreamChat] 完整请求体: %s", string(debugReq))
+	}
+	if errors.Is(scanErr, errStreamObjectTooLarge) {
+		sr.Close()
 	}
 
 	if errors.Is(scanErr, context.Canceled) {
@@ -300,46 +330,79 @@ func (c *VertexAIClient) executeStreamingAttempt(ctx context.Context, sess *tran
 // err 非 nil 即中断并上抛（上游错误）。
 var scanBufPool = sync.Pool{ //nolint:gochecknoglobals
 	New: func() any {
-		buf := make([]byte, 16*1024)
+		buf := make([]byte, initialStreamBufferBytes)
+		return &buf
+	},
+}
+
+var streamObjectBufferPool = sync.Pool{ //nolint:gochecknoglobals
+	New: func() any {
+		buf := make([]byte, 0, initialStreamBufferBytes)
 		return &buf
 	},
 }
 
 func scanStream(body io.Reader, onObject func(map[string]any) (bool, error)) error {
-	reader := bufio.NewReader(body)
+	return scanStreamWithLimit(body, maxStreamObjectBytes, onObject)
+}
+
+func scanStreamWithLimit(
+	body io.Reader,
+	maxObjectBytes int,
+	onObject func(map[string]any) (bool, error),
+) error {
+	return scanStreamRawWithLimit(body, maxObjectBytes, func(raw []byte) (bool, error) {
+		object := parseJSONObject(raw)
+		if object == nil {
+			return false, nil
+		}
+		return onObject(object)
+	})
+}
+
+func scanStreamRaw(body io.Reader, onObject func([]byte) (bool, error)) error {
+	return scanStreamRawWithLimit(body, maxStreamObjectBytes, onObject)
+}
+
+func scanStreamRawWithLimit(
+	body io.Reader,
+	maxObjectBytes int,
+	onObject func([]byte) (bool, error),
+) error {
 	readBufPtr := scanBufPool.Get().(*[]byte)
 	defer scanBufPool.Put(readBufPtr)
 	readBuf := *readBufPtr
 
-	var buffer []byte
-	scanPos := 0  // 已扫到的位置（buffer 内），下个网络 chunk 从这里续扫。
-	startIdx := 0 // 当前对象的起始 '{' 位置。
+	bufferPtr := streamObjectBufferPool.Get().(*[]byte)
+	buffer := (*bufferPtr)[:0]
+	defer func() {
+		if cap(buffer) >= initialStreamBufferBytes && cap(buffer) <= maxPooledStreamBuffer {
+			*bufferPtr = buffer[:0]
+			streamObjectBufferPool.Put(bufferPtr)
+		}
+	}()
+
+	scanPos := 0   // 已扫到的位置（buffer 内），下个网络 chunk 从这里续扫。
+	startIdx := -1 // 当前对象的起始 '{' 位置；-1 表示正在寻找新对象。
 	braceCount := 0
 	inString := false
 	escape := false
 
-	const maxBufferSize = 4 * 1024 * 1024
-
 	for {
-		n, readErr := reader.Read(readBuf)
+		n, readErr := body.Read(readBuf)
 		if n > 0 {
 			buffer = append(buffer, readBuf[:n]...)
 
-			if len(buffer) > maxBufferSize && braceCount == 0 {
-				log.Printf("[DEBUG-scan] buffer exceeded %d bytes, resetting from scanPos=%d", maxBufferSize, scanPos)
-				buffer = buffer[scanPos:]
-				scanPos = 0
-				startIdx = 0
-			}
-
 			for {
-				if scanPos == 0 {
+				if startIdx < 0 {
 					// 找下一个对象的起始 '{'。
-					startIdx = bytes.IndexByte(buffer, '{')
-					if startIdx == -1 {
+					relativeStart := bytes.IndexByte(buffer[scanPos:], '{')
+					if relativeStart == -1 {
 						buffer = buffer[:0]
+						scanPos = 0
 						break
 					}
+					startIdx = scanPos + relativeStart
 					scanPos = startIdx
 					braceCount = 0
 					inString = false
@@ -375,26 +438,56 @@ func scanStream(body io.Reader, onObject func(map[string]any) (bool, error)) err
 				}
 
 				if endIdx != -1 {
-					jsonStr := buffer[startIdx : endIdx+1]
-					obj := parseJSONObject(jsonStr)
+					if maxObjectBytes > 0 && endIdx-startIdx+1 > maxObjectBytes {
+						return fmt.Errorf("%w: exceeds %d byte limit", errStreamObjectTooLarge, maxObjectBytes)
+					}
+					jsonObject := buffer[startIdx : endIdx+1]
 
-					// In-place compaction to avoid memory allocation and copying overhead on every chunk
-					copy(buffer, buffer[endIdx+1:])
-					buffer = buffer[:len(buffer)-(endIdx+1)]
-					scanPos = 0
+					nextObject := endIdx + 1
+					remaining := len(buffer) - nextObject
+					if cap(buffer) > maxRetainedStreamBuffer && remaining < maxRetainedStreamBuffer/2 {
+						// 大型单对象处理完后释放膨胀的 backing array，避免后续小 chunk
+						// 在整个流生命周期内继续占用几十 MiB。
+						trimmed := make([]byte, remaining)
+						copy(trimmed, buffer[nextObject:])
+						buffer = trimmed
+						scanPos = 0
+					} else {
+						// 同一网络读取中可能包含多个对象。只推进游标，不为每个对象
+						// 搬移剩余数据；否则一批 N 帧会产生 O(N²) 的内存复制。
+						scanPos = nextObject
+					}
+					startIdx = -1
+					braceCount = 0
+					inString = false
+					escape = false
 
-					if obj != nil {
-						stop, err := onObject(obj)
-						if err != nil {
-							return err
-						}
-						if stop {
-							return nil
-						}
+					stop, err := onObject(jsonObject)
+					if err != nil {
+						return err
+					}
+					if stop {
+						return nil
+					}
+					if remaining == 0 {
+						buffer = buffer[:0]
+						scanPos = 0
+						break
 					}
 				} else {
 					// 未扫到完整对象：记下已扫位置，下个 chunk 续扫，不重扫前缀。
 					scanPos = len(buffer)
+					if maxObjectBytes > 0 && braceCount > 0 && len(buffer)-startIdx > maxObjectBytes {
+						return fmt.Errorf("%w: exceeds %d byte limit", errStreamObjectTooLarge, maxObjectBytes)
+					}
+					if startIdx > 0 {
+						// 每次网络读取最多压缩一次尚未完成的对象，既释放前导垃圾/
+						// 已处理帧，也避免逐对象搬移剩余字节。
+						copy(buffer, buffer[startIdx:])
+						buffer = buffer[:len(buffer)-startIdx]
+						scanPos -= startIdx
+						startIdx = 0
+					}
 					break
 				}
 			}
@@ -417,6 +510,39 @@ func parseJSONObject(b []byte) map[string]any {
 		return nil
 	}
 	return obj
+}
+
+var canonicalAnonymousStreamPrefix = []byte( //nolint:gochecknoglobals
+	`{"results":[{"data":{"ui":{"streamGenerateContentAnonymous":`,
+)
+var canonicalAnonymousStreamSuffix = []byte(`}}}]}`) //nolint:gochecknoglobals
+
+// processStreamingJSON 对匿名 batchGraphql 的常见单结果外壳走严格快路径：外壳
+// 完全匹配时只解码内部 Gemini 对象。结构、字段顺序、错误或多结果有任何变化时，
+// 回退完整动态解析，保持兼容性和错误语义。
+func processStreamingJSON(raw []byte, emit func(map[string]any) bool) (bool, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if bytes.HasPrefix(trimmed, canonicalAnonymousStreamPrefix) &&
+		bytes.HasSuffix(trimmed, canonicalAnonymousStreamSuffix) {
+		start := len(canonicalAnonymousStreamPrefix)
+		end := len(trimmed) - len(canonicalAnonymousStreamSuffix)
+		inner := bytes.TrimSpace(trimmed[start:end])
+		if len(inner) >= 2 && inner[0] == '{' && inner[len(inner)-1] == '}' {
+			if data := parseJSONObject(inner); data != nil {
+				if chunk := extractChunk(data); chunk != nil && !emit(chunk) {
+					log.Printf("[Stream] 客户端主动断开，导致流结束")
+					return true, nil
+				}
+				return false, nil
+			}
+		}
+	}
+
+	object := parseJSONObject(trimmed)
+	if object == nil {
+		return false, nil
+	}
+	return processStreamingObject(object, emit)
 }
 
 // processStreamingObject 从单个上游 JSON 对象提取增量 chunk。
@@ -504,63 +630,83 @@ func processStreamingObject(obj map[string]any, emit func(map[string]any) bool) 
 // extractChunk 从 Gemini 数据中提取标准化 chunk，清洗畸形嵌套。
 //
 // 对齐 Python _process_streaming_object：candidates key 存在且非 nil 时保留
-// （即使空列表），总是复制 metadata 字段，仅当 chunk完全无字段时返回 nil。
+// （即使空列表），总是保留 metadata 字段，仅当 chunk 完全无字段时返回 nil。
+// data 来自当前 JSON 帧并由本函数取得唯一所有权，因此原位清洗以避免每帧重复复制
+// candidate/content/part map；返回后所有权继续转移给单一 StreamChunk 消费者。
 func extractChunk(data map[string]any) map[string]any {
-	chunk := map[string]any{}
-
 	if raw, ok := data["candidates"]; ok && raw != nil {
-		candidatesRaw, _ := raw.([]any)
-		if len(candidatesRaw) > 0 {
-			cleaned := make([]any, 0, len(candidatesRaw))
-			for _, cRaw := range candidatesRaw {
-				candidate, ok := cRaw.(map[string]any)
-				if !ok {
-					continue
-				}
-				content, hasContent := candidate["content"].(map[string]any)
-				if hasContent {
-					parts, ok := content["parts"].([]any)
-					if ok {
-						cleanedParts := cleanStreamParts(parts)
-						cc := shallowCopy(candidate)
-						role := toStr(content["role"])
-						if role == "" {
-							role = "model"
-						}
-						cc["content"] = map[string]any{"role": role, "parts": cleanedParts}
-						cleaned = append(cleaned, cc)
-					} else {
-						cleaned = append(cleaned, candidate)
-					}
-				} else {
-					cleaned = append(cleaned, candidate)
-				}
+		candidatesRaw, candidatesOK := raw.([]any)
+		cleaned := cleanStreamCandidates(candidatesRaw)
+		// A canonical frame keeps the same slice header and backing array; all
+		// nested cleanup is already in place, so avoid re-boxing []any into the
+		// interface map on every token. Invalid types or compaction still write.
+		if !candidatesOK || len(cleaned) != len(candidatesRaw) {
+			data["candidates"] = cleaned
+		}
+	} else {
+		delete(data, "candidates")
+	}
+
+	for key, value := range data {
+		switch key {
+		case "candidates":
+		case "usageMetadata", "modelVersion", "responseId", "promptFeedback", "createTime":
+			if !isTruthyAny(value) {
+				delete(data, key)
 			}
-			if len(cleaned) > 0 {
-				chunk["candidates"] = cleaned
-			} else {
-				chunk["candidates"] = candidatesRaw
-			}
-		} else {
-			chunk["candidates"] = candidatesRaw
+		default:
+			delete(data, key)
 		}
 	}
 
-	for _, key := range []string{"usageMetadata", "modelVersion", "responseId", "promptFeedback", "createTime"} {
-		if v, ok := data[key]; ok && isTruthyAny(v) {
-			chunk[key] = v
-		}
-	}
-
-	if len(chunk) == 0 {
+	if len(data) == 0 {
 		return nil
 	}
-	return chunk
+	return data
 }
 
-// cleanStreamParts 清洗 parts 列表，展开畸形嵌套 + 移除 protobuf 空默认字段。
+func cleanStreamCandidates(candidates []any) []any {
+	valid := 0
+	for _, candidateRaw := range candidates {
+		candidate, ok := candidateRaw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if content, ok := candidate["content"].(map[string]any); ok {
+			if parts, ok := content["parts"].([]any); ok {
+				cleanedParts := cleanStreamParts(parts)
+				if len(cleanedParts) != len(parts) {
+					content["parts"] = cleanedParts
+				}
+				role, roleIsString := content["role"].(string)
+				if !roleIsString || role == "" {
+					role = toStr(content["role"])
+					if role == "" {
+						role = "model"
+					}
+					content["role"] = role
+				}
+				for key := range content {
+					if key != "role" && key != "parts" {
+						delete(content, key)
+					}
+				}
+			}
+		}
+		candidates[valid] = candidate
+		valid++
+	}
+	if valid == 0 {
+		// 保持旧行为：完全没有合法 map 时原样透传列表。
+		return candidates
+	}
+	clear(candidates[valid:])
+	return candidates[:valid]
+}
+
+// cleanStreamParts 原位清洗 parts 列表，展开畸形嵌套并移除 protobuf 空默认字段。
 func cleanStreamParts(parts []any) []any {
-	cleaned := make([]any, 0, len(parts))
+	valid := 0
 	for _, pRaw := range parts {
 		part, ok := pRaw.(map[string]any)
 		if !ok {
@@ -575,35 +721,36 @@ func cleanStreamParts(parts []any) []any {
 					newPart := cleanPart(part)
 					if newPart != nil {
 						newPart["text"] = extracted
-						cleaned = append(cleaned, newPart)
+						parts[valid] = newPart
+						valid++
 					}
 				}
 				continue
 			}
 		}
 		if cp := cleanPart(part); cp != nil {
-			cleaned = append(cleaned, cp)
+			parts[valid] = cp
+			valid++
 		}
 	}
-	return cleaned
+	clear(parts[valid:])
+	return parts[:valid]
 }
 
-// cleanPart 清洗单个 Gemini part，移除内部 protobuf 空默认字段，仅保留真实内容字段。
+// cleanPart 原位清洗单个 Gemini part，移除内部 protobuf 空默认字段，仅保留真实内容字段。
 func cleanPart(part map[string]any) map[string]any {
-	cleaned := shallowCopy(part)
-
 	// 移除内部 protobuf oneof 指示器（always "text" / "inlineData" / "functionCall" / "functionResponse"）
-	delete(cleaned, "data")
+	delete(part, "data")
 
 	// fileData：仅在 uri 为空时移除
-	if fd, ok := cleaned["fileData"].(map[string]any); ok {
+	if fd, ok := part["fileData"].(map[string]any); ok {
 		if toStr(fd["fileUri"]) == "" && toStr(fd["mimeType"]) == "" {
-			delete(cleaned, "fileData")
+			delete(part, "fileData")
 		}
 	}
 
 	// functionCall：name 和 args 都为空/无意义时移除
-	if fc, ok := cleaned["functionCall"].(map[string]any); ok {
+	if fc, ok := part["functionCall"].(map[string]any); ok {
 		hasName := toStr(fc["name"]) != ""
 		hasArgs := false
 		if args, ok := fc["args"]; ok && args != nil {
@@ -612,7 +759,7 @@ func cleanPart(part map[string]any) map[string]any {
 			}
 		}
 		if !hasName && !hasArgs {
-			delete(cleaned, "functionCall")
+			delete(part, "functionCall")
 		} else if name, ok := fc["name"].(string); ok && name != "" {
 			if argStr, ok := fc["args"].(string); ok && argStr != "" {
 				var parsed any
@@ -624,7 +771,7 @@ func cleanPart(part map[string]any) map[string]any {
 	}
 
 	// functionResponse：name 和 response 都为空时移除
-	if fr, ok := cleaned["functionResponse"].(map[string]any); ok {
+	if fr, ok := part["functionResponse"].(map[string]any); ok {
 		hasName := toStr(fr["name"]) != ""
 		hasResp := false
 		if resp, ok := fr["response"]; ok && resp != nil {
@@ -633,33 +780,33 @@ func cleanPart(part map[string]any) map[string]any {
 			}
 		}
 		if !hasName && !hasResp {
-			delete(cleaned, "functionResponse")
+			delete(part, "functionResponse")
 		} else if respStr, ok := fr["response"].(string); ok && respStr != "" {
 			fr["response"] = map[string]any{"result": respStr}
 		}
 	}
 
 	// inlineData：data 为空时移除
-	if id, ok := cleaned["inlineData"].(map[string]any); ok {
+	if id, ok := part["inlineData"].(map[string]any); ok {
 		if toStr(id["data"]) == "" {
-			delete(cleaned, "inlineData")
+			delete(part, "inlineData")
 		}
 	}
 
 	// 支持代码块、代码执行结果透传
 	for _, key := range []string{"executableCode", "codeExecutionResult"} {
-		if v, ok := cleaned[key]; ok && isTruthyAny(v) {
-			return cleaned
+		if v, ok := part[key]; ok && isTruthyAny(v) {
+			return part
 		}
 	}
 
 	// 如果只剩 thought/thoughtSignature 等非内容标记，返回 nil
-	for k := range cleaned {
+	for k := range part {
 		switch k {
 		case "thought", "thoughtSignature":
 			continue
 		default:
-			return cleaned
+			return part
 		}
 	}
 	return nil

@@ -5,6 +5,45 @@ import (
 	"testing"
 )
 
+var benchmarkExtractPartsResult string //nolint:gochecknoglobals
+
+func BenchmarkExtractPartsSingleText(b *testing.B) {
+	parts := []any{map[string]any{"text": "hello"}}
+	b.ReportAllocs()
+	for range b.N {
+		benchmarkExtractPartsResult, _, _ = ExtractParts(parts, true)
+	}
+}
+
+func BenchmarkExtractPartsTextChunks(b *testing.B) {
+	parts := make([]any, 4096)
+	for index := range parts {
+		parts[index] = map[string]any{"text": "0123456789abcdef"}
+	}
+	b.ReportAllocs()
+	b.SetBytes(4096 * 16)
+	b.ResetTimer()
+	for range b.N {
+		benchmarkExtractPartsResult, _, _ = ExtractParts(parts, false)
+	}
+}
+
+func BenchmarkExtractPartsLargeInlineImages(b *testing.B) {
+	image := strings.Repeat("A", 512<<10)
+	parts := []any{
+		map[string]any{"text": "before"},
+		map[string]any{"inlineData": map[string]any{"mimeType": "image/png", "data": image}},
+		map[string]any{"inlineData": map[string]any{"mimeType": "image/webp", "data": image}},
+		map[string]any{"text": "after"},
+	}
+	b.ReportAllocs()
+	b.SetBytes(int64(len(image) * 2))
+	b.ResetTimer()
+	for range b.N {
+		benchmarkExtractPartsResult, _, _ = ExtractParts(parts, false)
+	}
+}
+
 // 上游流式每个 part 会带上所有字段的空默认值（text:"" + 空 inlineData/functionCall），
 // 靠真实非空字段区分类型（实测结构，见上游流式探针）。此前 ExtractParts 用「text 键存在」
 // 判类型，会把带 text:"" 的工具/图片帧误判成空文本，导致流式下 functionCall/inlineData 被丢。
@@ -65,6 +104,43 @@ func TestExtractParts_EmptyTextNotTreatedAsText(t *testing.T) {
 	}
 	if len(tools) != 1 {
 		t.Fatalf("应识别为 tool_call，got %d", len(tools))
+	}
+}
+
+func TestExtractPartsSinglePartPreservesFunctionAndImagePrecedence(t *testing.T) {
+	text, tools, reasoning := ExtractParts([]any{map[string]any{
+		"text": "must-not-win", "thought": true,
+		"functionCall": map[string]any{"name": "lookup", "args": map[string]any{"q": "x"}},
+	}}, true)
+	if text != "" || reasoning != "" || len(tools) != 1 {
+		t.Fatalf("functionCall precedence changed: text=%q reasoning=%q tools=%#v", text, reasoning, tools)
+	}
+
+	text, tools, reasoning = ExtractParts([]any{map[string]any{
+		"text": "must-not-win", "thought": true,
+		"inlineData": map[string]any{"mimeType": "image/png", "data": "AAA"},
+	}}, true)
+	if !strings.Contains(text, "data:image/png;base64,AAA") || reasoning != "" || tools != nil {
+		t.Fatalf("inlineData precedence changed: text=%q reasoning=%q tools=%#v", text, reasoning, tools)
+	}
+}
+
+func TestExtractPartsPreservesTextThenImageGrouping(t *testing.T) {
+	parts := []any{
+		map[string]any{"inlineData": map[string]any{"mimeType": "image/png", "data": "AAA"}},
+		map[string]any{"text": "hello"},
+		map[string]any{"executableCode": map[string]any{"codeLanguage": "GO", "code": "run()"}},
+		map[string]any{"text": "think", "thought": true},
+		map[string]any{"inlineData": map[string]any{"mime_type": "image/webp", "data": "BBB"}},
+		map[string]any{"codeExecutionResult": map[string]any{"output": "ok"}},
+	}
+
+	text, tools, reasoning := ExtractParts(parts, false)
+	want := "hello```go\nrun()\n``````output\nok\n```" +
+		"\n![image](data:image/png;base64,AAA)" +
+		"\n![image](data:image/webp;base64,BBB)"
+	if text != want || tools != nil || reasoning != "think" {
+		t.Fatalf("text=%q\ntools=%v reasoning=%q", text, tools, reasoning)
 	}
 }
 

@@ -113,6 +113,7 @@ func main() {
 
 	logDir := filepath.Join(filepath.Dir(config.ConfigDir()), "logs")
 	dailyLogger := logger.NewDailyLogger(logDir)
+	defer func() { _ = dailyLogger.Close() }()
 
 	// ---- 状态文件迁移（提前执行，无输出） ----
 	stateDir := filepath.Join(config.ConfigDir(), "state")
@@ -174,7 +175,8 @@ func main() {
 	}
 
 	// ---- 同意通过之后，干净地启动 TUI 看板，坚决不影响前面的交互输入 ───
-	cli.InitTracker(dailyLogger)
+	stopTracker := cli.InitTracker(dailyLogger)
+	defer stopTracker()
 	cli.SetAppInfo(version, buildCommit, buildTime, runtime.GOOS, runtime.GOARCH)
 
 	cfg := config.GetProvider()
@@ -186,13 +188,13 @@ func main() {
 	spool.SetMaxSpillBytes(int64(cfg.MaxSpillMB()) << 20)
 
 	nodes.DeleteNodeCallback = transport.RemoveProxy
-	transport.StartProxyGC(5*time.Minute, 30*time.Minute)
+	stopProxyGC := transport.StartProxyGC(5*time.Minute, 30*time.Minute)
 
 	keys := api.NewAPIKeyManager()
 	keys.LoadKeys()
 
 	api.EnsureAdminPassword()
-	api.StartAdminSessionCleanup(time.Hour)
+	stopAdminSessionCleanup := api.StartAdminSessionCleanup(time.Hour)
 
 	if err := api.SyncEnvironmentProxySubscription(); err != nil {
 		log.Printf("[ProxyPool] 同步环境变量代理订阅失败: %v", err)
@@ -209,6 +211,7 @@ func main() {
 	telemetry.Start(version, runtime.GOOS+"/"+runtime.GOARCH, telemetryEnabled)
 
 	srv := api.NewServer(vc, keys, cfg)
+	srv.SetBuildInfo(version, buildCommit, buildTime)
 	//nolint:exhaustruct
 	httpServer := &http.Server{
 		Addr:              "0.0.0.0:" + strconv.Itoa(cfg.PortAPI()),
@@ -240,6 +243,8 @@ func main() {
 			cancel()
 			stopProxyHealthScheduler()
 			stopProxySubscriptionScheduler()
+			stopAdminSessionCleanup()
+			stopProxyGC()
 			flushCtx, flushCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			if err := nodes.FlushHealth(flushCtx); err != nil {
 				log.Printf("[vproxy] 关闭前写入代理健康状态失败：%v", err)
@@ -247,7 +252,6 @@ func main() {
 			flushCancel()
 			transport.StopAllProxies()
 			telemetry.Stop()
-			_ = dailyLogger.Close()
 			close(shutdownDone)
 			return
 		}

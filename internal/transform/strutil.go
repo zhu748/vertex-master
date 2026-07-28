@@ -1,12 +1,8 @@
 package transform
 
 import (
-	"regexp"
 	"strings"
 )
-
-// camelRe 在小写字母/数字与紧随的大写字母之间插入下划线，正则 ([a-z0-9])([A-Z])。
-var camelRe = regexp.MustCompile(`([a-z0-9])([A-Z])`)
 
 // SnakeToCamel 将 snake_case 转为 camelCase。
 //
@@ -27,7 +23,42 @@ func SnakeToCamel(s string) string {
 
 // CamelToSnake 将 camelCase 转为 snake_case。
 func CamelToSnake(s string) string {
-	return strings.ToLower(camelRe.ReplaceAllString(s, "${1}_${2}"))
+	hasASCIIUpper := false
+	for index := 0; index < len(s); index++ {
+		if s[index] >= 'A' && s[index] <= 'Z' {
+			hasASCIIUpper = true
+			break
+		}
+	}
+	if !hasASCIIUpper {
+		return strings.ToLower(s)
+	}
+
+	var output strings.Builder
+	output.Grow(len(s) + 4)
+	nonASCII := false
+	var previous byte
+	for index := 0; index < len(s); index++ {
+		original := s[index]
+		value := original
+		if original >= 'A' && original <= 'Z' {
+			if index > 0 && ((previous >= 'a' && previous <= 'z') ||
+				(previous >= '0' && previous <= '9')) {
+				output.WriteByte('_')
+			}
+			value += 'a' - 'A'
+		} else if original >= 0x80 {
+			nonASCII = true
+		}
+		output.WriteByte(value)
+		previous = original
+	}
+	converted := output.String()
+	if nonASCII {
+		// 与旧实现一致：边界只识别 ASCII，最终大小写转换仍覆盖 Unicode。
+		return strings.ToLower(converted)
+	}
+	return converted
 }
 
 // pyTitle 把单个词归一为首字母大写、其余小写。

@@ -1,0 +1,146 @@
+package api
+
+import (
+	"strings"
+	"testing"
+)
+
+var benchmarkRequestConversionResult any  //nolint:gochecknoglobals
+var benchmarkRequestConversionText string //nolint:gochecknoglobals
+
+func BenchmarkProtocolArrayTextConversion(b *testing.B) {
+	text := strings.Repeat("x", 128)
+	for _, benchmark := range []struct {
+		name  string
+		parts []any
+	}{
+		{name: "single", parts: []any{map[string]any{"type": "text", "text": text}}},
+		{name: "many", parts: func() []any {
+			parts := make([]any, 16)
+			for index := range parts {
+				parts[index] = map[string]any{"type": "text", "text": text}
+			}
+			return parts
+		}()},
+	} {
+		b.Run("responses_"+benchmark.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for range b.N {
+				benchmarkRequestConversionText = responseInstructions(benchmark.parts)
+			}
+		})
+		b.Run("anthropic_"+benchmark.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for range b.N {
+				benchmarkRequestConversionText = anthropicText(benchmark.parts)
+			}
+		})
+	}
+}
+
+func BenchmarkAnthropicRequestConversion(b *testing.B) {
+	text := strings.Repeat("x", 128)
+	messages := make([]any, 16)
+	for index := range messages {
+		role := "user"
+		if index%2 != 0 {
+			role = "assistant"
+		}
+		messages[index] = map[string]any{
+			"role": role,
+			"content": []any{map[string]any{
+				"type": "text", "text": text,
+			}},
+		}
+	}
+	body := map[string]any{
+		"model":      "claude-sonnet-4-5",
+		"max_tokens": 1024,
+		"system":     []any{map[string]any{"type": "text", "text": "system"}},
+		"messages":   messages,
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		converted, err := anthropicToChatRequest(body)
+		if err != nil || len(converted["messages"].([]any)) != 17 {
+			b.Fatal("unexpected Anthropic request conversion")
+		}
+		benchmarkRequestConversionResult = converted
+	}
+}
+
+func BenchmarkResponsesRequestConversion(b *testing.B) {
+	input := make([]any, 0, 32)
+	for index := range 8 {
+		input = append(input,
+			map[string]any{
+				"type": "message", "role": "user",
+				"content": []any{map[string]any{"type": "input_text", "text": "question"}},
+			},
+			map[string]any{
+				"type": "function_call", "call_id": "call_" + string(rune('a'+index)),
+				"name": "lookup", "arguments": map[string]any{"q": index},
+			},
+			map[string]any{"type": "reasoning", "summary": []any{}},
+			map[string]any{
+				"type": "function_call_output", "call_id": "call_" + string(rune('a'+index)),
+				"output": map[string]any{"value": index},
+			},
+		)
+	}
+	body := map[string]any{
+		"model":        "gpt-5.2-codex",
+		"instructions": "Be concise.",
+		"input":        input,
+		"tools": []any{
+			map[string]any{"type": "function", "name": "lookup", "parameters": map[string]any{"type": "object"}},
+			map[string]any{"type": "namespace", "name": "mcp__demo", "tools": []any{
+				map[string]any{"name": "search", "parameters": map[string]any{"type": "object"}},
+			}},
+		},
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		converted, err := responsesToChatRequest(body)
+		if err != nil || len(converted["messages"].([]any)) != 25 {
+			b.Fatal("unexpected Responses request conversion")
+		}
+		benchmarkRequestConversionResult = converted
+	}
+}
+
+func BenchmarkAnthropicAssistantMessageConversion(b *testing.B) {
+	text := strings.Repeat("x", 128)
+	for _, benchmark := range []struct {
+		name    string
+		content []any
+	}{
+		{name: "single_text", content: []any{map[string]any{"type": "text", "text": text}}},
+		{name: "many_text_and_tool", content: func() []any {
+			content := make([]any, 0, 17)
+			for index := range 16 {
+				content = append(content, map[string]any{"type": "text", "text": text})
+				if index == 7 {
+					content = append(content, map[string]any{
+						"type": "tool_use", "id": "call_1", "name": "lookup", "input": map[string]any{"q": "x"},
+					})
+				}
+			}
+			return content
+		}()},
+	} {
+		b.Run(benchmark.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for range b.N {
+				var inline [1]any
+				messages, err := appendAnthropicMessageToChat(inline[:0], "assistant", benchmark.content)
+				if err != nil || len(messages) != 1 {
+					b.Fatal("unexpected assistant conversion result")
+				}
+				benchmarkRequestConversionResult = messages[0]
+			}
+		})
+	}
+}

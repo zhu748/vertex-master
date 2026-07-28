@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"image"
 	_ "image/gif"
@@ -23,6 +24,8 @@ import (
 const (
 	maxBackgroundUploadBytes  = 10 << 20
 	maxBackgroundUploadPixels = 40_000_000
+	maxAdminLogTailBytes      = 1 << 20
+	maxAdminLogTailLines      = 200
 )
 
 type AdminHandler struct {
@@ -477,7 +480,7 @@ func (adm *AdminHandler) adminGetLog(w http.ResponseWriter, r *http.Request) {
 		logPath = "logs/logs_latest.log"
 	}
 
-	data, err := os.ReadFile(logPath)
+	content, err := readAdminLogTail(logPath, maxAdminLogTailBytes, maxAdminLogTailLines)
 	if err != nil {
 		if os.IsNotExist(err) {
 			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "content": ""})
@@ -487,16 +490,110 @@ func (adm *AdminHandler) adminGetLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	lines := strings.Split(string(data), "\n")
-	var validLines []string
-	for _, l := range lines {
-		if strings.TrimSpace(l) != "" {
-			validLines = append(validLines, l)
-		}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "content": content})
+}
+
+// readAdminLogTail reads a bounded snapshot from the end of a potentially
+// large, actively-written log and returns at most maxLines non-empty lines.
+func readAdminLogTail(path string, maxBytes int64, maxLines int) (string, error) {
+	if maxBytes <= 0 || maxLines <= 0 {
+		return "", nil
 	}
-	if len(validLines) > 200 {
-		validLines = validLines[len(validLines)-200:]
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = file.Close() }()
+
+	info, err := file.Stat()
+	if err != nil {
+		return "", err
+	}
+	if info.Size() <= 0 {
+		return "", nil
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "content": strings.Join(validLines, "\n")})
+	lines := make([][]byte, 0, min(maxLines, 64))
+	contentBytes := 0
+	windowStart := max(int64(0), info.Size()-maxBytes)
+	position := info.Size()
+	var pending []byte
+	sawNewline := false
+	const readBlockSize int64 = 32 * 1024
+	for position > windowStart && len(lines) < maxLines {
+		start := max(windowStart, position-readBlockSize)
+		block := make([]byte, int(position-start))
+		n, readErr := file.ReadAt(block, start)
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return "", readErr
+		}
+		block = block[:n]
+		if len(block) == 0 {
+			break
+		}
+		// 文件末尾若连续 32KiB 都没有换行，继续逐块前插会让单个超长行
+		// 产生 O(n²) 复制。此时直接读取有界窗口一次，返回内容本身也可能
+		// 接近 maxBytes，因此这份分配是必要且更稳定的。
+		if position == info.Size() && start > windowStart && bytes.IndexByte(block, '\n') < 0 {
+			start = windowStart
+			block = make([]byte, int(position-start))
+			n, readErr = file.ReadAt(block, start)
+			if readErr != nil && !errors.Is(readErr, io.EOF) {
+				return "", readErr
+			}
+			block = block[:n]
+		}
+
+		data := block
+		if len(pending) > 0 {
+			data = make([]byte, len(block)+len(pending))
+			copy(data, block)
+			copy(data[len(block):], pending)
+		}
+		end := len(data)
+		for end > 0 && len(lines) < maxLines {
+			newline := bytes.LastIndexByte(data[:end], '\n')
+			if newline < 0 {
+				break
+			}
+			sawNewline = true
+			line := data[newline+1 : end]
+			if len(bytes.TrimSpace(line)) > 0 {
+				lines = append(lines, line)
+				contentBytes += len(line)
+			}
+			end = newline
+		}
+		pending = data[:end]
+		position = start
+	}
+
+	// pending 是窗口最左侧尚未遇到换行符的一段。文件开头或完整行边界可以
+	// 直接保留；窗口从超长行中间开始时，只有窗口内完全没有换行符才保留，
+	// 与原先“单个超长行显示有界后缀”的行为一致。
+	if len(lines) < maxLines && len(bytes.TrimSpace(pending)) > 0 {
+		includePending := windowStart == 0 || !sawNewline
+		if !includePending && windowStart > 0 {
+			var previous [1]byte
+			if n, previousErr := file.ReadAt(previous[:], windowStart-1); n == 1 && previousErr == nil {
+				includePending = previous[0] == '\n'
+			}
+		}
+		if includePending {
+			lines = append(lines, pending)
+			contentBytes += len(pending)
+		}
+	}
+	for left, right := 0, len(lines)-1; left < right; left, right = left+1, right-1 {
+		lines[left], lines[right] = lines[right], lines[left]
+	}
+	var result strings.Builder
+	result.Grow(contentBytes + max(0, len(lines)-1))
+	for index, line := range lines {
+		if index > 0 {
+			result.WriteByte('\n')
+		}
+		_, _ = result.Write(line)
+	}
+	return result.String(), nil
 }

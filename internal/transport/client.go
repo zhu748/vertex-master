@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -18,6 +19,9 @@ type Header = http.Header
 
 // Response 是 fhttp.Response 的别名。
 type Response = http.Response
+
+// ErrResponseBodyTooLarge 表示受限读取超过调用方允许的响应体大小。
+var ErrResponseBodyTooLarge = errors.New("response body too large")
 
 // Session 封装一个独立的 tls-client，服务于单次逻辑请求。
 type Session struct {
@@ -38,16 +42,47 @@ func (s *Session) Do(ctx context.Context, method, url string, header http.Header
 }
 
 func (s *Session) DoAndRead(ctx context.Context, method, url string, header http.Header, body io.Reader) (int, []byte, error) {
+	return s.DoAndReadLimit(ctx, method, url, header, body, 0)
+}
+
+// DoAndReadLimit 发出请求并读取响应体；maxBytes 大于 0 时限制内存读取大小。
+func (s *Session) DoAndReadLimit(
+	ctx context.Context,
+	method string,
+	url string,
+	header http.Header,
+	body io.Reader,
+	maxBytes int64,
+) (int, []byte, error) {
 	resp, err := s.Do(ctx, method, url, header, body)
 	if err != nil {
 		return 0, nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	data, readErr := io.ReadAll(resp.Body)
+	data, readErr := ReadAllLimit(resp.Body, maxBytes)
 	if readErr != nil {
-		return resp.StatusCode, nil, fmt.Errorf("读取响应体: %w", readErr)
+		return resp.StatusCode, data, fmt.Errorf("读取响应体: %w", readErr)
 	}
 	return resp.StatusCode, data, nil
+}
+
+// ReadAllLimit 读取 reader。maxBytes <= 0 表示不限；超限时返回限制内的前缀和
+// ErrResponseBodyTooLarge，便于错误日志保留有界的上游详情。
+func ReadAllLimit(reader io.Reader, maxBytes int64) ([]byte, error) {
+	if maxBytes <= 0 {
+		return io.ReadAll(reader)
+	}
+	if maxBytes == int64(^uint64(0)>>1) {
+		return io.ReadAll(reader)
+	}
+	data, err := io.ReadAll(io.LimitReader(reader, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return data[:maxBytes], fmt.Errorf("%w: limit %d bytes", ErrResponseBodyTooLarge, maxBytes)
+	}
+	return data, nil
 }
 
 type StreamResponse struct { //nolint:govet
@@ -56,11 +91,12 @@ type StreamResponse struct { //nolint:govet
 }
 
 func (sr *StreamResponse) Close() {
-	if sr.Body == nil {
+	body := sr.Body
+	if body == nil {
 		return
 	}
-	_, _ = io.Copy(io.Discard, sr.Body)
-	_ = sr.Body.Close()
+	sr.Body = nil
+	_ = body.Close()
 }
 
 func (s *Session) DoStream(ctx context.Context, method, url string, header http.Header, body io.Reader) (*StreamResponse, error) {

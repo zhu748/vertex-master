@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -39,16 +40,32 @@ func getTerminalWidthOS() int {
 	return 0
 }
 
-// onResizeOS polls terminal size every second and calls callback on change.
-func onResizeOS(callback func()) {
+// onResizeOS polls terminal size every second and returns an idempotent stop function.
+func onResizeOS(callback func()) func() {
+	stop := make(chan struct{})
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		lastW := 0
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
 		for {
-			time.Sleep(1 * time.Second)
-			if w := getTerminalWidthOS(); w > 0 && w != lastW {
-				lastW = w
-				callback()
+			select {
+			case <-ticker.C:
+				if w := getTerminalWidthOS(); w > 0 && w != lastW {
+					lastW = w
+					callback()
+				}
+			case <-stop:
+				return
 			}
 		}
 	}()
+	var stopOnce sync.Once
+	return func() {
+		stopOnce.Do(func() {
+			close(stop)
+			<-done
+		})
+	}
 }

@@ -4,9 +4,10 @@ import (
 	"runtime"
 
 	"github.com/bsfdsagfadg/vertex/internal/spool"
+	"github.com/bsfdsagfadg/vertex/internal/vertex"
 )
 
-func metricsBody() map[string]any {
+func metricsBody(vc *vertex.VertexAIClient) map[string]any {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 
@@ -19,6 +20,7 @@ func metricsBody() map[string]any {
 			"goroutines": runtime.NumGoroutine(),
 			"spilled_mb": bToMb(uint64(spool.SpilledBytes())),
 		},
+		"token_count": vc.CountTokenStats(),
 	}
 }
 

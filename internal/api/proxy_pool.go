@@ -31,7 +31,15 @@ const (
 	defaultEnvironmentProxyRefreshIntervalMins = 60
 )
 
-var subscriptionRefreshLocks sync.Map //nolint:gochecknoglobals
+type subscriptionRefreshLockEntry struct {
+	mutex sync.Mutex
+	refs  int
+}
+
+var subscriptionRefreshLockRegistry = struct { //nolint:gochecknoglobals
+	sync.Mutex
+	entries map[int64]*subscriptionRefreshLockEntry
+}{entries: make(map[int64]*subscriptionRefreshLockEntry)}
 
 func proxySubscriptionFromEnvironment() (*nodes.ProxySubscription, error) {
 	rawURL := strings.TrimSpace(os.Getenv("VPROXY_PROXY_SUBSCRIPTION_URL"))
@@ -90,6 +98,8 @@ func SyncEnvironmentProxySubscription() error {
 		if getErr != nil {
 			return getErr
 		}
+		release := acquireProxySubscriptionLock(existing.ID)
+		defer release()
 		removed, err := nodes.DeleteProxySubscriptionAndNodes(existing.ID)
 		if err != nil {
 			return err
@@ -107,9 +117,30 @@ func SyncEnvironmentProxySubscription() error {
 	return nil
 }
 
-func proxySubscriptionLock(id int64) *sync.Mutex {
-	value, _ := subscriptionRefreshLocks.LoadOrStore(id, &sync.Mutex{})
-	return value.(*sync.Mutex)
+// acquireProxySubscriptionLock 串行化同一订阅的刷新/删除，并在最后一个调用者
+// 退出后回收锁条目，避免长期创建删除订阅导致全局注册表无限增长。
+func acquireProxySubscriptionLock(id int64) func() {
+	subscriptionRefreshLockRegistry.Lock()
+	entry := subscriptionRefreshLockRegistry.entries[id]
+	if entry == nil {
+		entry = &subscriptionRefreshLockEntry{}
+		subscriptionRefreshLockRegistry.entries[id] = entry
+	}
+	entry.refs++
+	subscriptionRefreshLockRegistry.Unlock()
+
+	entry.mutex.Lock()
+	return func() {
+		// 必须先释放条目锁再减引用；否则最后一个调用者删除注册项后，
+		// 新调用者可能拿到另一把锁并与旧临界区重叠。
+		entry.mutex.Unlock()
+		subscriptionRefreshLockRegistry.Lock()
+		entry.refs--
+		if entry.refs == 0 && subscriptionRefreshLockRegistry.entries[id] == entry {
+			delete(subscriptionRefreshLockRegistry.entries, id)
+		}
+		subscriptionRefreshLockRegistry.Unlock()
+	}
 }
 
 func (adm *AdminHandler) adminAddStandardProxy(w http.ResponseWriter, r *http.Request) {
@@ -293,9 +324,8 @@ func (adm *AdminHandler) adminDeleteProxySubscription(w http.ResponseWriter, r *
 		writeJSON(w, http.StatusConflict, adminErr("该订阅由 Render 环境变量托管，请在 Render 中移除配置"))
 		return
 	}
-	lock := proxySubscriptionLock(body.ID)
-	lock.Lock()
-	defer lock.Unlock()
+	release := acquireProxySubscriptionLock(body.ID)
+	defer release()
 	item, err = nodes.GetProxySubscription(body.ID)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, adminErr("订阅不存在"))
@@ -314,9 +344,8 @@ func (adm *AdminHandler) adminDeleteProxySubscription(w http.ResponseWriter, r *
 }
 
 func (adm *AdminHandler) refreshProxySubscription(ctx context.Context, item nodes.ProxySubscription) (int, error) {
-	lock := proxySubscriptionLock(item.ID)
-	lock.Lock()
-	defer lock.Unlock()
+	release := acquireProxySubscriptionLock(item.ID)
+	defer release()
 
 	current, err := nodes.GetProxySubscription(item.ID)
 	if err != nil {

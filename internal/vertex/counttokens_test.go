@@ -3,10 +3,14 @@ package vertex
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -31,6 +35,28 @@ func TestLiveCountTokens(t *testing.T) {
 		t.Fatalf("live CountTokens returned zero: input=%d output=%d", input, output)
 	}
 	t.Logf("live CountTokens: input=%d output=%d", input, output)
+}
+
+func TestLiveCountTokenSets(t *testing.T) {
+	if os.Getenv("VERTEX_LIVE_COUNT_TEST") == "" {
+		t.Skip("set VERTEX_LIVE_COUNT_TEST=1 to run")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	client := NewVertexAIClient(config.StaticProvider(config.DefaultConfig()))
+	counts := client.CountTokenSets(
+		ctx,
+		"gemini-3.6-flash",
+		[]any{map[string]any{
+			"role": "user", "parts": []any{map[string]any{"text": "hello"}},
+		}},
+		[]any{map[string]any{
+			"role": "model", "parts": []any{map[string]any{"text": "hello world"}},
+		}},
+	)
+	if len(counts) != 2 || counts[0] != 1 || counts[1] != 2 {
+		t.Fatalf("live CountTokenSets=%v, want [1 2]", counts)
+	}
 }
 
 // ---- parseCountTokensResponse：三种 unwrap 形态 + errors 跳过 + 字符串/数字 totalTokens ----
@@ -186,5 +212,373 @@ func TestCountTokensUsesUpstreamOperation(t *testing.T) {
 	variables, _ := received["variables"].(map[string]any)
 	if variables["recaptchaToken"] != "test-recaptcha-token" {
 		t.Fatalf("CountTokens 请求缺少 recaptchaToken: %#v", variables)
+	}
+}
+
+func TestCountTokenSetsSharesRecaptchaAcrossConcurrentRequests(t *testing.T) {
+	oldURL := batchGraphqlURL
+	t.Cleanup(func() { batchGraphqlURL = oldURL })
+
+	var upstreamCalls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		upstreamCalls.Add(1)
+		var request map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&request)
+		variables, _ := request["variables"].(map[string]any)
+		contents, _ := variables["contents"].([]any)
+		count := 42
+		if len(contents) > 0 {
+			content, _ := contents[0].(map[string]any)
+			if content["role"] == "model" {
+				count = 7
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `[{"results":[{"data":{"ui":{"countTokensV2":{"totalTokens":%d}}}}]}]`, count)
+	}))
+	defer upstream.Close()
+	batchGraphqlURL = upstream.URL
+
+	var tokenFetches atomic.Int32
+	cfg := config.DefaultConfig()
+	cfg.ParallelPoolEnabled = false
+	client := NewVertexAIClient(config.StaticProvider(cfg))
+	client.SetTokenPool(recaptcha.NewTokenPoolCustom(func(string) (string, error) {
+		tokenFetches.Add(1)
+		return "shared-recaptcha-token", nil
+	}))
+
+	counts := client.CountTokenSets(
+		context.Background(),
+		"gemini-test",
+		[]any{map[string]any{"role": "user", "parts": []any{map[string]any{"text": "hello"}}}},
+		[]any{map[string]any{"role": "model", "parts": []any{map[string]any{"text": "world"}}}},
+	)
+	if len(counts) != 2 || counts[0] != 42 || counts[1] != 7 {
+		t.Fatalf("CountTokenSets=%v, want [42 7]", counts)
+	}
+	if tokenFetches.Load() != 1 {
+		t.Fatalf("recaptcha fetches=%d, want 1", tokenFetches.Load())
+	}
+	if upstreamCalls.Load() != 2 {
+		t.Fatalf("upstream calls=%d, want 2", upstreamCalls.Load())
+	}
+
+	cached := client.CountTokenSets(
+		context.Background(),
+		"gemini-test",
+		[]any{map[string]any{"role": "user", "parts": []any{map[string]any{"text": "hello"}}}},
+		[]any{map[string]any{"role": "model", "parts": []any{map[string]any{"text": "world"}}}},
+	)
+	if len(cached) != 2 || cached[0] != 42 || cached[1] != 7 {
+		t.Fatalf("cached CountTokenSets=%v, want [42 7]", cached)
+	}
+	if tokenFetches.Load() != 1 || upstreamCalls.Load() != 2 {
+		t.Fatalf(
+			"缓存命中后仍访问上游: recaptcha=%d upstream=%d",
+			tokenFetches.Load(), upstreamCalls.Load(),
+		)
+	}
+	empty := client.CountTokenSets(context.Background(), "gemini-test", nil, []any{})
+	if len(empty) != 2 || empty[0] != 0 || empty[1] != 0 || tokenFetches.Load() != 1 {
+		t.Fatalf("empty sets should not fetch recaptcha: counts=%v fetches=%d", empty, tokenFetches.Load())
+	}
+}
+
+func TestCountTokensSingleflightMergesConcurrentIdenticalRequests(t *testing.T) {
+	oldURL := batchGraphqlURL
+	t.Cleanup(func() { batchGraphqlURL = oldURL })
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var startOnce sync.Once
+	var upstreamCalls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls.Add(1)
+		startOnce.Do(func() { close(started) })
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"results":[{"data":{"ui":{"countTokensV2":{"totalTokens":42}}}}]}]`))
+	}))
+	defer upstream.Close()
+	batchGraphqlURL = upstream.URL
+
+	var tokenFetches atomic.Int32
+	client := NewVertexAIClient(config.StaticProvider(config.DefaultConfig()))
+	client.SetTokenPool(recaptcha.NewTokenPoolCustom(func(string) (string, error) {
+		tokenFetches.Add(1)
+		return "singleflight-token", nil
+	}))
+	contents := []any{map[string]any{
+		"role": "user", "parts": []any{map[string]any{"text": "same request"}},
+	}}
+
+	const concurrency = 8
+	results := make([]int, concurrency)
+	var wg sync.WaitGroup
+	for index := range results {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results[index] = client.CountTokens(context.Background(), "gemini-test", contents)
+		}()
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("singleflight owner did not reach upstream")
+	}
+	waitForCountTokenSharedWaits(t, client, concurrency-1)
+	close(release)
+	wg.Wait()
+
+	for index, count := range results {
+		if count != 42 {
+			t.Fatalf("result[%d]=%d, want 42", index, count)
+		}
+	}
+	stats := client.CountTokenStats()
+	if tokenFetches.Load() != 1 || upstreamCalls.Load() != 1 ||
+		stats.CacheMisses != concurrency || stats.SharedWaits != concurrency-1 ||
+		stats.UpstreamQueries != 1 || stats.HTTPRequests != 1 || stats.Failures != 0 ||
+		stats.CacheEntries != 1 || stats.InFlight != 0 {
+		t.Fatalf(
+			"unexpected singleflight stats: token_fetches=%d upstream=%d stats=%+v",
+			tokenFetches.Load(), upstreamCalls.Load(), stats,
+		)
+	}
+	if cached := client.CountTokens(context.Background(), "gemini-test", contents); cached != 42 {
+		t.Fatalf("cached CountTokens=%d, want 42", cached)
+	}
+	if stats = client.CountTokenStats(); stats.CacheHits != 1 || upstreamCalls.Load() != 1 {
+		t.Fatalf("cache hit not recorded: upstream=%d stats=%+v", upstreamCalls.Load(), stats)
+	}
+}
+
+func TestCountTokensSingleflightWaiterCancellationDoesNotCancelOwner(t *testing.T) {
+	oldURL := batchGraphqlURL
+	t.Cleanup(func() { batchGraphqlURL = oldURL })
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-started:
+		default:
+			close(started)
+		}
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"results":[{"data":{"ui":{"countTokensV2":{"totalTokens":42}}}}]}]`))
+	}))
+	defer upstream.Close()
+	batchGraphqlURL = upstream.URL
+
+	client := NewVertexAIClient(config.StaticProvider(config.DefaultConfig()))
+	client.SetTokenPool(recaptcha.NewTokenPoolCustom(func(string) (string, error) {
+		return "singleflight-token", nil
+	}))
+	contents := []any{map[string]any{
+		"role": "user", "parts": []any{map[string]any{"text": "cancel waiter"}},
+	}}
+	ownerResult := make(chan int, 1)
+	go func() {
+		ownerResult <- client.CountTokens(context.Background(), "gemini-test", contents)
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("owner did not reach upstream")
+	}
+
+	waiterCtx, cancelWaiter := context.WithCancel(context.Background())
+	waiterResult := make(chan int, 1)
+	go func() {
+		waiterResult <- client.CountTokens(waiterCtx, "gemini-test", contents)
+	}()
+	waitForCountTokenSharedWaits(t, client, 1)
+	cancelWaiter()
+	select {
+	case count := <-waiterResult:
+		if count != 0 {
+			t.Fatalf("canceled waiter count=%d, want 0", count)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled waiter did not return")
+	}
+	close(release)
+	select {
+	case count := <-ownerResult:
+		if count != 42 {
+			t.Fatalf("owner count=%d, want 42", count)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiter cancellation stopped owner")
+	}
+}
+
+func TestCountTokensCancellationStopsTokenFetchAndReleasesFlight(t *testing.T) {
+	started := make(chan struct{})
+	client := NewVertexAIClient(config.StaticProvider(config.DefaultConfig()))
+	client.SetTokenPool(recaptcha.NewTokenPoolCustomContext(
+		func(ctx context.Context, _ string) (string, error) {
+			close(started)
+			<-ctx.Done()
+			return "", ctx.Err()
+		},
+	))
+	contents := []any{map[string]any{
+		"role": "user", "parts": []any{map[string]any{"text": "cancel token fetch"}},
+	}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan int, 1)
+	go func() {
+		result <- client.CountTokens(ctx, "gemini-test", contents)
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("token fetch did not start")
+	}
+	cancel()
+	select {
+	case count := <-result:
+		if count != 0 {
+			t.Fatalf("canceled CountTokens=%d, want 0", count)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("CountTokens did not stop after cancellation")
+	}
+	stats := client.CountTokenStats()
+	if stats.InFlight != 0 || stats.Failures != 1 || stats.HTTPRequests != 0 {
+		t.Fatalf("canceled token fetch left dirty state: %+v", stats)
+	}
+}
+
+func TestCountTokensSingleflightFailureCanRetry(t *testing.T) {
+	oldURL := batchGraphqlURL
+	t.Cleanup(func() { batchGraphqlURL = oldURL })
+
+	var upstreamCalls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		call := upstreamCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		if call == 1 {
+			_, _ = w.Write([]byte(`[{"results":[{"data":{"ui":{"countTokensV2":{}}}}]}]`))
+			return
+		}
+		_, _ = w.Write([]byte(`[{"results":[{"data":{"ui":{"countTokensV2":{"totalTokens":42}}}}]}]`))
+	}))
+	defer upstream.Close()
+	batchGraphqlURL = upstream.URL
+
+	var tokenFetches atomic.Int32
+	client := NewVertexAIClient(config.StaticProvider(config.DefaultConfig()))
+	client.SetTokenPool(recaptcha.NewTokenPoolCustom(func(string) (string, error) {
+		tokenFetches.Add(1)
+		return "retry-token", nil
+	}))
+	contents := []any{map[string]any{
+		"role": "user", "parts": []any{map[string]any{"text": "retry request"}},
+	}}
+	if first := client.CountTokens(context.Background(), "gemini-test", contents); first != 0 {
+		t.Fatalf("first failed count=%d, want 0", first)
+	}
+	if second := client.CountTokens(context.Background(), "gemini-test", contents); second != 42 {
+		t.Fatalf("retry count=%d, want 42", second)
+	}
+	stats := client.CountTokenStats()
+	if tokenFetches.Load() != 2 || upstreamCalls.Load() != 2 || stats.Failures != 1 ||
+		stats.UpstreamQueries != 2 || stats.CacheEntries != 1 || stats.InFlight != 0 {
+		t.Fatalf(
+			"failed flight was not retried cleanly: token_fetches=%d upstream=%d stats=%+v",
+			tokenFetches.Load(), upstreamCalls.Load(), stats,
+		)
+	}
+}
+
+func waitForCountTokenSharedWaits(t *testing.T, client *VertexAIClient, want uint64) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if client.CountTokenStats().SharedWaits >= want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("shared waits=%d, want at least %d", client.CountTokenStats().SharedWaits, want)
+}
+
+func TestTokenCountCacheSkipsLargePayloads(t *testing.T) {
+	if _, ok := makeTokenCountCacheKey("gemini-test", []any{map[string]any{
+		"role": "user", "parts": []any{map[string]any{"text": "hello"}},
+	}}); !ok {
+		t.Fatal("small text payload should be cacheable")
+	}
+	if _, ok := makeTokenCountCacheKey("gemini-test", []any{map[string]any{
+		"role": "user", "parts": []any{map[string]any{
+			"inlineData": map[string]any{
+				"mimeType": "image/png", "data": strings.Repeat("A", tokenCountCacheMaxBytes+1),
+			},
+		}},
+	}}); ok {
+		t.Fatal("large media payload should bypass token count cache")
+	}
+	if _, ok := makeTokenCountCacheKey(strings.Repeat("m", tokenCountCacheMaxBytes+1), []any{
+		map[string]any{"role": "user", "parts": []any{map[string]any{"text": "hello"}}},
+	}); ok {
+		t.Fatal("oversized model name should bypass token count cache")
+	}
+}
+
+func TestTokenCountCacheExpiresAndRemainsBounded(t *testing.T) {
+	client := NewVertexAIClient(config.StaticProvider(config.DefaultConfig()))
+	var expiredKey tokenCountCacheKey
+	expiredKey[0] = 1
+	client.countCache[expiredKey] = tokenCountCacheEntry{
+		count: 9, storedAt: time.Now().Add(-tokenCountCacheTTL),
+	}
+	if entries := client.CountTokenStats().CacheEntries; entries != 0 {
+		t.Fatalf("stats included %d expired cache entries, want 0", entries)
+	}
+	client.countCache[expiredKey] = tokenCountCacheEntry{
+		count: 9, storedAt: time.Now().Add(-tokenCountCacheTTL),
+	}
+	if count, ok := client.loadTokenCountCache(expiredKey); ok || count != 0 {
+		t.Fatalf("expired cache entry returned count=%d hit=%v", count, ok)
+	}
+
+	for index := 0; index < tokenCountCacheMaxItems+32; index++ {
+		var key tokenCountCacheKey
+		key[0] = byte(index)
+		key[1] = byte(index >> 8)
+		client.storeTokenCountCache(key, index+1)
+	}
+	client.countCacheMu.Lock()
+	cacheSize := len(client.countCache)
+	client.countCacheMu.Unlock()
+	if cacheSize != tokenCountCacheMaxItems {
+		t.Fatalf("cache size=%d, want bounded at %d", cacheSize, tokenCountCacheMaxItems)
+	}
+
+	var existingKey tokenCountCacheKey
+	existingKey[0] = byte(tokenCountCacheMaxItems - 1)
+	client.storeTokenCountCache(existingKey, 999)
+	client.countCacheMu.Lock()
+	cacheSize = len(client.countCache)
+	updated := client.countCache[existingKey].count
+	client.countCacheMu.Unlock()
+	if cacheSize != tokenCountCacheMaxItems || updated != 999 {
+		t.Fatalf("refreshing existing key changed capacity: size=%d count=%d", cacheSize, updated)
 	}
 }

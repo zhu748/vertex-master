@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/bsfdsagfadg/vertex/internal/config"
@@ -24,6 +25,9 @@ type Server struct {
 	gemini    *GeminiHandler
 	admin     *AdminHandler
 	mw        *middleware
+	version   string
+	commit    string
+	buildTime string
 }
 
 func NewServer(vc *vertex.VertexAIClient, keys *APIKeyManager, cfg config.ConfigProvider) *Server {
@@ -39,6 +43,23 @@ func NewServer(vc *vertex.VertexAIClient, keys *APIKeyManager, cfg config.Config
 		gemini:    &GeminiHandler{h},
 		admin:     &AdminHandler{h},
 		mw:        &middleware{cfg: cfg, keys: keys},
+		version:   "dev",
+		commit:    "unknown",
+		buildTime: "unknown",
+	}
+}
+
+// SetBuildInfo 注入构建脚本通过 ldflags 写入的版本信息，供公开健康检查和
+// 根路径展示，便于确认线上实例是否已经完成升级。
+func (s *Server) SetBuildInfo(version, commit, buildTime string) {
+	if value := strings.TrimSpace(version); value != "" {
+		s.version = value
+	}
+	if value := strings.TrimSpace(commit); value != "" {
+		s.commit = value
+	}
+	if value := strings.TrimSpace(buildTime); value != "" {
+		s.buildTime = value
 	}
 }
 
@@ -122,7 +143,10 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		oaiError(w, http.StatusNotFound, "not found", "invalid_request_error")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"message": "Vertex AI Proxy", "version": "2.0-go"})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"message": "Vertex AI Proxy", "version": s.version,
+		"build_commit": s.commit, "build_time": s.buildTime,
+	})
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -130,6 +154,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"status":          "healthy",
 		"timestamp":       time.Now().Unix(),
 		"api_keys_loaded": s.mw.keys.Count(),
+		"version":         s.version,
+		"build_commit":    s.commit,
+		"build_time":      s.buildTime,
 	})
 }
 

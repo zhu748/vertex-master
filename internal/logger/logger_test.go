@@ -1,6 +1,7 @@
 package logger
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -41,7 +42,17 @@ func TestDailyLogger(t *testing.T) {
 	}
 
 	// Close to trigger merge
-	_ = logger.Close()
+	if err := logger.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := logger.Close(); err != nil { // 幂等
+		t.Fatal(err)
+	}
+	select {
+	case <-logger.cleanupDone:
+	default:
+		t.Fatal("Close returned before cleanup goroutine stopped")
+	}
 
 	// Verify logs_latest.log is deleted (os.IsNotExist)
 	_, err = os.ReadFile(latestPath)
@@ -75,6 +86,11 @@ func TestDailyLogger(t *testing.T) {
 		t.Fatalf("Failed to create old log file: %v", err)
 	}
 	_ = os.Chtimes(oldFile2, oldDate2, oldDate2)
+	customOldFile := filepath.Join(logDir, "custom.log")
+	if err := os.WriteFile(customOldFile, []byte("must remain"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Chtimes(customOldFile, oldDate1, oldDate1)
 
 	// Call cleanup manually
 	logger.cleanup()
@@ -103,5 +119,63 @@ func TestDailyLogger(t *testing.T) {
 	}
 	if !foundOld2 {
 		t.Fatalf("Cleanup incorrectly deleted recent file: %s", oldFile2)
+	}
+	if _, err := os.Stat(customOldFile); err != nil {
+		t.Fatalf("cleanup deleted unrelated log file: %v", err)
+	}
+}
+
+func TestDailyLoggerPreservesLatestWhenArchiveTargetCannotOpen(t *testing.T) {
+	logDir := t.TempDir()
+	logger := NewDailyLogger(logDir)
+	message := []byte("preserve this log\n")
+	if _, err := logger.Write(message); err != nil {
+		t.Fatal(err)
+	}
+	targetPath := filepath.Join(logDir, fmt.Sprintf("vproxy-%s.log", time.Now().Format("2006-01-02")))
+	if err := os.Mkdir(targetPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := logger.Close(); err == nil {
+		t.Fatal("Close succeeded even though archive target is a directory")
+	}
+	latest, err := os.ReadFile(filepath.Join(logDir, "logs_latest.log"))
+	if err != nil {
+		t.Fatalf("latest log was removed after archive failure: %v", err)
+	}
+	if !bytes.Contains(latest, message) {
+		t.Fatalf("latest log lost content after archive failure: %q", latest)
+	}
+}
+
+func TestDailyLoggerStreamsAppendIntoExistingArchive(t *testing.T) {
+	logDir := t.TempDir()
+	targetPath := filepath.Join(logDir, fmt.Sprintf("vproxy-%s.log", time.Now().Format("2006-01-02")))
+	prefix := []byte("existing archive\n")
+	if err := os.WriteFile(targetPath, prefix, 0644); err != nil {
+		t.Fatal(err)
+	}
+	logger := NewDailyLogger(logDir)
+	chunk := bytes.Repeat([]byte("0123456789abcdef"), 4096)
+	const writes = 128
+	for range writes {
+		if _, err := logger.Write(chunk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := logger.Close(); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(targetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startupLen := len(fmt.Sprintf("\n========== STARTUP: %s (Timestamp: %d) ==========\n", time.Now().Format("2006-01-02 15:04:05"), time.Now().Unix()))
+	minimumSize := int64(len(prefix) + startupLen + len(chunk)*writes)
+	if info.Size() < minimumSize {
+		t.Fatalf("archive size = %d, want at least %d", info.Size(), minimumSize)
+	}
+	if _, err := os.Stat(filepath.Join(logDir, "logs_latest.log")); !os.IsNotExist(err) {
+		t.Fatalf("latest log still exists after successful archive: %v", err)
 	}
 }

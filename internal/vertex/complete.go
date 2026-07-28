@@ -15,12 +15,28 @@ type candidateResult struct {
 }
 
 func (c *VertexAIClient) CompleteChat(ctx context.Context, model string, geminiPayload map[string]any) (map[string]any, error) {
+	return c.completeChatPrepared(
+		ctx,
+		model,
+		geminiPayload,
+		buildRequestVariables(model, geminiPayload, c.cfg),
+	)
+}
+
+func (c *VertexAIClient) completeChatPrepared(
+	ctx context.Context,
+	model string,
+	geminiPayload map[string]any,
+	preparedVariables map[string]any,
+) (map[string]any, error) {
 	selected, err := RunRacePreferred(
 		ctx,
 		c.cfg,
 		func(candidateCtx context.Context, proxyURI string) (candidateResult, error) {
-			copiedPayload := deepCopyAny(geminiPayload).(map[string]any)
-			response, err := c.runSingleCandidate(candidateCtx, model, copiedPayload, proxyURI)
+			candidatePayload := payloadForCandidate(geminiPayload)
+			response, err := c.runSingleCandidatePrepared(
+				candidateCtx, model, candidatePayload, preparedVariables, proxyURI,
+			)
 			return candidateResult{proxyURI: proxyURI, resp: response, err: err}, err
 		},
 		func(result candidateResult) bool {
@@ -40,10 +56,26 @@ func (c *VertexAIClient) CompleteChat(ctx context.Context, model string, geminiP
 }
 
 func (c *VertexAIClient) runSingleCandidate(ctx context.Context, model string, geminiPayload map[string]any, proxyURI string) (map[string]any, error) {
-	var chunks []map[string]any
+	return c.runSingleCandidatePrepared(
+		ctx,
+		model,
+		geminiPayload,
+		buildRequestVariables(model, geminiPayload, c.cfg),
+		proxyURI,
+	)
+}
+
+func (c *VertexAIClient) runSingleCandidatePrepared(
+	ctx context.Context,
+	model string,
+	geminiPayload map[string]any,
+	preparedVariables map[string]any,
+	proxyURI string,
+) (map[string]any, error) {
+	collector := newChunkCollector()
 	var firstErr *VertexError
 
-	c.executeStreamingWithRetries(ctx, model, geminiPayload, proxyURI, func(chunk StreamChunk) bool {
+	c.executeStreamingWithPreparedVariables(ctx, model, preparedVariables, proxyURI, func(chunk StreamChunk) bool {
 		if chunk.Err != nil {
 			if firstErr == nil {
 				firstErr = chunk.Err
@@ -51,7 +83,7 @@ func (c *VertexAIClient) runSingleCandidate(ctx context.Context, model string, g
 			return false
 		}
 		if chunk.Data != nil {
-			chunks = append(chunks, chunk.Data)
+			collector.Add(chunk.Data)
 		}
 		return true
 	})
@@ -59,11 +91,11 @@ func (c *VertexAIClient) runSingleCandidate(ctx context.Context, model string, g
 	if firstErr != nil {
 		return nil, firstErr
 	}
-	if len(chunks) == 0 {
+	if collector.Len() == 0 {
 		return nil, NewEmptyResponseError("Upstream returned no data")
 	}
 
-	result := collectChunksToParseResult(chunks)
+	result := collector.Result()
 	resp, err := c.buildCompleteResponse(result)
 	if err != nil {
 		return nil, err

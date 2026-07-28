@@ -38,3 +38,15 @@ func TestSplitIntoRuneChunksEmpty(t *testing.T) {
 		t.Errorf("空文本应返回 nil，got %v", chunks)
 	}
 }
+
+var benchmarkRuneChunks []string //nolint:gochecknoglobals
+
+func BenchmarkSplitIntoRuneChunks(b *testing.B) {
+	text := strings.Repeat("中文a🦊", 32*1024)
+	b.ReportAllocs()
+	b.SetBytes(int64(len(text)))
+	b.ResetTimer()
+	for range b.N {
+		benchmarkRuneChunks = splitIntoRuneChunks(text)
+	}
+}

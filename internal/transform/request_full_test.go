@@ -489,8 +489,8 @@ func TestSafetySettingsPassthrough(t *testing.T) {
 	}
 	model, gemini, _ := ConvertChatRequest(body, config.StaticProvider(config.DefaultConfig()))
 	vars := BuildVertexVariables(model, gemini, config.StaticProvider(config.DefaultConfig()))
-	ss := vars["safetySettings"].([]any)
-	if len(ss) != 1 || ss[0].(map[string]any)["threshold"] != "BLOCK_LOW_AND_ABOVE" {
+	ss := vars["safetySettings"].([]vertexSafetySetting)
+	if len(ss) != 1 || ss[0].Threshold != "BLOCK_LOW_AND_ABOVE" {
 		t.Errorf("自定义 safety_settings 应透传、不被默认覆盖: %v", ss)
 	}
 }
@@ -525,6 +525,42 @@ func TestConvertUsage_Detailed(t *testing.T) {
 	cd := u["completion_tokens_details"].(map[string]any)
 	if cd["reasoning_tokens"] != 5 || cd["image_tokens"] != 6 {
 		t.Errorf("completion_tokens_details=%v", cd)
+	}
+}
+
+func TestNormalizeUsageForCandidateIsAllocationFree(t *testing.T) {
+	meta := map[string]any{
+		"promptTokenCount":        float64(10),
+		"toolUsePromptTokenCount": float64(2),
+		"candidatesTokenCount":    float64(20),
+		"thoughtsTokenCount":      float64(5),
+		"totalTokenCount":         float64(37),
+		"cachedContentTokenCount": float64(3),
+		"promptTokensDetails": []any{
+			map[string]any{"modality": "audio", "tokenCount": float64(4)},
+		},
+		"candidatesTokensDetails": []any{
+			map[string]any{"modality": "image", "tokenCount": float64(6)},
+		},
+	}
+	want := NormalizedUsage{
+		PromptTokens:          12,
+		CompletionTokens:      25,
+		TotalTokens:           37,
+		CachedInputTokens:     3,
+		PromptAudioTokens:     4,
+		ReasoningTokens:       5,
+		CompletionImageTokens: 6,
+	}
+	if got := NormalizeUsageForCandidate(meta, nil); got != want {
+		t.Fatalf("NormalizeUsageForCandidate() = %#v, want %#v", got, want)
+	}
+	if allocations := testing.AllocsPerRun(100, func() {
+		if got := NormalizeUsageForCandidate(meta, nil); got != want {
+			t.Fatalf("NormalizeUsageForCandidate() = %#v, want %#v", got, want)
+		}
+	}); allocations != 0 {
+		t.Fatalf("NormalizeUsageForCandidate allocated %.1f times", allocations)
 	}
 }
 

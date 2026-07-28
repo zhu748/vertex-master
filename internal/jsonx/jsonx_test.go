@@ -2,8 +2,71 @@ package jsonx
 
 import (
 	"bytes"
+	"encoding/json"
+	"strings"
 	"testing"
 )
+
+var benchmarkMarshalBytes []byte  //nolint:gochecknoglobals
+var benchmarkMarshalString string //nolint:gochecknoglobals
+
+type escapedHTMLMarshaler struct{}
+
+func (escapedHTMLMarshaler) MarshalJSON() ([]byte, error) {
+	return []byte(`"\u003c"`), nil
+}
+
+func BenchmarkMarshal(b *testing.B) {
+	for _, benchmark := range []struct {
+		name  string
+		value any
+	}{
+		{name: "tool_arguments", value: map[string]any{
+			"query": "weather", "limit": 10, "nested": map[string]any{"enabled": true},
+		}},
+		{name: "html", value: map[string]any{
+			"text": strings.Repeat("<tag>&value</tag>", 8),
+		}},
+	} {
+		b.Run(benchmark.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for range b.N {
+				encoded, err := Marshal(benchmark.value)
+				if err != nil {
+					b.Fatal(err)
+				}
+				benchmarkMarshalBytes = encoded
+			}
+		})
+	}
+}
+
+func BenchmarkMarshalString(b *testing.B) {
+	value := map[string]any{
+		"query": "weather", "limit": 10, "nested": map[string]any{"enabled": true},
+	}
+	for _, benchmark := range []struct {
+		name string
+		run  func() (string, error)
+	}{
+		{name: "direct", run: func() (string, error) { return MarshalString(value) }},
+		{name: "via_bytes", run: func() (string, error) {
+			encoded, err := Marshal(value)
+			return string(encoded), err
+		}},
+	} {
+		b.Run(benchmark.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for range b.N {
+				encoded, err := benchmark.run()
+				if err != nil {
+					b.Fatal(err)
+				}
+				benchmarkMarshalString = encoded
+			}
+		})
+	}
+}
 
 func TestMarshal(t *testing.T) {
 	tests := []struct {
@@ -45,6 +108,80 @@ func TestMarshal(t *testing.T) {
 				t.Errorf("Marshal() = %s, want %s", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestEncodeWritesUnescapedJSONWithTrailingNewline(t *testing.T) {
+	var output bytes.Buffer
+	if err := Encode(&output, map[string]string{"html": "<b>你好</b> & ok"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := output.String(), "{\"html\":\"<b>你好</b> & ok\"}\n"; got != want {
+		t.Fatalf("Encode()=%q, want %q", got, want)
+	}
+}
+
+func TestMarshalMatchesUnescapedEncoder(t *testing.T) {
+	tests := []struct {
+		name  string
+		value any
+	}{
+		{name: "nested standard JSON", value: map[string]any{
+			"query": "weather", "limit": float64(10),
+			"nested": []any{true, nil, map[string]any{"city": "上海"}},
+		}},
+		{name: "HTML in value", value: map[string]any{"text": "<tag>&value</tag>"}},
+		{name: "HTML in key", value: map[string]any{"<key>": "value"}},
+		{name: "literal escaped text", value: map[string]any{"text": `\u003c`}},
+		{name: "raw message", value: json.RawMessage(`"\u003c"`)},
+		{name: "custom marshaler", value: escapedHTMLMarshaler{}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var reference bytes.Buffer
+			if err := Encode(&reference, test.value); err != nil {
+				t.Fatal(err)
+			}
+			want := bytes.TrimSuffix(reference.Bytes(), []byte{'\n'})
+			got, err := Marshal(test.value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, want) {
+				t.Fatalf("Marshal()=%q, Encode() without newline=%q", got, want)
+			}
+			gotString, err := MarshalString(test.value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gotString != string(want) {
+				t.Fatalf("MarshalString()=%q, Encode() without newline=%q", gotString, want)
+			}
+		})
+	}
+}
+
+func TestMarshalCyclicValueReturnsError(t *testing.T) {
+	value := map[string]any{}
+	value["self"] = value
+	if _, err := Marshal(value); err == nil {
+		t.Fatal("Marshal() cyclic value error = nil")
+	}
+}
+
+func TestMarshalResultDoesNotAliasPooledBuffer(t *testing.T) {
+	first, err := Marshal(map[string]any{"value": "first"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 10 {
+		if _, err := Marshal(map[string]any{"value": "replacement"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, want := string(first), `{"value":"first"}`; got != want {
+		t.Fatalf("earlier Marshal result changed after pool reuse: got %q, want %q", got, want)
 	}
 }
 

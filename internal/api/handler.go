@@ -81,11 +81,14 @@ func oaiError(w http.ResponseWriter, status int, msg, errType string) {
 }
 
 func sseEvent(obj map[string]any) string {
-	data, err := jsonx.Marshal(obj)
-	if err != nil {
+	var event strings.Builder
+	event.Grow(256)
+	event.WriteString("data: ")
+	if err := jsonx.Encode(&event, obj); err != nil {
 		return "data: {}\n\n"
 	}
-	return "data: " + string(data) + "\n\n"
+	event.WriteByte('\n')
+	return event.String()
 }
 
 func streamChunkBase(model, requestID string) map[string]any {

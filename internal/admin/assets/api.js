@@ -17,6 +17,10 @@ const API = {
     get() { return API.raw('/api/admin/settings'); },
     put(v) { return API.raw('/api/admin/settings', { method: 'PUT', body: JSON.stringify({ settings: v }) }); },
   },
+  stats: {
+    get() { return API.raw('/api/admin/stats'); },
+    reset() { return API.raw('/api/admin/stats/reset', { method: 'POST' }); },
+  },
   keys: {
     list() { return API.raw('/api/admin/keys'); },
     add(n, k, desc) { return API.raw('/api/admin/keys', { method: 'POST', body: JSON.stringify({ name: n, key: k, description: desc }) }); },

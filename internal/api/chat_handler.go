@@ -167,6 +167,10 @@ func (c *ChatHandler) streamChatCompletions(ctx context.Context, w http.Response
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
+	sw := &sseWriter{w: w}
+	if canFlush {
+		sw.flush = flusher.Flush
+	}
 
 	write := func(line string) bool {
 		if _, err := io.WriteString(w, line); err != nil {
@@ -187,8 +191,19 @@ func (c *ChatHandler) streamChatCompletions(ctx context.Context, w http.Response
 	prefillFilter := transform.NewAssistantPrefillStreamFilter(
 		transform.AssistantPrefillFromPayload(geminiPayload),
 	)
-	var lastCandidate map[string]any
-	var streamOutput protocolOutput
+	var lastCandidateTokenCount int
+	var streamOutput protocolOutputAccumulator
+	var streamEncoder transform.StreamEventEncoder
+	if converter, ok := c.respConv.(transform.StreamingResponseConverter); ok {
+		streamEncoder = converter.NewStreamEventEncoder(model, requestID)
+	}
+	writeEvent := func(payload any) bool {
+		if sw.writeData(payload) {
+			return true
+		}
+		log.Printf("[Server] [Stream] 请求ID=%s 客户端已主动断开连接", requestID)
+		return false
+	}
 
 	c.vc.StreamChat(ctx, model, geminiPayload, func(ch vertex.StreamChunk) bool {
 		if isFirst && ch.Err == nil {
@@ -200,12 +215,20 @@ func (c *ChatHandler) streamChatCompletions(ctx context.Context, w http.Response
 			streamErrWritten = true
 			return false
 		}
-		data := cloneStringMap(ch.Data)
+		data := ch.Data
 		prefillFilter.FilterGeminiChunk(data)
-		normalizeStreamingGeminiUsage(data, &lastCandidate)
-		mergeProtocolOutput(&streamOutput, outputFromGeminiChunk(data))
-		events := c.respConv.StreamToSSE(data, model, requestID, isFirst)
+		normalizedUsage, hasUsage := normalizeStreamingGeminiUsage(data, &lastCandidateTokenCount)
+		streamOutput.Add(outputFromGeminiChunkWithUsage(data, normalizedUsage, hasUsage))
+		first := isFirst
 		isFirst = false
+		if streamEncoder != nil {
+			result, ok := streamEncoder.Emit(data, first, writeEvent)
+			hasFinish = hasFinish || result.HasFinish
+			gotContent = gotContent || result.HasContent
+			return ok
+		}
+
+		events := c.respConv.StreamToSSE(data, model, requestID, first)
 		for _, ev := range events {
 			if strings.Contains(ev, `"finish_reason"`) && !strings.Contains(ev, `"finish_reason":null`) {
 				hasFinish = true
@@ -244,7 +267,7 @@ func (c *ChatHandler) streamChatCompletions(ctx context.Context, w http.Response
 			return
 		}
 		gotContent = true
-		streamOutput.Text += tail
+		streamOutput.AddText(tail)
 	}
 	if !gotContent && !prefillFilter.SawText() {
 		ee := vertex.NewEmptyResponseError("Upstream returned empty response (no content)")
@@ -258,8 +281,14 @@ func (c *ChatHandler) streamChatCompletions(ctx context.Context, w http.Response
 			return
 		}
 	}
-	streamOutput = completeProtocolUsageWithCountTokens(ctx, c.vc, model, geminiPayload, streamOutput)
-	if !writeOAIStreamUsageValues(writeSilent, streamOutput, model, requestID, time.Now().Unix(), true) {
+	completedOutput := completeProtocolUsageWithCountTokens(
+		ctx,
+		c.vc,
+		model,
+		geminiPayload,
+		streamOutput.Output(),
+	)
+	if !writeOAIStreamUsageValues(writeSilent, completedOutput, model, requestID, time.Now().Unix(), true) {
 		return
 	}
 	writeSilent("data: [DONE]\n\n")

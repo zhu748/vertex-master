@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"runtime/debug"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bsfdsagfadg/vertex/internal/cli"
@@ -21,29 +21,34 @@ type middleware struct {
 }
 
 type requestConcurrencyGate struct {
-	mu     sync.Mutex
-	active int
+	active atomic.Int64
 }
 
 func (g *requestConcurrencyGate) tryAcquire(limit int) bool {
 	if limit < 1 {
 		limit = 1
 	}
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.active >= limit {
-		return false
+	for {
+		current := g.active.Load()
+		if current >= int64(limit) {
+			return false
+		}
+		if g.active.CompareAndSwap(current, current+1) {
+			return true
+		}
 	}
-	g.active++
-	return true
 }
 
 func (g *requestConcurrencyGate) release() {
-	g.mu.Lock()
-	if g.active > 0 {
-		g.active--
+	for {
+		current := g.active.Load()
+		if current <= 0 {
+			return
+		}
+		if g.active.CompareAndSwap(current, current-1) {
+			return
+		}
 	}
-	g.mu.Unlock()
 }
 
 type statusWriter struct {
