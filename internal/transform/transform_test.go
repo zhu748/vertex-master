@@ -357,6 +357,51 @@ func TestMergeContentBlocks(t *testing.T) {
 	}
 }
 
+func TestContentBlockMergerSingletonNormalization(t *testing.T) {
+	tests := []struct {
+		name string
+		part map[string]any
+		want map[string]any
+	}{
+		{name: "canonical text", part: map[string]any{"text": "answer"}, want: map[string]any{"text": "answer"}},
+		{name: "explicit false thought removed", part: map[string]any{
+			"text": "answer", "thought": false,
+		}, want: map[string]any{"text": "answer"}},
+		{name: "truthy thought normalized", part: map[string]any{
+			"text": "thinking", "thought": "yes",
+		}, want: map[string]any{"text": "thinking", "thought": true}},
+		{name: "non-thought signature removed", part: map[string]any{
+			"text": "answer", "thoughtSignature": "ignored",
+		}, want: map[string]any{"text": "answer"}},
+		{name: "canonical thought signature", part: map[string]any{
+			"text": "thinking", "thought": true, "thoughtSignature": "sig",
+		}, want: map[string]any{"text": "thinking", "thought": true, "thoughtSignature": "sig"}},
+		{name: "unrelated field removed", part: map[string]any{
+			"text": "answer", "unused": true,
+		}, want: map[string]any{"text": "answer"}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			before, err := json.Marshal(test.part)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := MergeContentBlocks([]map[string]any{test.part})
+			if len(got) != 1 || !reflect.DeepEqual(got[0], test.want) {
+				t.Fatalf("MergeContentBlocks()=%#v, want %#v", got, test.want)
+			}
+			after, err := json.Marshal(test.part)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(after) != string(before) {
+				t.Fatalf("input part mutated: before=%s after=%s", before, after)
+			}
+		})
+	}
+}
+
 func BenchmarkMergeContentBlocksTextChunks(b *testing.B) {
 	parts := make([]map[string]any, 4096)
 	for index := range parts {

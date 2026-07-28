@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"unicode/utf8"
 
 	"github.com/bsfdsagfadg/vertex/internal/jsonx"
@@ -44,8 +45,9 @@ func splitIntoRuneChunks(text string) []string {
 
 // sseWriter 是一个带 flush 的 SSE 行写出器；write 返回 false 表示客户端断开。
 type sseWriter struct {
-	w     http.ResponseWriter
-	flush func()
+	w      http.ResponseWriter
+	flush  func()
+	failed atomic.Bool
 }
 
 const maxPooledSSEBufferCapacity = 64 * 1024
@@ -56,7 +58,11 @@ var sseBufferPool = sync.Pool{ //nolint:gochecknoglobals
 
 // write 写一条原始字符串并 flush。返回 false 表示客户端断开。
 func (sw *sseWriter) write(line string) bool {
+	if sw == nil || sw.failed.Load() {
+		return false
+	}
 	if _, err := io.WriteString(sw.w, line); err != nil {
+		sw.failed.Store(true)
 		return false
 	}
 	if sw.flush != nil {
@@ -68,6 +74,9 @@ func (sw *sseWriter) write(line string) bool {
 // writeNamed 先在复用缓冲中完整序列化命名 SSE，再一次性写出。这样既能在
 // JSON 失败时保持原有的完整错误帧，也不会为每个流式增量创建临时大字符串。
 func (sw *sseWriter) writeNamed(event string, payload any) bool {
+	if sw == nil || sw.failed.Load() {
+		return false
+	}
 	buffer := sseBufferPool.Get().(*bytes.Buffer)
 	buffer.Reset()
 	buffer.Grow(len(event) + 256)
@@ -87,6 +96,9 @@ func (sw *sseWriter) writeNamed(event string, payload any) bool {
 // writeData 写出没有 event 字段的标准 SSE data 帧，供 Gemini/OpenAI 兼容
 // 流复用。payload 会在任何网络写入发生前完成序列化。
 func (sw *sseWriter) writeData(payload any) bool {
+	if sw == nil || sw.failed.Load() {
+		return false
+	}
 	buffer := sseBufferPool.Get().(*bytes.Buffer)
 	buffer.Reset()
 	buffer.Grow(256)
@@ -106,6 +118,7 @@ func (sw *sseWriter) writeBuffer(buffer *bytes.Buffer) bool {
 		sseBufferPool.Put(buffer)
 	}
 	if err != nil {
+		sw.failed.Store(true)
 		return false
 	}
 	if sw.flush != nil {

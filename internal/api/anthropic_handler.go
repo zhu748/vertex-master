@@ -238,6 +238,9 @@ func appendAnthropicMessageToChat(result []any, role string, content any) ([]any
 		}
 		return append(result, msg), nil
 	}
+	if textContent, ok := anthropicUserTextContentCanPassThrough(content); ok {
+		return append(result, map[string]any{"role": "user", "content": textContent}), nil
+	}
 
 	regular := []any{}
 	flushRegular := func() {
@@ -272,6 +275,20 @@ func appendAnthropicMessageToChat(result []any, role string, content any) ([]any
 	}
 	flushRegular()
 	return result, nil
+}
+
+func anthropicUserTextContentCanPassThrough(content any) ([]any, bool) {
+	blocks, ok := content.([]any)
+	if !ok || len(blocks) == 0 {
+		return nil, false
+	}
+	for _, raw := range blocks {
+		block, ok := raw.(map[string]any)
+		if !ok || stringValue(block["type"]) != "text" {
+			return nil, false
+		}
+	}
+	return blocks, true
 }
 
 func anthropicToolResult(v any) string {
@@ -346,6 +363,9 @@ func (h *AnthropicHandler) streamMessages(
 		sw: newSSEWriter(w, "text/event-stream"), id: "msg_" + reqID24(), model: displayModel,
 	}
 	state.start()
+	if !state.connected() {
+		return
+	}
 
 	// Claude Code SDK 期望流式连接中每 ~15 秒收到一个 ping 事件保活。
 	// 长思考场景下 Gemini 可能 10-30 秒不发内容，没有 ping 会导致 SDK 误判超时断连。
@@ -377,7 +397,17 @@ func (h *AnthropicHandler) streamMessages(
 			state.fail(toVertexError(err))
 			return
 		}
+		if !state.connected() {
+			pingCancel()
+			pingWg.Wait()
+			return
+		}
 		out := completeProtocolUsageWithCountTokens(ctx, h.vc, model, payload, outputFromOAI(h.respConv.ToOAI(resp, model)))
+		if !state.connected() {
+			pingCancel()
+			pingWg.Wait()
+			return
+		}
 		state.consume(out)
 		pingCancel()
 		pingWg.Wait()
@@ -387,6 +417,9 @@ func (h *AnthropicHandler) streamMessages(
 	failed := false
 	var lastCandidateTokenCount int
 	h.vc.StreamChat(ctx, model, payload, func(chunk vertex.StreamChunk) bool {
+		if !state.connected() {
+			return false
+		}
 		if chunk.Err != nil {
 			state.fail(chunk.Err)
 			failed = true
@@ -395,13 +428,15 @@ func (h *AnthropicHandler) streamMessages(
 		data := chunk.Data
 		normalizedUsage, hasUsage := normalizeStreamingGeminiUsage(data, &lastCandidateTokenCount)
 		state.consume(outputFromGeminiChunkWithUsage(data, normalizedUsage, hasUsage))
-		return true
+		return state.connected()
 	})
 	pingCancel()
 	pingWg.Wait()
-	if !failed {
+	if !failed && state.connected() {
 		state.out = completeProtocolUsageWithCountTokens(ctx, h.vc, model, payload, state.output())
-		state.finish()
+		if state.connected() {
+			state.finish()
+		}
 	}
 }
 
@@ -417,6 +452,12 @@ type anthropicStreamState struct {
 	reasoningCache      string
 	reasoningCacheValid bool
 	deltaEvent          anthropicContentBlockDeltaEvent
+	blockStartEvent     anthropicContentBlockStartEvent
+	blockStopEvent      anthropicContentBlockStopEvent
+	emptyString         string
+	emptyObject         struct{}
+	toolID              string
+	toolName            string
 	out                 protocolOutput
 	mu                  sync.Mutex // 保护 sw 的并发写（ping goroutine 与主回调可能竞争）
 }
@@ -435,14 +476,43 @@ type anthropicContentBlockDelta struct {
 	PartialJSON string `json:"partial_json,omitempty"`
 }
 
+type anthropicContentBlockStartEvent struct {
+	ContentBlock anthropicContentBlockStart `json:"content_block"`
+	Index        int                        `json:"index"`
+	Type         string                     `json:"type"`
+}
+
+// Field order follows encoding/json's sorted map-key order so this typed path
+// remains byte-for-byte compatible with the previous map representation.
+type anthropicContentBlockStart struct {
+	ID        *string   `json:"id,omitempty"`
+	Input     *struct{} `json:"input,omitempty"`
+	Name      *string   `json:"name,omitempty"`
+	Signature *string   `json:"signature,omitempty"`
+	Text      *string   `json:"text,omitempty"`
+	Thinking  *string   `json:"thinking,omitempty"`
+	Type      string    `json:"type"`
+}
+
+type anthropicContentBlockStopEvent struct {
+	Index int    `json:"index"`
+	Type  string `json:"type"`
+}
+
 func (s *anthropicStreamState) emit(event string, fields map[string]any) {
+	if !s.connected() {
+		return
+	}
 	fields["type"] = event
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_ = s.sw.writeNamed(event, fields)
+	s.writeNamedLocked(event, fields)
 }
 
 func (s *anthropicStreamState) emitContentBlockDelta(delta anthropicContentBlockDelta) {
+	if !s.connected() {
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.deltaEvent = anthropicContentBlockDeltaEvent{
@@ -450,14 +520,63 @@ func (s *anthropicStreamState) emitContentBlockDelta(delta anthropicContentBlock
 		Index: s.index,
 		Delta: delta,
 	}
-	_ = s.sw.writeNamed("content_block_delta", &s.deltaEvent)
+	s.writeNamedLocked("content_block_delta", &s.deltaEvent)
+}
+
+func (s *anthropicStreamState) emitContentBlockStart(block anthropicContentBlockStart) {
+	if !s.connected() {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.blockStartEvent = anthropicContentBlockStartEvent{
+		ContentBlock: block,
+		Index:        s.index,
+		Type:         "content_block_start",
+	}
+	s.writeNamedLocked("content_block_start", &s.blockStartEvent)
+}
+
+func (s *anthropicStreamState) emitContentBlockStop() {
+	if !s.connected() {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.blockStopEvent = anthropicContentBlockStopEvent{Index: s.index, Type: "content_block_stop"}
+	s.writeNamedLocked("content_block_stop", &s.blockStopEvent)
+}
+
+func (s *anthropicStreamState) connected() bool {
+	return s != nil && (s.sw == nil || !s.sw.failed.Load())
+}
+
+// writeNamedLocked writes while the caller holds mu and remembers a broken
+// client connection so the upstream streaming callback can stop immediately.
+func (s *anthropicStreamState) writeNamedLocked(event string, payload any) bool {
+	if !s.connected() {
+		return false
+	}
+	if !s.sw.writeNamed(event, payload) {
+		return false
+	}
+	return true
 }
 
 // emitPing 发送一个 Anthropic 协议的 ping 保活事件。
 func (s *anthropicStreamState) emitPing() bool {
+	if !s.connected() {
+		return false
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.sw.write("event: ping\ndata: {}\n\n")
+	if !s.connected() {
+		return false
+	}
+	if !s.sw.write("event: ping\ndata: {}\n\n") {
+		return false
+	}
+	return true
 }
 
 func (s *anthropicStreamState) start() {
@@ -469,6 +588,9 @@ func (s *anthropicStreamState) start() {
 }
 
 func (s *anthropicStreamState) consume(chunk protocolOutput) {
+	if !s.connected() {
+		return
+	}
 	if chunk.Input > 0 {
 		s.out.Input = chunk.Input
 	}
@@ -490,48 +612,78 @@ func (s *anthropicStreamState) consume(chunk protocolOutput) {
 	if chunk.Reasoning != "" {
 		if s.openType != "thinking" {
 			s.closeBlock()
+			if !s.connected() {
+				return
+			}
 			s.openType = "thinking"
 			s.blockThinking.Reset()
-			s.emit("content_block_start", map[string]any{
-				"index": s.index, "content_block": map[string]any{"type": "thinking", "thinking": "", "signature": ""},
+			s.emitContentBlockStart(anthropicContentBlockStart{
+				Signature: &s.emptyString, Thinking: &s.emptyString, Type: "thinking",
 			})
+			if !s.connected() {
+				return
+			}
 		}
 		s.emitContentBlockDelta(anthropicContentBlockDelta{
 			Type: "thinking_delta", Thinking: chunk.Reasoning,
 		})
+		if !s.connected() {
+			return
+		}
 		s.blockThinking.WriteString(chunk.Reasoning)
 		s.reasoningCacheValid = false
 	}
 	if chunk.Text != "" {
 		if s.openType != "text" {
 			s.closeBlock()
+			if !s.connected() {
+				return
+			}
 			s.openType = "text"
-			s.emit("content_block_start", map[string]any{
-				"index": s.index, "content_block": map[string]any{"type": "text", "text": ""},
-			})
+			s.emitContentBlockStart(anthropicContentBlockStart{Text: &s.emptyString, Type: "text"})
+			if !s.connected() {
+				return
+			}
 		}
 		s.text.WriteString(chunk.Text)
 		s.emitContentBlockDelta(anthropicContentBlockDelta{Type: "text_delta", Text: chunk.Text})
+		if !s.connected() {
+			return
+		}
 	}
 	for _, tc := range chunk.ToolCalls {
+		if !s.connected() {
+			return
+		}
 		s.closeBlock()
-		s.emit("content_block_start", map[string]any{
-			"index": s.index,
-			"content_block": map[string]any{
-				"type": "tool_use", "id": tc.ID, "name": tc.Name, "input": map[string]any{},
-			},
+		if !s.connected() {
+			return
+		}
+		s.toolID = tc.ID
+		s.toolName = tc.Name
+		s.emitContentBlockStart(anthropicContentBlockStart{
+			ID: &s.toolID, Input: &s.emptyObject, Name: &s.toolName, Type: "tool_use",
 		})
+		if !s.connected() {
+			return
+		}
 		s.emitContentBlockDelta(anthropicContentBlockDelta{
 			Type: "input_json_delta", PartialJSON: tc.Arguments,
 		})
-		s.emit("content_block_stop", map[string]any{"index": s.index})
+		if !s.connected() {
+			return
+		}
+		s.emitContentBlockStop()
+		if !s.connected() {
+			return
+		}
 		s.index++
 		s.out.ToolCalls = append(s.out.ToolCalls, tc)
 	}
 }
 
 func (s *anthropicStreamState) closeBlock() {
-	if s.openType == "" {
+	if s.openType == "" || !s.connected() {
 		return
 	}
 	if s.openType == "thinking" {
@@ -541,16 +693,25 @@ func (s *anthropicStreamState) closeBlock() {
 		s.emitContentBlockDelta(anthropicContentBlockDelta{
 			Type: "signature_delta", Signature: thinkingSignature(thinking),
 		})
+		if !s.connected() {
+			return
+		}
 		s.reasoningBlocks = append(s.reasoningBlocks, thinking)
 		s.blockThinking.Reset()
 	}
-	s.emit("content_block_stop", map[string]any{"index": s.index})
+	s.emitContentBlockStop()
 	s.index++
 	s.openType = ""
 }
 
 func (s *anthropicStreamState) finish() {
+	if !s.connected() {
+		return
+	}
 	s.closeBlock()
+	if !s.connected() {
+		return
+	}
 	s.out = s.output()
 	s.emit("message_delta", map[string]any{
 		"delta": map[string]any{
@@ -586,6 +747,9 @@ func thinkingSignature(thinking string) string {
 }
 
 func (s *anthropicStreamState) fail(err *vertex.VertexError) {
+	if !s.connected() {
+		return
+	}
 	s.emit("error", map[string]any{"error": map[string]any{
 		"type": anthropicErrorType(err), "message": vertex.FriendlyErrorMessage(err),
 	}})

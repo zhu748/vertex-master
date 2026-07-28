@@ -1737,9 +1737,10 @@ func RecordSelection(uri string) {
 }
 
 type scoredNode struct {
-	node    Node
-	score   float64
-	last429 int64
+	node       Node
+	score      float64
+	last429    int64
+	recovering bool
 }
 
 // retainHighestScored 以固定容量最小堆保留最高分节点。调用方最终排序前无需
@@ -1780,6 +1781,54 @@ func siftDownScoredMinHeap(nodes []scoredNode, index int) {
 		}
 		nodes[index], nodes[smallest] = nodes[smallest], nodes[index]
 		index = smallest
+	}
+}
+
+// retainHighestKnown 保留最多 limit 个已验证节点。健康节点始终优先于恢复中
+// 节点，同一类别内再按分数选择；这样单遍扫描即可得到与原先双遍计数相同的集合。
+func retainHighestKnown(nodes []scoredNode, candidate scoredNode, limit int) []scoredNode {
+	if limit <= 0 {
+		return nodes
+	}
+	if len(nodes) < limit {
+		nodes = append(nodes, candidate)
+		if len(nodes) == limit {
+			for index := len(nodes)/2 - 1; index >= 0; index-- {
+				siftDownKnownMinHeap(nodes, index)
+			}
+		}
+		return nodes
+	}
+	if !knownNodeBetter(candidate, nodes[0]) {
+		return nodes
+	}
+	nodes[0] = candidate
+	siftDownKnownMinHeap(nodes, 0)
+	return nodes
+}
+
+func knownNodeBetter(left, right scoredNode) bool {
+	if left.recovering != right.recovering {
+		return !left.recovering
+	}
+	return left.score > right.score
+}
+
+func siftDownKnownMinHeap(nodes []scoredNode, index int) {
+	for {
+		left := index*2 + 1
+		if left >= len(nodes) {
+			return
+		}
+		worst := left
+		if right := left + 1; right < len(nodes) && knownNodeBetter(nodes[left], nodes[right]) {
+			worst = right
+		}
+		if !knownNodeBetter(nodes[index], nodes[worst]) {
+			return
+		}
+		nodes[index], nodes[worst] = nodes[worst], nodes[index]
+		index = worst
 	}
 }
 
@@ -1932,57 +1981,18 @@ func SelectForParallel(k int, topK int, debugMode bool, stickyBonusEnabled bool)
 	now := time.Now().Unix()
 
 	lockLoadedForRead()
-
-	healthyCount := 0
-	recoveringCount := 0
-	untestedCount := 0
-	cooldownCount := 0
-	for _, n := range nodeList {
-		if n.Disabled {
-			continue
-		}
-		h := healthMap[n.RawURI]
-		switch {
-		case h != nil && h.CooldownUntil > now:
-			cooldownCount++
-		case h == nil || (h.LastSuccessAt == 0 && h.LastFailAt == 0):
-			untestedCount++
-		case h.ConsecutiveFailures > 0:
-			recoveringCount++
-		default:
-			healthyCount++
-		}
-	}
-
-	healthyLimit := min(healthyCount, topK)
-	recoveringLimit := min(recoveringCount, max(0, topK-healthyCount))
-	untestedLimit := min(untestedCount, k)
-	cooldownLimit := 0
-	if healthyCount == 0 && recoveringCount == 0 && untestedCount == 0 {
-		cooldownLimit = min(cooldownCount, k)
-	}
-	// 默认 topK=80 是请求热路径。候选只在本次选择期间使用，优先放在
-	// 栈内并让健康/恢复中节点共享一块连续存储，避免每次请求分配约 7KB。
+	// 默认 topK=80 是请求热路径。单遍扫描用固定容量堆同时保留最高分
+	// 已验证节点、少量探索节点和最早冷却节点，避免为精确预分配先扫描一次全池。
 	const inlineScoredNodeLimit = 80
-	var inlineScoredNodes [inlineScoredNodeLimit]scoredNode
-	knownLimit := healthyLimit + recoveringLimit
-	var knownStorage []scoredNode
-	if knownLimit <= len(inlineScoredNodes) {
-		knownStorage = inlineScoredNodes[:knownLimit]
-	} else {
-		knownStorage = make([]scoredNode, knownLimit)
-	}
-	healthy := knownStorage[:0:healthyLimit]
-	recovering := knownStorage[healthyLimit:healthyLimit:knownLimit]
-	untested := make([]scoredNode, 0, untestedLimit)
+	const inlineAuxiliaryNodeLimit = 16
+	var inlineKnown [inlineScoredNodeLimit]scoredNode
+	var inlineUntested [inlineAuxiliaryNodeLimit]scoredNode
+	var inlineCooldown [inlineAuxiliaryNodeLimit]scoredNode
+	knownLimit := min(topK, len(nodeList))
+	auxiliaryLimit := min(k, len(nodeList))
+	var known []scoredNode
+	var untested []scoredNode
 	var cooldownNodes []scoredNode
-	if cooldownLimit > 0 {
-		if cooldownLimit <= len(inlineScoredNodes) {
-			cooldownNodes = inlineScoredNodes[:0:cooldownLimit]
-		} else {
-			cooldownNodes = make([]scoredNode, 0, cooldownLimit)
-		}
-	}
 	seenUntested := 0
 	for _, n := range nodeList {
 		if n.Disabled {
@@ -1990,20 +2000,34 @@ func SelectForParallel(k int, topK int, debugMode bool, stickyBonusEnabled bool)
 		}
 		h := healthMap[n.RawURI]
 		if h != nil && h.CooldownUntil > now {
+			if cooldownNodes == nil {
+				if auxiliaryLimit <= len(inlineCooldown) {
+					cooldownNodes = inlineCooldown[:0:auxiliaryLimit]
+				} else {
+					cooldownNodes = make([]scoredNode, 0, auxiliaryLimit)
+				}
+			}
 			cooldownNodes = retainEarliestCooldown(cooldownNodes, scoredNode{
 				node: n, score: float64(h.CooldownUntil), last429: h.Last429At,
-			}, cooldownLimit)
+			}, auxiliaryLimit)
 			continue
 		}
 		score := 100.0
 		if h == nil || (h.LastSuccessAt == 0 && h.LastFailAt == 0) {
 			// 未测试节点只占少量探索名额，不能压过已经验证可用的节点。
+			if untested == nil {
+				if auxiliaryLimit <= len(inlineUntested) {
+					untested = inlineUntested[:0:auxiliaryLimit]
+				} else {
+					untested = make([]scoredNode, 0, auxiliaryLimit)
+				}
+			}
 			seenUntested++
 			item := scoredNode{node: n, score: 80}
-			if len(untested) < untestedLimit {
+			if len(untested) < auxiliaryLimit {
 				untested = append(untested, item)
-			} else if untestedLimit > 0 {
-				if index := rand.Intn(seenUntested); index < untestedLimit {
+			} else if auxiliaryLimit > 0 {
+				if index := rand.Intn(seenUntested); index < auxiliaryLimit {
 					untested[index] = item
 				}
 			}
@@ -2032,16 +2056,21 @@ func SelectForParallel(k int, topK int, debugMode bool, stickyBonusEnabled bool)
 		if _, sticky := stickyNodes[n.RawURI]; sticky {
 			score += 40
 		}
-		item := scoredNode{node: n, score: math.Max(1.0, score)}
-		if h.ConsecutiveFailures > 0 {
-			recovering = retainHighestScored(recovering, item, recoveringLimit)
-		} else {
-			healthy = retainHighestScored(healthy, item, healthyLimit)
+		if known == nil {
+			if knownLimit <= len(inlineKnown) {
+				known = inlineKnown[:0:knownLimit]
+			} else {
+				known = make([]scoredNode, 0, knownLimit)
+			}
 		}
+		item := scoredNode{
+			node: n, score: math.Max(1.0, score), recovering: h.ConsecutiveFailures > 0,
+		}
+		known = retainHighestKnown(known, item, knownLimit)
 	}
 	mu.RUnlock()
 
-	if len(healthy) == 0 && len(recovering) == 0 && len(untested) == 0 && len(cooldownNodes) > 0 {
+	if len(known) == 0 && len(untested) == 0 && len(cooldownNodes) > 0 {
 		slices.SortFunc(cooldownNodes, func(left, right scoredNode) int {
 			if left.last429 < right.last429 {
 				return -1
@@ -2070,6 +2099,17 @@ func SelectForParallel(k int, topK int, debugMode bool, stickyBonusEnabled bool)
 		}
 		return selected
 	}
+
+	// 固定容量堆是混合顺序；原地分区后分别排序，恢复健康优先、恢复中兜底语义。
+	healthyEnd := 0
+	for index := range known {
+		if !known[index].recovering {
+			known[healthyEnd], known[index] = known[index], known[healthyEnd]
+			healthyEnd++
+		}
+	}
+	healthy := known[:healthyEnd]
+	recovering := known[healthyEnd:]
 
 	slices.SortFunc(healthy, func(left, right scoredNode) int {
 		switch {

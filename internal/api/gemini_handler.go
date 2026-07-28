@@ -142,7 +142,12 @@ func (g *GeminiHandler) handleGeminiStreamGenerate(w http.ResponseWriter, r *htt
 	suffix := generateVPSuffix()
 	var lastCandidateTokenCount int
 	var streamOutput protocolOutputAccumulator
+	var textStreamEncoder geminiTextStreamEncoder
+	textStreamEncoder.init()
 	g.vc.StreamChat(r.Context(), actualModel, body, func(ch vertex.StreamChunk) bool {
+		if sw.failed.Load() {
+			return false
+		}
 		if ch.Err != nil {
 			streamErrWritten = true
 			if isSafetyBlock(ch.Err) {
@@ -165,8 +170,11 @@ func (g *GeminiHandler) handleGeminiStreamGenerate(w http.ResponseWriter, r *htt
 		}
 		cleanGeminiPromptFeedback(data)
 		rewriteGeminiIDs(data, suffix)
-		return sw.writeData(data)
+		return textStreamEncoder.writeData(sw, data)
 	})
+	if sw.failed.Load() {
+		return
+	}
 
 	if streamErrWritten {
 		return

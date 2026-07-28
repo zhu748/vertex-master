@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bsfdsagfadg/vertex/internal/admin"
@@ -26,7 +27,12 @@ const (
 	maxBackgroundUploadPixels = 40_000_000
 	maxAdminLogTailBytes      = 1 << 20
 	maxAdminLogTailLines      = 200
+	adminLogReadBlockSize     = 32 * 1024
 )
+
+var adminLogReadBlockPool = sync.Pool{ //nolint:gochecknoglobals
+	New: func() any { return new([adminLogReadBlockSize]byte) },
+}
 
 type AdminHandler struct {
 	handler
@@ -519,10 +525,18 @@ func readAdminLogTail(path string, maxBytes int64, maxLines int) (string, error)
 	position := info.Size()
 	var pending []byte
 	sawNewline := false
-	const readBlockSize int64 = 32 * 1024
+	readBlock := adminLogReadBlockPool.Get().(*[adminLogReadBlockSize]byte)
+	defer adminLogReadBlockPool.Put(readBlock)
+	usePooledBlock := true
 	for position > windowStart && len(lines) < maxLines {
-		start := max(windowStart, position-readBlockSize)
-		block := make([]byte, int(position-start))
+		start := max(windowStart, position-int64(adminLogReadBlockSize))
+		var block []byte
+		if usePooledBlock {
+			block = readBlock[:int(position-start)]
+			usePooledBlock = false
+		} else {
+			block = make([]byte, int(position-start))
+		}
 		n, readErr := file.ReadAt(block, start)
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
 			return "", readErr
@@ -532,16 +546,14 @@ func readAdminLogTail(path string, maxBytes int64, maxLines int) (string, error)
 			break
 		}
 		// 文件末尾若连续 32KiB 都没有换行，继续逐块前插会让单个超长行
-		// 产生 O(n²) 复制。此时直接读取有界窗口一次，返回内容本身也可能
-		// 接近 maxBytes，因此这份分配是必要且更稳定的。
+		// 产生 O(n²) 复制。改用预扩容 Builder 读取整个有界窗口；纯单行
+		// 可以直接返回 Builder 的字符串，不再额外复制一份同样大的结果。
 		if position == info.Size() && start > windowStart && bytes.IndexByte(block, '\n') < 0 {
-			start = windowStart
-			block = make([]byte, int(position-start))
-			n, readErr = file.ReadAt(block, start)
-			if readErr != nil && !errors.Is(readErr, io.EOF) {
-				return "", readErr
+			window, windowErr := readAdminLogWindowString(file, windowStart, position, readBlock[:])
+			if windowErr != nil {
+				return "", windowErr
 			}
-			block = block[:n]
+			return selectAdminLogTailFromWindow(file, window, windowStart, maxLines)
 		}
 
 		data := block
@@ -594,6 +606,93 @@ func readAdminLogTail(path string, maxBytes int64, maxLines int) (string, error)
 			result.WriteByte('\n')
 		}
 		_, _ = result.Write(line)
+	}
+	return result.String(), nil
+}
+
+func readAdminLogWindowString(file *os.File, start, end int64, scratch []byte) (string, error) {
+	if end <= start {
+		return "", nil
+	}
+	var content strings.Builder
+	content.Grow(int(end - start))
+	position := start
+	for position < end {
+		chunkSize := int64(len(scratch))
+		if remaining := end - position; remaining < chunkSize {
+			chunkSize = remaining
+		}
+		n, err := file.ReadAt(scratch[:int(chunkSize)], position)
+		if n > 0 {
+			_, _ = content.Write(scratch[:n])
+			position += int64(n)
+		}
+		if err != nil && !errors.Is(err, io.EOF) {
+			return "", err
+		}
+		if n == 0 || errors.Is(err, io.EOF) {
+			break
+		}
+	}
+	return content.String(), nil
+}
+
+func selectAdminLogTailFromWindow(
+	file *os.File,
+	window string,
+	windowStart int64,
+	maxLines int,
+) (string, error) {
+	lines := make([]string, 0, min(maxLines, 64))
+	contentBytes := 0
+	end := len(window)
+	sawNewline := false
+	for end > 0 && len(lines) < maxLines {
+		newline := strings.LastIndexByte(window[:end], '\n')
+		if newline < 0 {
+			break
+		}
+		sawNewline = true
+		line := window[newline+1 : end]
+		if strings.TrimSpace(line) != "" {
+			lines = append(lines, line)
+			contentBytes += len(line)
+		}
+		end = newline
+	}
+
+	pending := window[:end]
+	if len(lines) < maxLines && strings.TrimSpace(pending) != "" {
+		includePending := windowStart == 0 || !sawNewline
+		if !includePending && windowStart > 0 {
+			var previous [1]byte
+			n, err := file.ReadAt(previous[:], windowStart-1)
+			if err != nil && !errors.Is(err, io.EOF) {
+				return "", err
+			}
+			includePending = n == 1 && previous[0] == '\n'
+		}
+		if includePending {
+			lines = append(lines, pending)
+			contentBytes += len(pending)
+		}
+	}
+	for left, right := 0, len(lines)-1; left < right; left, right = left+1, right-1 {
+		lines[left], lines[right] = lines[right], lines[left]
+	}
+	if len(lines) == 0 {
+		return "", nil
+	}
+	if len(lines) == 1 {
+		return lines[0], nil
+	}
+	var result strings.Builder
+	result.Grow(contentBytes + len(lines) - 1)
+	for index, line := range lines {
+		if index > 0 {
+			result.WriteByte('\n')
+		}
+		result.WriteString(line)
 	}
 	return result.String(), nil
 }

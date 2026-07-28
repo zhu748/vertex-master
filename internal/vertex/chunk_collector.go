@@ -20,6 +20,8 @@ func newChunkCollector() *chunkCollector {
 	}
 }
 
+// Add 消费一个所有权已经转移给 collector 的流式 chunk。为减少临时对象，
+// 标准文本 part 允许由 ContentBlockMerger 就地规范化，调用方不得再复用 chunk。
 func (c *chunkCollector) Add(chunk map[string]any) {
 	c.count++
 	result := c.result
@@ -57,7 +59,7 @@ func (c *chunkCollector) Add(chunk map[string]any) {
 				if parts, ok := content["parts"].([]any); ok {
 					for _, rawPart := range parts {
 						if part, ok := rawPart.(map[string]any); ok {
-							c.parts.Add(part)
+							c.parts.AddOwned(part)
 						}
 					}
 				}

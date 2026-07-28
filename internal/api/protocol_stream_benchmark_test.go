@@ -175,6 +175,45 @@ func BenchmarkSSEWriterWriteData(b *testing.B) {
 	})
 }
 
+func BenchmarkGeminiTextDeltaStream(b *testing.B) {
+	benchmarks := []struct {
+		name string
+		data map[string]any
+	}{
+		{
+			name: "plain",
+			data: map[string]any{"candidates": []any{map[string]any{
+				"content": map[string]any{"parts": []any{map[string]any{
+					"text": strings.Repeat("x", 128),
+				}}, "role": "model"},
+			}}},
+		},
+		{
+			name: "explicit_false_thought",
+			data: map[string]any{"candidates": []any{map[string]any{
+				"content": map[string]any{"parts": []any{map[string]any{
+					"text": strings.Repeat("x", 128), "thought": false, "thoughtSignature": "",
+				}}, "role": "model"},
+				"index": float64(0),
+			}}},
+		},
+	}
+
+	for _, benchmark := range benchmarks {
+		b.Run(benchmark.name, func(b *testing.B) {
+			sw := &sseWriter{w: benchmarkResponseWriter{}}
+			var encoder geminiTextStreamEncoder
+			encoder.init()
+			b.ReportAllocs()
+			for range b.N {
+				if !encoder.writeData(sw, benchmark.data) {
+					b.Fatal("write failed")
+				}
+			}
+		})
+	}
+}
+
 func BenchmarkOpenAITextDeltaDirectStream(b *testing.B) {
 	sw := &sseWriter{w: benchmarkResponseWriter{}}
 	encoder := transform.NewOpenAIStreamEncoder("gemini-benchmark", "benchmark")
@@ -260,6 +299,47 @@ func BenchmarkAnthropicLongThinkingStreamState(b *testing.B) {
 		benchmarkProtocolOutputResult = state.output()
 		if len(benchmarkProtocolOutputResult.Reasoning) != chunkCount*len(chunk.Reasoning) {
 			b.Fatal("unexpected accumulated Anthropic reasoning length")
+		}
+	}
+}
+
+func BenchmarkAnthropicToolCallStreamState(b *testing.B) {
+	chunk := protocolOutput{ToolCalls: []protocolToolCall{{
+		ID: "toolu_benchmark", Name: "lookup", Arguments: `{"query":"benchmark"}`,
+	}}}
+	b.ReportAllocs()
+	for range b.N {
+		state := anthropicStreamState{sw: &sseWriter{w: benchmarkResponseWriter{}}}
+		state.consume(chunk)
+		if len(state.out.ToolCalls) != 1 || state.index != 1 {
+			b.Fatal("unexpected Anthropic tool stream state")
+		}
+	}
+}
+
+func BenchmarkResponsesToolCallStreamState(b *testing.B) {
+	chunk := protocolOutput{ToolCalls: []protocolToolCall{{
+		ID: "call_benchmark", Name: "lookup", Namespace: "mcp__demo", Arguments: `{"query":"benchmark"}`,
+	}}}
+	b.ReportAllocs()
+	for range b.N {
+		state := responsesStreamState{sw: &sseWriter{w: benchmarkResponseWriter{}}}
+		state.consume(chunk)
+		if len(state.out.ToolCalls) != 1 || state.outputIndex != 1 || len(state.items) != 1 {
+			b.Fatal("unexpected Responses tool stream state")
+		}
+	}
+}
+
+func BenchmarkResponsesTextBlockLifecycle(b *testing.B) {
+	chunk := protocolOutput{Text: strings.Repeat("x", 128)}
+	b.ReportAllocs()
+	for range b.N {
+		state := responsesStreamState{sw: &sseWriter{w: benchmarkResponseWriter{}}}
+		state.consume(chunk)
+		state.closeText()
+		if len(state.items) != 1 || state.outputIndex != 1 {
+			b.Fatal("unexpected Responses text block state")
 		}
 	}
 }

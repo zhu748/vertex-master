@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bsfdsagfadg/vertex/internal/nodes"
 	"github.com/bsfdsagfadg/vertex/internal/spool"
@@ -497,8 +498,15 @@ func scanStreamRawWithLimit(
 			if errors.Is(readErr, context.Canceled) || errors.Is(readErr, context.DeadlineExceeded) {
 				return fmt.Errorf("读取上游流被中断: %w", readErr)
 			}
-			// EOF 或读错误：流结束（正常 EOF 直接返回 nil，上层会按 got_content 判定空响应）。
-			return nil
+			if errors.Is(readErr, io.EOF) {
+				if startIdx >= 0 && braceCount > 0 {
+					return fmt.Errorf("读取上游流遇到截断 JSON: %w", io.ErrUnexpectedEOF)
+				}
+				return nil
+			}
+			// 首帧前的真实网络错误必须交给竞速层，使当前节点记为失败并接力；
+			// 已输出内容后的错误也要保留诊断，调用方会避免重放部分响应。
+			return fmt.Errorf("读取上游流失败: %w", readErr)
 		}
 	}
 }
@@ -517,6 +525,23 @@ var canonicalAnonymousStreamPrefix = []byte( //nolint:gochecknoglobals
 )
 var canonicalAnonymousStreamSuffix = []byte(`}}}]}`) //nolint:gochecknoglobals
 
+var canonicalCleanTextPrefix = []byte( //nolint:gochecknoglobals
+	`{"candidates":[{"content":{"parts":[{"text":`,
+)
+
+var canonicalDirtyTextPrefix = []byte( //nolint:gochecknoglobals
+	`{"candidates":[{"content":{"parts":[{"data":"text","text":`,
+)
+
+var canonicalDirtyTextSuffix = []byte( //nolint:gochecknoglobals
+	`,"thought":false,"thoughtSignature":"","fileData":{},"functionCall":{},"functionResponse":{},"inlineData":{}}`,
+)
+
+var canonicalTextContentSuffix = []byte(`],"role":"model"}`) //nolint:gochecknoglobals
+var canonicalFinishReasonPrefix = []byte(`,"finishReason":`) //nolint:gochecknoglobals
+var canonicalCandidateIndexZero = []byte(`,"index":0`)       //nolint:gochecknoglobals
+var canonicalTextChunkSuffix = []byte(`}]}`)                 //nolint:gochecknoglobals
+
 // processStreamingJSON 对匿名 batchGraphql 的常见单结果外壳走严格快路径：外壳
 // 完全匹配时只解码内部 Gemini 对象。结构、字段顺序、错误或多结果有任何变化时，
 // 回退完整动态解析，保持兼容性和错误语义。
@@ -528,6 +553,13 @@ func processStreamingJSON(raw []byte, emit func(map[string]any) bool) (bool, err
 		end := len(trimmed) - len(canonicalAnonymousStreamSuffix)
 		inner := bytes.TrimSpace(trimmed[start:end])
 		if len(inner) >= 2 && inner[0] == '{' && inner[len(inner)-1] == '}' {
+			if chunk, ok := parseCanonicalTextStreamChunk(inner); ok {
+				if !emit(chunk) {
+					log.Printf("[Stream] 客户端主动断开，导致流结束")
+					return true, nil
+				}
+				return false, nil
+			}
 			if data := parseJSONObject(inner); data != nil {
 				if chunk := extractChunk(data); chunk != nil && !emit(chunk) {
 					log.Printf("[Stream] 客户端主动断开，导致流结束")
@@ -543,6 +575,115 @@ func processStreamingJSON(raw []byte, emit func(map[string]any) bool) (bool, err
 		return false, nil
 	}
 	return processStreamingObject(object, emit)
+}
+
+// parseCanonicalTextStreamChunk 处理匿名端点最常见的单 candidate 文本帧。
+// 这里只接受字段顺序和值都完全匹配的两种 protobuf JSON 形状；任何扩展字段、
+// 非零 index、思考块或格式变化都会回退通用 json.Unmarshal，避免快路径吞字段。
+func parseCanonicalTextStreamChunk(raw []byte) (map[string]any, bool) {
+	dirty := false
+	switch {
+	case bytes.HasPrefix(raw, canonicalCleanTextPrefix):
+		raw = raw[len(canonicalCleanTextPrefix):]
+	case bytes.HasPrefix(raw, canonicalDirtyTextPrefix):
+		raw = raw[len(canonicalDirtyTextPrefix):]
+		dirty = true
+	default:
+		return nil, false
+	}
+
+	text, rest, ok := takeCanonicalJSONString(raw)
+	if !ok {
+		return nil, false
+	}
+	if dirty {
+		if !bytes.HasPrefix(rest, canonicalDirtyTextSuffix) {
+			return nil, false
+		}
+		rest = rest[len(canonicalDirtyTextSuffix):]
+	} else {
+		if len(rest) == 0 || rest[0] != '}' {
+			return nil, false
+		}
+		rest = rest[1:]
+	}
+	if !bytes.HasPrefix(rest, canonicalTextContentSuffix) {
+		return nil, false
+	}
+	rest = rest[len(canonicalTextContentSuffix):]
+
+	finishReason := ""
+	hasFinishReason := false
+	if bytes.HasPrefix(rest, canonicalFinishReasonPrefix) {
+		rest = rest[len(canonicalFinishReasonPrefix):]
+		finishReason, rest, ok = takeCanonicalJSONString(rest)
+		if !ok {
+			return nil, false
+		}
+		hasFinishReason = true
+	}
+	hasIndex := bytes.HasPrefix(rest, canonicalCandidateIndexZero)
+	if hasIndex {
+		rest = rest[len(canonicalCandidateIndexZero):]
+	}
+	if !bytes.Equal(rest, canonicalTextChunkSuffix) {
+		return nil, false
+	}
+
+	part := map[string]any{"text": text}
+	if dirty {
+		// 与通用 cleanPart 保持一致：移除 protobuf 空对象，但保留显式思考标记。
+		part["thought"] = false
+		part["thoughtSignature"] = ""
+	}
+	content := map[string]any{"parts": []any{part}, "role": "model"}
+	candidate := map[string]any{"content": content}
+	if hasFinishReason {
+		candidate["finishReason"] = finishReason
+	}
+	if hasIndex {
+		candidate["index"] = float64(0)
+	}
+	return map[string]any{"candidates": []any{candidate}}, true
+}
+
+func takeCanonicalJSONString(raw []byte) (string, []byte, bool) {
+	if len(raw) < 2 || raw[0] != '"' {
+		return "", raw, false
+	}
+	escaped := false
+	hasEscape := false
+	for index := 1; index < len(raw); index++ {
+		ch := raw[index]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if ch == '\\' {
+			escaped = true
+			hasEscape = true
+			continue
+		}
+		if ch == '"' {
+			encoded := raw[:index+1]
+			if hasEscape {
+				var value string
+				if err := json.Unmarshal(encoded, &value); err != nil {
+					return "", raw, false
+				}
+				return value, raw[index+1:], true
+			}
+			value := raw[1:index]
+			if !utf8.Valid(value) {
+				return "", raw, false
+			}
+			return string(value), raw[index+1:], true
+		}
+		if ch < 0x20 {
+			return "", raw, false
+		}
+	}
+	return "", raw, false
 }
 
 // processStreamingObject 从单个上游 JSON 对象提取增量 chunk。

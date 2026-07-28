@@ -1,6 +1,9 @@
 package vertex
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 var benchmarkChunkCollectorResult *ParseResult //nolint:gochecknoglobals
 
@@ -61,6 +64,29 @@ func TestChunkCollectorAggregatesPartsAndMetadata(t *testing.T) {
 	}
 }
 
+func TestChunkCollectorNormalizesOwnedTextPartsInPlace(t *testing.T) {
+	plain := map[string]any{"text": "answer", "thought": false, "unused": true}
+	thought := map[string]any{
+		"text": "thinking", "thought": "yes", "thoughtSignature": "sig", "unused": true,
+	}
+	collector := newChunkCollector()
+	collector.Add(map[string]any{"candidates": []any{map[string]any{
+		"content": map[string]any{"parts": []any{plain, thought}},
+	}}})
+
+	result := collector.Result()
+	want := []map[string]any{
+		{"text": "answer"},
+		{"text": "thinking", "thought": true, "thoughtSignature": "sig"},
+	}
+	if !reflect.DeepEqual(result.Parts, want) {
+		t.Fatalf("normalized parts=%#v, want %#v", result.Parts, want)
+	}
+	if !reflect.DeepEqual(plain, want[0]) || !reflect.DeepEqual(thought, want[1]) {
+		t.Fatalf("owned parts were not normalized in place: plain=%#v thought=%#v", plain, thought)
+	}
+}
+
 func BenchmarkChunkCollection(b *testing.B) {
 	chunks := make([]map[string]any, 4096)
 	for index := range chunks {
@@ -105,8 +131,9 @@ func BenchmarkChunkCollectionSizes(b *testing.B) {
 			chunks := make([]map[string]any, benchmark.chunkCount)
 			for index := range chunks {
 				part := map[string]any{"text": "0123456789abcdef"}
-				if benchmark.thought && index%2 == 0 {
-					part["thought"] = true
+				if benchmark.thought {
+					// 真实 Gemini 流会在正文 part 上显式发送 thought:false。
+					part["thought"] = index%2 == 0
 				}
 				chunks[index] = map[string]any{
 					"candidates": []any{map[string]any{

@@ -52,6 +52,37 @@ func TestReadAdminLogTailKeepsBoundedSuffixOfOversizedLine(t *testing.T) {
 	}
 }
 
+func TestReadAdminLogTailOversizedFinalLineKeepsPreviousCompleteLines(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "logs_latest.log")
+	longFinal := strings.Repeat("尾", adminLogReadBlockSize)
+	content := "discard\nkeep\n" + longFinal
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := readAdminLogTail(path, int64(len(content)), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "keep\n" + longFinal; got != want {
+		t.Fatalf("oversized final-line tail length=%d, want %d", len(got), len(want))
+	}
+}
+
+func TestReadAdminLogTailOversizedBlankLineIsFiltered(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "logs_latest.log")
+	if err := os.WriteFile(path, []byte(strings.Repeat(" ", maxAdminLogTailBytes+128)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readAdminLogTail(path, maxAdminLogTailBytes, maxAdminLogTailLines)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "" {
+		t.Fatalf("oversized blank log line was not filtered: len=%d", len(got))
+	}
+}
+
 func TestReadAdminLogTailFiltersBlankLines(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "logs_latest.log")
 	if err := os.WriteFile(path, []byte("first\n \nsecond\n\nthird\n"), 0o600); err != nil {

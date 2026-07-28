@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -107,6 +108,67 @@ func TestScanStreamLargeSingleReadBatchPreservesOrder(t *testing.T) {
 	})
 	if err != nil || seen != frameCount {
 		t.Fatalf("scan err=%v seen=%d", err, seen)
+	}
+}
+
+func TestScanStreamReadErrorIsNotTreatedAsEOF(t *testing.T) {
+	sentinel := errors.New("connection reset")
+	called := false
+	err := scanStreamRaw(&terminalErrorReader{err: sentinel}, func([]byte) (bool, error) {
+		called = true
+		return false, nil
+	})
+	if called {
+		t.Fatal("callback must not run without a complete object")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("scan error=%v, want wrapped connection error", err)
+	}
+}
+
+func TestScanStreamProcessesFinalBytesBeforeReadError(t *testing.T) {
+	sentinel := errors.New("unexpected stream termination")
+	seen := 0
+	err := scanStreamRaw(&terminalErrorReader{
+		data: []byte(`{"index":1}`),
+		err:  sentinel,
+	}, func(raw []byte) (bool, error) {
+		seen++
+		if string(raw) != `{"index":1}` {
+			t.Fatalf("frame=%q", raw)
+		}
+		return false, nil
+	})
+	if seen != 1 {
+		t.Fatalf("seen=%d, want 1", seen)
+	}
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("scan error=%v, want wrapped terminal error", err)
+	}
+}
+
+func TestScanStreamEOFRemainsSuccessful(t *testing.T) {
+	seen := 0
+	err := scanStreamRaw(strings.NewReader(`{"index":1}`), func([]byte) (bool, error) {
+		seen++
+		return false, nil
+	})
+	if err != nil || seen != 1 {
+		t.Fatalf("EOF scan err=%v seen=%d", err, seen)
+	}
+}
+
+func TestScanStreamTruncatedObjectReturnsUnexpectedEOF(t *testing.T) {
+	called := false
+	err := scanStreamRaw(strings.NewReader(`prefix {"index":1`), func([]byte) (bool, error) {
+		called = true
+		return false, nil
+	})
+	if called {
+		t.Fatal("callback must not receive a truncated object")
+	}
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("scan error=%v, want io.ErrUnexpectedEOF", err)
 	}
 }
 
@@ -221,6 +283,58 @@ func TestScanStreamAcceptsObjectAtLimit(t *testing.T) {
 // wrap 把一段 candidates JSON 包成匿名 batchGraphql 的 results.data.ui.streamGenerateContentAnonymous 结构。
 func wrap(inner string) string {
 	return `{"results":[{"data":{"ui":{"streamGenerateContentAnonymous":` + inner + `}}}]}`
+}
+
+func TestParseCanonicalTextStreamChunkMatchesGenericPath(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{
+			name: "clean without index",
+			raw:  `{"candidates":[{"content":{"parts":[{"text":"hello"}],"role":"model"},"finishReason":"FINISH_REASON_UNSPECIFIED"}]}`,
+		},
+		{
+			name: "clean stop with index",
+			raw:  `{"candidates":[{"content":{"parts":[{"text":"done"}],"role":"model"},"finishReason":"STOP","index":0}]}`,
+		},
+		{
+			name: "dirty escaped text",
+			raw:  `{"candidates":[{"content":{"parts":[{"data":"text","text":"line\n\"中文\ud83d\ude00","thought":false,"thoughtSignature":"","fileData":{},"functionCall":{},"functionResponse":{},"inlineData":{}}],"role":"model"},"finishReason":"FINISH_REASON_UNSPECIFIED","index":0}]}`,
+		},
+		{
+			name: "empty text without finish reason",
+			raw:  `{"candidates":[{"content":{"parts":[{"text":""}],"role":"model"}}]}`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			generic := parseJSONObject([]byte(test.raw))
+			want := extractChunk(generic)
+			got, ok := parseCanonicalTextStreamChunk([]byte(test.raw))
+			if !ok {
+				t.Fatal("canonical text frame unexpectedly missed fast path")
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("fast path=%#v, generic path=%#v", got, want)
+			}
+		})
+	}
+}
+
+func TestParseCanonicalTextStreamChunkRejectsExtendedShapes(t *testing.T) {
+	tests := []string{
+		`{"candidates":[{"content":{"parts":[{"text":"hello"}],"role":"model"},"finishReason":"STOP","index":1}]}`,
+		`{"candidates":[{"content":{"parts":[{"text":"hello"}],"role":"model"},"finishReason":"STOP","safetyRatings":[]}]}`,
+		`{"candidates":[{"content":{"parts":[{"text":"thinking","thought":true}],"role":"model"},"finishReason":"STOP","index":0}]}`,
+		`{"candidates":[{"content":{"parts":[{"text":"hello"}],"role":"model","unexpected":true},"finishReason":"STOP"}]}`,
+	}
+	for _, raw := range tests {
+		if chunk, ok := parseCanonicalTextStreamChunk([]byte(raw)); ok {
+			t.Fatalf("extended frame must use generic path, got %#v for %s", chunk, raw)
+		}
+	}
 }
 
 func TestScanStream_MultiChunkBraceScan(t *testing.T) {
@@ -689,6 +803,20 @@ type splitReader struct {
 	data  []byte
 	chunk int
 	pos   int
+}
+
+type terminalErrorReader struct {
+	data []byte
+	err  error
+	done bool
+}
+
+func (r *terminalErrorReader) Read(p []byte) (int, error) {
+	if r.done {
+		return 0, r.err
+	}
+	r.done = true
+	return copy(p, r.data), r.err
 }
 
 func (r *splitReader) Read(p []byte) (int, error) {

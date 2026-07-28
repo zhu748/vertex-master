@@ -343,6 +343,9 @@ func responseContentToChat(v any) (any, error) {
 		return s, nil
 	}
 	rawContent := anySlice(v)
+	if responsesTextContentCanPassThrough(rawContent) {
+		return rawContent, nil
+	}
 	content := make([]any, 0, len(rawContent))
 	for _, raw := range rawContent {
 		item, _ := raw.(map[string]any)
@@ -365,6 +368,24 @@ func responseContentToChat(v any) (any, error) {
 		}
 	}
 	return content, nil
+}
+
+func responsesTextContentCanPassThrough(content []any) bool {
+	if len(content) == 0 {
+		return false
+	}
+	for _, raw := range content {
+		item, ok := raw.(map[string]any)
+		if !ok {
+			return false
+		}
+		switch stringValue(item["type"]) {
+		case "input_text", "output_text", "text":
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func buildResponsesResponse(request map[string]any, model, id string, out protocolOutput) map[string]any {
@@ -455,9 +476,15 @@ func (h *ResponsesHandler) streamResponses(
 	state.emit("response.created", map[string]any{
 		"response": state.responseObject("in_progress", protocolOutput{}),
 	})
+	if state.streamFailed() {
+		return
+	}
 	state.emit("response.in_progress", map[string]any{
 		"response": state.responseObject("in_progress", protocolOutput{}),
 	})
+	if state.streamFailed() {
+		return
+	}
 
 	if aggregate {
 		resp, err := h.vc.CompleteChat(ctx, model, payload)
@@ -465,8 +492,14 @@ func (h *ResponsesHandler) streamResponses(
 			state.fail(toVertexError(err))
 			return
 		}
+		if state.streamFailed() {
+			return
+		}
 		out := outputFromOAI(h.respConv.ToOAI(resp, model))
 		out = completeProtocolUsageWithCountTokens(ctx, h.vc, model, payload, out)
+		if state.streamFailed() {
+			return
+		}
 		restoreResponsesToolNamespaces(&out, namespaceTools)
 		state.consume(out)
 		state.finish()
@@ -476,6 +509,9 @@ func (h *ResponsesHandler) streamResponses(
 	failed := false
 	var lastCandidateTokenCount int
 	h.vc.StreamChat(ctx, model, payload, func(chunk vertex.StreamChunk) bool {
+		if state.streamFailed() {
+			return false
+		}
 		if chunk.Err != nil {
 			state.fail(chunk.Err)
 			failed = true
@@ -484,31 +520,41 @@ func (h *ResponsesHandler) streamResponses(
 		data := chunk.Data
 		normalizedUsage, hasUsage := normalizeStreamingGeminiUsage(data, &lastCandidateTokenCount)
 		state.consume(outputFromGeminiChunkWithUsage(data, normalizedUsage, hasUsage))
-		return true
+		return !state.streamFailed()
 	})
-	if !failed {
+	if !failed && !state.streamFailed() {
 		state.out = completeProtocolUsageWithCountTokens(ctx, h.vc, model, payload, state.output())
-		state.finish()
+		if !state.streamFailed() {
+			state.finish()
+		}
 	}
 }
 
 type responsesStreamState struct {
-	sw             *sseWriter
-	id             string
-	model          string
-	request        map[string]any
-	namespaceTools map[string]responsesNamespacedTool
-	sequence       int
-	outputIndex    int
-	textID         string
-	text           transform.StringAccumulator
-	textBlocks     []string
-	textCache      string
-	textCacheValid bool
-	textOpen       bool
-	textDeltaEvent responsesOutputTextDeltaEvent
-	items          []any
-	out            protocolOutput
+	sw                     *sseWriter
+	id                     string
+	model                  string
+	request                map[string]any
+	namespaceTools         map[string]responsesNamespacedTool
+	sequence               int
+	outputIndex            int
+	textID                 string
+	text                   transform.StringAccumulator
+	textBlocks             []string
+	textCache              string
+	textCacheValid         bool
+	textOpen               bool
+	textDeltaEvent         responsesOutputTextDeltaEvent
+	textItemEvent          responsesOutputTextItemEvent
+	textContentPartEvent   responsesOutputTextContentPartEvent
+	textDoneEvent          responsesOutputTextDoneEvent
+	textItemContent        [1]responsesOutputTextPart
+	functionItemEvent      responsesFunctionCallItemEvent
+	functionArgumentsEvent responsesFunctionCallArgumentsEvent
+	functionNamespace      string
+	functionArguments      string
+	items                  []any
+	out                    protocolOutput
 }
 
 type responsesOutputTextDeltaEvent struct {
@@ -521,14 +567,92 @@ type responsesOutputTextDeltaEvent struct {
 	Logprobs       []any  `json:"logprobs"`
 }
 
+type responsesOutputTextPart struct {
+	Annotations []any  `json:"annotations"`
+	Logprobs    []any  `json:"logprobs"`
+	Text        string `json:"text"`
+	Type        string `json:"type"`
+}
+
+type responsesOutputTextMessageItem struct {
+	Content []responsesOutputTextPart `json:"content"`
+	ID      string                    `json:"id"`
+	Role    string                    `json:"role"`
+	Status  string                    `json:"status"`
+	Type    string                    `json:"type"`
+}
+
+type responsesOutputTextItemEvent struct {
+	Item           responsesOutputTextMessageItem `json:"item"`
+	OutputIndex    int                            `json:"output_index"`
+	SequenceNumber int                            `json:"sequence_number"`
+	Type           string                         `json:"type"`
+}
+
+type responsesOutputTextContentPartEvent struct {
+	ContentIndex   int                     `json:"content_index"`
+	ItemID         string                  `json:"item_id"`
+	OutputIndex    int                     `json:"output_index"`
+	Part           responsesOutputTextPart `json:"part"`
+	SequenceNumber int                     `json:"sequence_number"`
+	Type           string                  `json:"type"`
+}
+
+type responsesOutputTextDoneEvent struct {
+	Annotations    []any  `json:"annotations"`
+	ContentIndex   int    `json:"content_index"`
+	ItemID         string `json:"item_id"`
+	Logprobs       []any  `json:"logprobs"`
+	OutputIndex    int    `json:"output_index"`
+	SequenceNumber int    `json:"sequence_number"`
+	Text           string `json:"text"`
+	Type           string `json:"type"`
+}
+
+type responsesFunctionCallItemEvent struct {
+	Item           responsesFunctionCallItem `json:"item"`
+	OutputIndex    int                       `json:"output_index"`
+	SequenceNumber int                       `json:"sequence_number"`
+	Type           string                    `json:"type"`
+}
+
+type responsesFunctionCallItem struct {
+	Arguments string  `json:"arguments"`
+	CallID    string  `json:"call_id"`
+	ID        string  `json:"id"`
+	Name      string  `json:"name"`
+	Namespace *string `json:"namespace,omitempty"`
+	Status    string  `json:"status"`
+	Type      string  `json:"type"`
+}
+
+type responsesFunctionCallArgumentsEvent struct {
+	Arguments      *string `json:"arguments,omitempty"`
+	Delta          *string `json:"delta,omitempty"`
+	ItemID         string  `json:"item_id"`
+	OutputIndex    int     `json:"output_index"`
+	SequenceNumber int     `json:"sequence_number"`
+	Type           string  `json:"type"`
+}
+
 func (s *responsesStreamState) emit(event string, fields map[string]any) {
+	if s.streamFailed() {
+		return
+	}
 	s.sequence++
 	fields["type"] = event
 	fields["sequence_number"] = s.sequence
 	_ = s.sw.writeNamed(event, fields)
 }
 
+func (s *responsesStreamState) streamFailed() bool {
+	return s == nil || (s.sw != nil && s.sw.failed.Load())
+}
+
 func (s *responsesStreamState) emitTextDelta(delta string) {
+	if s.streamFailed() {
+		return
+	}
 	s.sequence++
 	s.textDeltaEvent = responsesOutputTextDeltaEvent{
 		Type:           "response.output_text.delta",
@@ -540,6 +664,146 @@ func (s *responsesStreamState) emitTextDelta(delta string) {
 		Logprobs:       []any{},
 	}
 	_ = s.sw.writeNamed("response.output_text.delta", &s.textDeltaEvent)
+}
+
+func (s *responsesStreamState) emitTextBlockStart() {
+	if s.streamFailed() {
+		return
+	}
+	s.sequence++
+	s.textItemEvent = responsesOutputTextItemEvent{
+		Item: responsesOutputTextMessageItem{
+			Content: s.textItemContent[:0],
+			ID:      s.textID,
+			Role:    "assistant",
+			Status:  "in_progress",
+			Type:    "message",
+		},
+		OutputIndex:    s.outputIndex,
+		SequenceNumber: s.sequence,
+		Type:           "response.output_item.added",
+	}
+	if !s.sw.writeNamed("response.output_item.added", &s.textItemEvent) {
+		return
+	}
+
+	s.sequence++
+	s.textContentPartEvent = responsesOutputTextContentPartEvent{
+		ContentIndex: 0,
+		ItemID:       s.textID,
+		OutputIndex:  s.outputIndex,
+		Part: responsesOutputTextPart{
+			Annotations: []any{}, Logprobs: []any{}, Text: "", Type: "output_text",
+		},
+		SequenceNumber: s.sequence,
+		Type:           "response.content_part.added",
+	}
+	_ = s.sw.writeNamed("response.content_part.added", &s.textContentPartEvent)
+}
+
+func (s *responsesStreamState) emitTextBlockDone(text string) {
+	if s.streamFailed() {
+		return
+	}
+	// Codex CLI SDK 严格解析 output_text.done 事件，期望 logprobs 和
+	// annotations 字段都存在，即使它们是空数组。
+	s.sequence++
+	s.textDoneEvent = responsesOutputTextDoneEvent{
+		Annotations:    []any{},
+		ContentIndex:   0,
+		ItemID:         s.textID,
+		Logprobs:       []any{},
+		OutputIndex:    s.outputIndex,
+		SequenceNumber: s.sequence,
+		Text:           text,
+		Type:           "response.output_text.done",
+	}
+	if !s.sw.writeNamed("response.output_text.done", &s.textDoneEvent) {
+		return
+	}
+
+	part := responsesOutputTextPart{
+		Annotations: []any{}, Logprobs: []any{}, Text: text, Type: "output_text",
+	}
+	s.sequence++
+	s.textContentPartEvent = responsesOutputTextContentPartEvent{
+		ContentIndex:   0,
+		ItemID:         s.textID,
+		OutputIndex:    s.outputIndex,
+		Part:           part,
+		SequenceNumber: s.sequence,
+		Type:           "response.content_part.done",
+	}
+	if !s.sw.writeNamed("response.content_part.done", &s.textContentPartEvent) {
+		return
+	}
+
+	s.textItemContent[0] = part
+	s.sequence++
+	s.textItemEvent = responsesOutputTextItemEvent{
+		Item: responsesOutputTextMessageItem{
+			Content: s.textItemContent[:],
+			ID:      s.textID,
+			Role:    "assistant",
+			Status:  "completed",
+			Type:    "message",
+		},
+		OutputIndex:    s.outputIndex,
+		SequenceNumber: s.sequence,
+		Type:           "response.output_item.done",
+	}
+	_ = s.sw.writeNamed("response.output_item.done", &s.textItemEvent)
+}
+
+func (s *responsesStreamState) emitFunctionCallItem(
+	event, status, itemID string,
+	tc protocolToolCall,
+	arguments string,
+) {
+	if s.streamFailed() {
+		return
+	}
+	s.sequence++
+	s.functionNamespace = tc.Namespace
+	var namespace *string
+	if tc.Namespace != "" {
+		namespace = &s.functionNamespace
+	}
+	s.functionItemEvent = responsesFunctionCallItemEvent{
+		Item: responsesFunctionCallItem{
+			Arguments: arguments,
+			CallID:    tc.ID,
+			ID:        itemID,
+			Name:      tc.Name,
+			Namespace: namespace,
+			Status:    status,
+			Type:      "function_call",
+		},
+		OutputIndex:    s.outputIndex,
+		SequenceNumber: s.sequence,
+		Type:           event,
+	}
+	_ = s.sw.writeNamed(event, &s.functionItemEvent)
+}
+
+func (s *responsesStreamState) emitFunctionCallArguments(event, itemID, arguments string) {
+	if s.streamFailed() {
+		return
+	}
+	s.sequence++
+	s.functionArguments = arguments
+	s.functionArgumentsEvent = responsesFunctionCallArgumentsEvent{
+		ItemID:         itemID,
+		OutputIndex:    s.outputIndex,
+		SequenceNumber: s.sequence,
+		Type:           event,
+	}
+	if event == "response.function_call_arguments.delta" {
+		s.functionArgumentsEvent.Delta = &s.functionArguments
+	} else {
+		s.functionArgumentsEvent.Arguments = &s.functionArguments
+	}
+	_ = s.sw.writeNamed(event, &s.functionArgumentsEvent)
 }
 
 func (s *responsesStreamState) responseObject(status string, out protocolOutput) map[string]any {
@@ -554,6 +818,9 @@ func (s *responsesStreamState) responseObject(status string, out protocolOutput)
 }
 
 func (s *responsesStreamState) consume(chunk protocolOutput) {
+	if s.streamFailed() {
+		return
+	}
 	restoreResponsesToolNamespaces(&chunk, s.namespaceTools)
 	if chunk.Input > 0 {
 		s.out.Input = chunk.Input
@@ -583,42 +850,38 @@ func (s *responsesStreamState) consume(chunk protocolOutput) {
 			s.textOpen = true
 			s.textID = "msg_" + reqID24()
 			s.text.Reset()
-			s.emit("response.output_item.added", map[string]any{
-				"output_index": s.outputIndex,
-				"item": map[string]any{
-					"id": s.textID, "type": "message", "status": "in_progress",
-					"role": "assistant", "content": []any{},
-				},
-			})
-			s.emit("response.content_part.added", map[string]any{
-				"item_id": s.textID, "output_index": s.outputIndex, "content_index": 0,
-				"part": map[string]any{"type": "output_text", "text": "", "annotations": []any{}, "logprobs": []any{}},
-			})
+			s.emitTextBlockStart()
+			if s.streamFailed() {
+				return
+			}
 		}
 		s.text.WriteString(chunk.Text)
 		s.textCacheValid = false
 		s.emitTextDelta(chunk.Text)
+		if s.streamFailed() {
+			return
+		}
 	}
 	for _, tc := range chunk.ToolCalls {
+		if s.streamFailed() {
+			return
+		}
 		s.closeText()
 		itemID := "fc_" + reqID24()
+		s.emitFunctionCallItem("response.output_item.added", "in_progress", itemID, tc, "")
+		s.emitFunctionCallArguments("response.function_call_arguments.delta", itemID, tc.Arguments)
+		s.emitFunctionCallArguments("response.function_call_arguments.done", itemID, tc.Arguments)
+		s.emitFunctionCallItem("response.output_item.done", "completed", itemID, tc, tc.Arguments)
+		if s.streamFailed() {
+			return
+		}
 		item := map[string]any{
-			"id": itemID, "type": "function_call", "status": "in_progress",
-			"call_id": tc.ID, "name": tc.Name, "arguments": "",
+			"id": itemID, "type": "function_call", "status": "completed",
+			"call_id": tc.ID, "name": tc.Name, "arguments": tc.Arguments,
 		}
 		if tc.Namespace != "" {
 			item["namespace"] = tc.Namespace
 		}
-		s.emit("response.output_item.added", map[string]any{"output_index": s.outputIndex, "item": item})
-		s.emit("response.function_call_arguments.delta", map[string]any{
-			"item_id": itemID, "output_index": s.outputIndex, "delta": tc.Arguments,
-		})
-		s.emit("response.function_call_arguments.done", map[string]any{
-			"item_id": itemID, "output_index": s.outputIndex, "arguments": tc.Arguments,
-		})
-		item["status"] = "completed"
-		item["arguments"] = tc.Arguments
-		s.emit("response.output_item.done", map[string]any{"output_index": s.outputIndex, "item": item})
 		s.items = append(s.items, item)
 		s.out.ToolCalls = append(s.out.ToolCalls, tc)
 		s.outputIndex++
@@ -626,25 +889,20 @@ func (s *responsesStreamState) consume(chunk protocolOutput) {
 }
 
 func (s *responsesStreamState) closeText() {
-	if !s.textOpen {
+	if !s.textOpen || s.streamFailed() {
 		return
 	}
 	text := s.text.String()
 	s.textBlocks = append(s.textBlocks, text)
+	s.emitTextBlockDone(text)
+	if s.streamFailed() {
+		return
+	}
 	part := map[string]any{"type": "output_text", "text": text, "annotations": []any{}, "logprobs": []any{}}
-	// Codex CLI SDK 严格解析 output_text.done 事件，期望 logprobs 和 annotations 字段都存在。
-	s.emit("response.output_text.done", map[string]any{
-		"item_id": s.textID, "output_index": s.outputIndex, "content_index": 0,
-		"text": text, "annotations": []any{}, "logprobs": []any{},
-	})
-	s.emit("response.content_part.done", map[string]any{
-		"item_id": s.textID, "output_index": s.outputIndex, "content_index": 0, "part": part,
-	})
 	item := map[string]any{
 		"id": s.textID, "type": "message", "status": "completed", "role": "assistant",
 		"content": []any{part},
 	}
-	s.emit("response.output_item.done", map[string]any{"output_index": s.outputIndex, "item": item})
 	s.items = append(s.items, item)
 	s.outputIndex++
 	s.textOpen = false
@@ -652,7 +910,13 @@ func (s *responsesStreamState) closeText() {
 }
 
 func (s *responsesStreamState) finish() {
+	if s.streamFailed() {
+		return
+	}
 	s.closeText()
+	if s.streamFailed() {
+		return
+	}
 	s.out = s.output()
 	if len(s.items) == 0 {
 		s.out.Text = ""
@@ -671,6 +935,9 @@ func (s *responsesStreamState) finish() {
 }
 
 func (s *responsesStreamState) fail(err *vertex.VertexError) {
+	if s.streamFailed() {
+		return
+	}
 	resp := s.responseObject("failed", s.output())
 	resp["error"] = map[string]any{"code": err.Kind, "message": vertex.FriendlyErrorMessage(err)}
 	s.emit("response.failed", map[string]any{"response": resp})

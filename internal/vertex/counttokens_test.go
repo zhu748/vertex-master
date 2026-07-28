@@ -18,6 +18,49 @@ import (
 	"github.com/bsfdsagfadg/vertex/internal/recaptcha"
 )
 
+var benchmarkTokenCountCacheKey tokenCountCacheKey //nolint:gochecknoglobals
+
+func BenchmarkMakeTokenCountCacheKey(b *testing.B) {
+	benchmarks := []struct {
+		name     string
+		contents []any
+	}{
+		{
+			name: "short_text",
+			contents: []any{map[string]any{
+				"role": "user", "parts": []any{map[string]any{"text": "hello"}},
+			}},
+		},
+		{
+			name: "long_text_history",
+			contents: func() []any {
+				contents := make([]any, 128)
+				for index := range contents {
+					contents[index] = map[string]any{
+						"role": "user", "parts": []any{map[string]any{
+							"text": strings.Repeat("0123456789abcdef", 16),
+						}},
+					}
+				}
+				return contents
+			}(),
+		},
+	}
+
+	for _, benchmark := range benchmarks {
+		b.Run(benchmark.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for range b.N {
+				key, ok := makeTokenCountCacheKey("gemini-test", benchmark.contents)
+				if !ok {
+					b.Fatal("cache key unexpectedly exceeded budget")
+				}
+				benchmarkTokenCountCacheKey = key
+			}
+		})
+	}
+}
+
 func TestLiveCountTokens(t *testing.T) {
 	if os.Getenv("VERTEX_LIVE_COUNT_TEST") == "" {
 		t.Skip("set VERTEX_LIVE_COUNT_TEST=1 to run")
@@ -538,6 +581,56 @@ func TestTokenCountCacheSkipsLargePayloads(t *testing.T) {
 		map[string]any{"role": "user", "parts": []any{map[string]any{"text": "hello"}}},
 	}); ok {
 		t.Fatal("oversized model name should bypass token count cache")
+	}
+}
+
+func TestTokenCountCacheKeyIsDeterministicAndTypeSafe(t *testing.T) {
+	first := []any{map[string]any{
+		"role": "user",
+		"parts": []any{map[string]any{
+			"text": "hello", "enabled": true, "weight": float64(1),
+		}},
+	}}
+	secondPart := make(map[string]any)
+	secondPart["weight"] = float64(1)
+	secondPart["enabled"] = true
+	secondPart["text"] = "hello"
+	secondContent := make(map[string]any)
+	secondContent["parts"] = []any{secondPart}
+	secondContent["role"] = "user"
+	second := []any{secondContent}
+
+	firstKey, firstOK := makeTokenCountCacheKey("gemini-test", first)
+	secondKey, secondOK := makeTokenCountCacheKey("gemini-test", second)
+	if !firstOK || !secondOK || firstKey != secondKey {
+		t.Fatalf("equivalent maps must produce the same key: first=%x second=%x", firstKey, secondKey)
+	}
+
+	changedModel, _ := makeTokenCountCacheKey("gemini-other", first)
+	changedText, _ := makeTokenCountCacheKey("gemini-test", []any{map[string]any{
+		"role": "user", "parts": []any{map[string]any{
+			"text": "world", "enabled": true, "weight": float64(1),
+		}},
+	}})
+	changedType, _ := makeTokenCountCacheKey("gemini-test", []any{map[string]any{
+		"role": "user", "parts": []any{map[string]any{
+			"text": "hello", "enabled": true, "weight": int64(1),
+		}},
+	}})
+	for name, key := range map[string]tokenCountCacheKey{
+		"model": changedModel,
+		"text":  changedText,
+		"type":  changedType,
+	} {
+		if key == firstKey {
+			t.Fatalf("changed %s collided with original cache key", name)
+		}
+	}
+
+	if _, ok := makeTokenCountCacheKey("gemini-test", []any{map[string]any{
+		"unsupported": func() {},
+	}}); ok {
+		t.Fatal("unsupported Go values must bypass token count cache")
 	}
 }
 

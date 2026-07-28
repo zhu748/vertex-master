@@ -196,6 +196,31 @@ func TestRetainHighestScoredKeepsOnlyTopK(t *testing.T) {
 	}
 }
 
+func TestRetainHighestKnownPrioritizesHealthyThenScore(t *testing.T) {
+	candidates := []scoredNode{
+		{node: Node{RawURI: "recover-high"}, score: 1000, recovering: true},
+		{node: Node{RawURI: "healthy-low"}, score: 1},
+		{node: Node{RawURI: "recover-low"}, score: 10, recovering: true},
+		{node: Node{RawURI: "healthy-high"}, score: 2},
+	}
+	retained := make([]scoredNode, 0, 3)
+	for _, candidate := range candidates {
+		retained = retainHighestKnown(retained, candidate, 3)
+	}
+	seen := make(map[string]bool, len(retained))
+	for _, candidate := range retained {
+		seen[candidate.node.RawURI] = true
+	}
+	for _, want := range []string{"healthy-low", "healthy-high", "recover-high"} {
+		if !seen[want] {
+			t.Fatalf("known top set dropped %q: %#v", want, retained)
+		}
+	}
+	if seen["recover-low"] {
+		t.Fatalf("lower-scored recovering node displaced a better candidate: %#v", retained)
+	}
+}
+
 func TestNodesLifecycle(t *testing.T) {
 	// Setup a temporary directory for config
 	_ = t.TempDir()

@@ -371,9 +371,14 @@ func handleBase64InContentsCopy(contents any) (any, bool) {
 // ContentBlockMerger 增量合并相邻同类型文本块。它让流式调用方无需先保留
 // 全部 part，再在响应结束时做第二遍扫描。
 type ContentBlockMerger struct {
-	merged  []map[string]any
-	current map[string]any
-	text    StringAccumulator
+	merged           []map[string]any
+	currentPart      map[string]any
+	currentText      string
+	currentSignature any
+	text             StringAccumulator
+	currentCount     int
+	currentThought   bool
+	hasSignature     bool
 }
 
 // NewContentBlockMerger 创建增量合并器。capacityHint 仅用于预分配最终块切片，
@@ -383,7 +388,8 @@ func NewContentBlockMerger(capacityHint int) *ContentBlockMerger {
 	return &ContentBlockMerger{merged: make([]map[string]any, 0, capacityHint)}
 }
 
-// Add 加入一个内容块；输入 map 不会被修改。
+// Add 加入一个内容块；输入 map 不会被修改。已经是规范形状且无需合并的
+// 单个文本块会按只读引用复用，其余形状在 flush 时才延迟创建结果 map。
 func (m *ContentBlockMerger) Add(part map[string]any) {
 	if m == nil {
 		return
@@ -399,25 +405,59 @@ func (m *ContentBlockMerger) Add(part map[string]any) {
 	}
 
 	isThought := isTruthy(part["thought"])
-	if m.current != nil && isTruthy(m.current["thought"]) == isThought {
-		m.text.WriteString(toString(part["text"]))
-		if sig, ok := part["thoughtSignature"]; ok {
-			if _, exists := m.current["thoughtSignature"]; !exists {
-				m.current["thoughtSignature"] = sig
+	text := toString(part["text"])
+	if m.currentCount > 0 && m.currentThought == isThought {
+		if m.currentCount == 1 {
+			m.text.WriteString(m.currentText)
+		}
+		m.text.WriteString(text)
+		m.currentCount++
+		if isThought && !m.hasSignature {
+			if signature, ok := part["thoughtSignature"]; ok {
+				m.currentSignature = signature
+				m.hasSignature = true
 			}
 		}
 		return
 	}
 
 	m.flushText()
-	m.current = make(map[string]any, 3)
+	m.currentPart = part
+	m.currentText = text
+	m.currentCount = 1
+	m.currentThought = isThought
 	if isThought {
-		m.current["thought"] = true
-		if sig, ok := part["thoughtSignature"]; ok {
-			m.current["thoughtSignature"] = sig
+		if signature, ok := part["thoughtSignature"]; ok {
+			m.currentSignature = signature
+			m.hasSignature = true
 		}
 	}
-	m.text.WriteString(toString(part["text"]))
+}
+
+// AddOwned 加入所有权已经转移给合并器的内容块。标准文本块会先原地清成
+// 最终规范形状，使显式 thought:false 等常见上游字段也能走单块复用路径。
+// 调用方不得在返回后继续读取或修改 part。
+func (m *ContentBlockMerger) AddOwned(part map[string]any) {
+	if m == nil {
+		return
+	}
+	if truthyStr(part["text"]) {
+		normalizeOwnedTextPart(part)
+	}
+	m.Add(part)
+}
+
+func normalizeOwnedTextPart(part map[string]any) {
+	thought := isTruthy(part["thought"])
+	for key := range part {
+		if key == "text" || (thought && (key == "thought" || key == "thoughtSignature")) {
+			continue
+		}
+		delete(part, key)
+	}
+	if thought {
+		part["thought"] = true
+	}
 }
 
 // Result 刷新最后一个文本块并返回合并结果。重复调用是安全的。
@@ -430,13 +470,62 @@ func (m *ContentBlockMerger) Result() []map[string]any {
 }
 
 func (m *ContentBlockMerger) flushText() {
-	if m.current == nil {
+	if m.currentCount == 0 {
 		return
 	}
-	m.current["text"] = m.text.String()
-	m.merged = append(m.merged, m.current)
-	m.current = nil
+	if m.currentCount == 1 && canonicalTextPart(m.currentPart, m.currentText, m.currentThought, m.hasSignature) {
+		m.merged = append(m.merged, m.currentPart)
+	} else {
+		current := make(map[string]any, 3)
+		if m.currentCount == 1 {
+			current["text"] = m.currentText
+		} else {
+			current["text"] = m.text.String()
+		}
+		if m.currentThought {
+			current["thought"] = true
+			if m.hasSignature {
+				current["thoughtSignature"] = m.currentSignature
+			}
+		}
+		m.merged = append(m.merged, current)
+	}
+	m.currentPart = nil
+	m.currentText = ""
+	m.currentSignature = nil
+	m.currentCount = 0
+	m.currentThought = false
+	m.hasSignature = false
 	m.text.Reset()
+}
+
+func canonicalTextPart(part map[string]any, text string, thought, hasSignature bool) bool {
+	if part == nil {
+		return false
+	}
+	expectedFields := 1
+	if thought {
+		expectedFields++
+		if hasSignature {
+			expectedFields++
+		}
+	}
+	if len(part) != expectedFields {
+		return false
+	}
+	partText, ok := part["text"].(string)
+	if !ok || partText != text {
+		return false
+	}
+	if !thought {
+		return true
+	}
+	partThought, ok := part["thought"].(bool)
+	if !ok || !partThought {
+		return false
+	}
+	_, partHasSignature := part["thoughtSignature"]
+	return partHasSignature == hasSignature
 }
 
 // MergeContentBlocks 合并相邻同类型文本块（thought+thought、text+text）。

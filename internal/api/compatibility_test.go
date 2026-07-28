@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/bsfdsagfadg/vertex/internal/config"
+	"github.com/bsfdsagfadg/vertex/internal/transform"
 	"github.com/bsfdsagfadg/vertex/internal/vertex"
 )
 
@@ -84,6 +86,40 @@ func TestResponsesRequestConversionGroupsParallelFunctionCalls(t *testing.T) {
 	toolCalls, _ := assistant["tool_calls"].([]any)
 	if assistant["role"] != "assistant" || len(toolCalls) != 2 {
 		t.Fatalf("并行 function_call 未合并: %#v", assistant)
+	}
+}
+
+func TestResponsesTextContentPassesThroughFullConversion(t *testing.T) {
+	content := []any{
+		map[string]any{"type": "input_text", "text": "one"},
+		map[string]any{"type": "output_text", "text": "two"},
+		map[string]any{"type": "text", "text": "three"},
+	}
+	convertedContent, err := responseContentToChat(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	passed := convertedContent.([]any)
+	if &passed[0] != &content[0] {
+		t.Fatal("canonical Responses text content should reuse the read-only input slice")
+	}
+
+	chat, err := responsesToChatRequest(map[string]any{
+		"input": []any{map[string]any{"type": "message", "role": "user", "content": content}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	chat["model"] = "gemini-test"
+	_, payload, err := transform.ConvertChatRequest(chat, config.StaticProvider(config.DefaultConfig()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := payload["contents"].([]any)
+	parts := contents[0].(map[string]any)["parts"].([]any)
+	if len(parts) != 3 || parts[0].(map[string]any)["text"] != "one" ||
+		parts[1].(map[string]any)["text"] != "two" || parts[2].(map[string]any)["text"] != "three" {
+		t.Fatalf("Responses text parts were not preserved through Gemini conversion: %#v", parts)
 	}
 }
 
@@ -175,6 +211,39 @@ func TestAnthropicRequestConversion(t *testing.T) {
 	last, _ := messages[len(messages)-1].(map[string]any)
 	if last["role"] != "tool" || last["tool_call_id"] != "toolu_1" {
 		t.Fatalf("tool result not converted: %#v", last)
+	}
+}
+
+func TestAnthropicPureTextUserContentPassesThroughToChat(t *testing.T) {
+	content := []any{
+		map[string]any{"type": "text", "text": "first"},
+		map[string]any{
+			"type": "text", "text": "second",
+			"cache_control": map[string]any{"type": "ephemeral"},
+		},
+	}
+	chat, err := anthropicToChatRequest(map[string]any{
+		"max_tokens": float64(128),
+		"messages":   []any{map[string]any{"role": "user", "content": content}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages := chat["messages"].([]any)
+	convertedContent := messages[0].(map[string]any)["content"].([]any)
+	if len(convertedContent) != len(content) || &convertedContent[0] != &content[0] {
+		t.Fatal("pure Anthropic text content was copied instead of passed through")
+	}
+
+	_, payload, err := transform.ConvertChatRequest(chat, config.StaticProvider(config.DefaultConfig()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := payload["contents"].([]any)
+	parts := contents[0].(map[string]any)["parts"].([]any)
+	if len(parts) != 2 || parts[0].(map[string]any)["text"] != "first" ||
+		parts[1].(map[string]any)["text"] != "second" {
+		t.Fatalf("Anthropic text blocks were not preserved through Gemini conversion: %#v", parts)
 	}
 }
 

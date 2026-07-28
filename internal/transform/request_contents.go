@@ -35,7 +35,7 @@ func convertUserContent(content any) []any {
 		}
 		t, _ := item["type"].(string)
 		switch t {
-		case "text":
+		case "text", "input_text", "output_text":
 			parts = append(parts, map[string]any{"text": item["text"]})
 
 		case "image_url":

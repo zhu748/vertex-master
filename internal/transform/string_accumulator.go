@@ -4,16 +4,35 @@ import "strings"
 
 const (
 	inlineStringFragments = 8
+	initialStringBlocks   = 4
 	minStringBlockSize    = 256
 	maxStringBlockSize    = 16 * 1024
+	stringBlockPoolDepth  = 32
 )
+
+type stringAccumulatorBlock struct {
+	data []byte
+}
+
+// The accumulator only uses these seven power-of-two block sizes. Bounded
+// channels keep reuse predictable: a burst can retain at most about 1 MiB,
+// while overflow blocks remain eligible for normal garbage collection.
+var stringBlockPools = [...]chan *stringAccumulatorBlock{ //nolint:gochecknoglobals
+	make(chan *stringAccumulatorBlock, stringBlockPoolDepth), // 256 B
+	make(chan *stringAccumulatorBlock, stringBlockPoolDepth), // 512 B
+	make(chan *stringAccumulatorBlock, stringBlockPoolDepth), // 1 KiB
+	make(chan *stringAccumulatorBlock, stringBlockPoolDepth), // 2 KiB
+	make(chan *stringAccumulatorBlock, stringBlockPoolDepth), // 4 KiB
+	make(chan *stringAccumulatorBlock, stringBlockPoolDepth), // 8 KiB
+	make(chan *stringAccumulatorBlock, stringBlockPoolDepth), // 16 KiB
+}
 
 // StringAccumulator 累积流式字符串片段，并在首次 String 时一次性精确合并。
 // 短响应直接保存在内联槽位中；合并后会释放原始片段并缓存结果，因此重复读取
 // 不会再次分配，读取后继续写入也仍会保留已有内容。
 type StringAccumulator struct {
 	inline        [inlineStringFragments]string
-	blocks        [][]byte
+	blocks        []*stringAccumulatorBlock
 	count         int
 	length        int
 	nextBlockSize int
@@ -57,7 +76,7 @@ func (a *StringAccumulator) String() string {
 
 	clear(a.inline[:])
 	a.inline[0] = value
-	a.blocks = nil
+	a.releaseBlocks()
 	a.count = 1
 	a.length = len(value)
 	a.nextBlockSize = 0
@@ -77,11 +96,12 @@ func (a *StringAccumulator) AppendTo(builder *strings.Builder) {
 		return
 	}
 	for _, block := range a.blocks {
-		builder.Write(block)
+		builder.Write(block.data)
 	}
 }
 
 func (a *StringAccumulator) startBlocks(required int) {
+	a.blocks = make([]*stringAccumulatorBlock, 0, initialStringBlocks)
 	size := minStringBlockSize
 	for size < required && size < maxStringBlockSize {
 		size *= 2
@@ -91,26 +111,75 @@ func (a *StringAccumulator) startBlocks(required int) {
 
 func (a *StringAccumulator) writeToBlocks(value string) {
 	for len(value) > 0 {
-		if len(a.blocks) == 0 || len(a.blocks[len(a.blocks)-1]) == cap(a.blocks[len(a.blocks)-1]) {
+		if len(a.blocks) == 0 || len(a.blocks[len(a.blocks)-1].data) == cap(a.blocks[len(a.blocks)-1].data) {
 			size := a.nextBlockSize
 			if size == 0 {
 				size = minStringBlockSize
 			}
-			a.blocks = append(a.blocks, make([]byte, 0, size))
+			a.blocks = append(a.blocks, acquireStringAccumulatorBlock(size))
 			a.nextBlockSize = min(size*2, maxStringBlockSize)
 		}
 
 		last := len(a.blocks) - 1
-		available := cap(a.blocks[last]) - len(a.blocks[last])
+		available := cap(a.blocks[last].data) - len(a.blocks[last].data)
 		written := min(len(value), available)
-		a.blocks[last] = append(a.blocks[last], value[:written]...)
+		a.blocks[last].data = append(a.blocks[last].data, value[:written]...)
 		value = value[written:]
 	}
+}
+
+func acquireStringAccumulatorBlock(size int) *stringAccumulatorBlock {
+	index, ok := stringBlockPoolIndex(size)
+	if ok {
+		select {
+		case block := <-stringBlockPools[index]:
+			block.data = block.data[:0]
+			return block
+		default:
+		}
+	}
+	return &stringAccumulatorBlock{data: make([]byte, 0, size)}
+}
+
+func releaseStringAccumulatorBlock(block *stringAccumulatorBlock) {
+	if block == nil {
+		return
+	}
+	index, ok := stringBlockPoolIndex(cap(block.data))
+	if !ok {
+		return
+	}
+	clear(block.data)
+	block.data = block.data[:0]
+	select {
+	case stringBlockPools[index] <- block:
+	default:
+	}
+}
+
+func stringBlockPoolIndex(size int) (int, bool) {
+	if size < minStringBlockSize || size > maxStringBlockSize || size&(size-1) != 0 {
+		return 0, false
+	}
+	index := 0
+	for size > minStringBlockSize {
+		size >>= 1
+		index++
+	}
+	return index, index < len(stringBlockPools)
+}
+
+func (a *StringAccumulator) releaseBlocks() {
+	for _, block := range a.blocks {
+		releaseStringAccumulatorBlock(block)
+	}
+	a.blocks = nil
 }
 
 // Reset 丢弃已累积的内容。
 func (a *StringAccumulator) Reset() {
 	if a != nil {
+		a.releaseBlocks()
 		*a = StringAccumulator{}
 	}
 }

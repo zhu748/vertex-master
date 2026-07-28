@@ -171,9 +171,11 @@ func (c *ChatHandler) streamChatCompletions(ctx context.Context, w http.Response
 	if canFlush {
 		sw.flush = flusher.Flush
 	}
+	clientDisconnected := false
 
 	write := func(line string) bool {
 		if _, err := io.WriteString(w, line); err != nil {
+			clientDisconnected = true
 			log.Printf("[Server] [Stream] 请求ID=%s 客户端已主动断开连接", requestID)
 			return false
 		}
@@ -201,11 +203,15 @@ func (c *ChatHandler) streamChatCompletions(ctx context.Context, w http.Response
 		if sw.writeData(payload) {
 			return true
 		}
+		clientDisconnected = true
 		log.Printf("[Server] [Stream] 请求ID=%s 客户端已主动断开连接", requestID)
 		return false
 	}
 
 	c.vc.StreamChat(ctx, model, geminiPayload, func(ch vertex.StreamChunk) bool {
+		if clientDisconnected || sw.failed.Load() {
+			return false
+		}
 		if isFirst && ch.Err == nil {
 			log.Printf("[Server] [Stream] 请求ID=%s 首字响应耗时: %.2fs", requestID, time.Since(startTime).Seconds())
 			cli.UpdateReqState(requestID, "💬 流式打字", "\033[36m", "正在输出...")
@@ -242,6 +248,9 @@ func (c *ChatHandler) streamChatCompletions(ctx context.Context, w http.Response
 		}
 		return true
 	})
+	if clientDisconnected || sw.failed.Load() {
+		return
+	}
 
 	writeSilent := func(line string) bool {
 		if _, err := io.WriteString(w, line); err != nil {
