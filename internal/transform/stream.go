@@ -60,7 +60,9 @@ type openAIStreamEvent struct {
 	Created int64                `json:"created"`
 	Model   string               `json:"model"`
 	Choices []openAIStreamChoice `json:"choices"`
-	Usage   map[string]any       `json:"usage,omitempty"`
+	Usage   *OpenAIUsage         `json:"usage,omitempty"`
+
+	usage OpenAIUsage `json:"-"`
 }
 
 type openAIStreamChoice struct {
@@ -221,7 +223,8 @@ func (e *OpenAIStreamEncoder) emitPrepared(prepared openAIStreamPrepared, emit f
 	// usage 绑定到 finish 帧，否则 ChatBox、SillyTavern 等客户端可能看不到用量。
 	if prepared.hasUsage {
 		e.event.Choices = e.event.Choices[:0]
-		e.event.Usage = ConvertUsageForCandidate(prepared.usage, prepared.candidate)
+		NormalizeUsageForCandidate(prepared.usage, prepared.candidate).FillOpenAIUsage(&e.event.usage)
+		e.event.Usage = &e.event.usage
 		if !emit(&e.event) {
 			return false
 		}

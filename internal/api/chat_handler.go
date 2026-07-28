@@ -297,7 +297,7 @@ func (c *ChatHandler) streamChatCompletions(ctx context.Context, w http.Response
 		geminiPayload,
 		streamOutput.Output(),
 	)
-	if !writeOAIStreamUsageValues(writeSilent, completedOutput, model, requestID, time.Now().Unix(), true) {
+	if !writeOAIStreamUsageValues(sw, completedOutput, model, requestID, time.Now().Unix(), true) {
 		return
 	}
 	writeSilent("data: [DONE]\n\n")
@@ -347,7 +347,7 @@ func (c *ChatHandler) oaiFakeStream(ctx context.Context, w http.ResponseWriter, 
 		if !sw.write(sseEvent(base)) {
 			return
 		}
-		if !writeOAIStreamUsage(sw.write, oai, model, requestID, createdTS) {
+		if !writeOAIStreamUsage(sw, oai, model, requestID, createdTS) {
 			return
 		}
 		_ = sw.write("data: [DONE]\n\n")
@@ -371,7 +371,7 @@ func (c *ChatHandler) oaiFakeStream(ctx context.Context, w http.ResponseWriter, 
 			return
 		}
 	}
-	if !writeOAIStreamUsage(sw.write, oai, model, requestID, createdTS) {
+	if !writeOAIStreamUsage(sw, oai, model, requestID, createdTS) {
 		return
 	}
 	_ = sw.write("data: [DONE]\n\n")
@@ -422,7 +422,7 @@ func (c *ChatHandler) oaiAggregateStream(ctx context.Context, w http.ResponseWri
 	if !sw.write(sseEvent(baseEnd)) {
 		return
 	}
-	if !writeOAIStreamUsage(sw.write, oai, model, requestID, createdTS) {
+	if !writeOAIStreamUsage(sw, oai, model, requestID, createdTS) {
 		return
 	}
 	_ = sw.write("data: [DONE]\n\n")
@@ -430,8 +430,23 @@ func (c *ChatHandler) oaiAggregateStream(ctx context.Context, w http.ResponseWri
 
 // writeOAIStreamUsage 按 OpenAI 流式协议写出独立 usage 块。choices 必须为空，
 // 这样 ChatBox、SillyTavern 等客户端能把它识别为统计帧而不是普通内容帧。
+type openAIUsageStreamChunk struct {
+	Choices []openAIUsageStreamChoice `json:"choices"`
+	Created int64                     `json:"created"`
+	ID      string                    `json:"id"`
+	Model   string                    `json:"model"`
+	Object  string                    `json:"object"`
+	Usage   transform.OpenAIUsage     `json:"usage"`
+}
+
+type openAIUsageStreamChoice struct {
+	Delta        struct{} `json:"delta"`
+	FinishReason *string  `json:"finish_reason"`
+	Index        int      `json:"index"`
+}
+
 func writeOAIStreamUsage(
-	write func(string) bool,
+	sw *sseWriter,
 	oai map[string]any,
 	model, requestID string,
 	created int64,
@@ -441,11 +456,11 @@ func writeOAIStreamUsage(
 		return true
 	}
 	out := outputFromOAI(map[string]any{"usage": usage})
-	return writeOAIStreamUsageValues(write, out, model, requestID, created, false)
+	return writeOAIStreamUsageValues(sw, out, model, requestID, created, false)
 }
 
 func writeOAIStreamUsageValues(
-	write func(string) bool,
+	sw *sseWriter,
 	out protocolOutput,
 	model, requestID string,
 	created int64,
@@ -454,20 +469,26 @@ func writeOAIStreamUsageValues(
 	if out.Input == 0 && out.Output == 0 && out.Total == 0 {
 		return true
 	}
-	chunk := streamChunkBase(model, requestID)
-	chunk["created"] = created
-	chunk["choices"] = []any{}
+	if sw == nil {
+		return false
+	}
+	chunk := openAIUsageStreamChunk{
+		Choices: []openAIUsageStreamChoice{},
+		Created: created,
+		ID:      "chatcmpl-" + requestID,
+		Model:   model,
+		Object:  "chat.completion.chunk",
+	}
 	if compatChoice {
 		// RikkaHub 等客户端在 choices 非空时一定会进入消息处理流程，再合并 usage。
 		// 空 delta 不会生成或重复任何正文。
-		chunk["choices"] = []any{map[string]any{
-			"index": 0, "delta": map[string]any{}, "finish_reason": nil,
-		}}
+		chunk.Choices = []openAIUsageStreamChoice{{}}
 	}
-	chunk["usage"] = map[string]any{
-		"prompt_tokens": out.Input, "completion_tokens": out.Output, "total_tokens": out.Total,
-	}
-	return write(sseEvent(chunk))
+	transform.NormalizedUsage{
+		PromptTokens: out.Input, CompletionTokens: out.Output, TotalTokens: out.Total,
+		CachedInputTokens: out.CachedInputTokens, ReasoningTokens: out.ReasoningTokens,
+	}.FillOpenAIUsage(&chunk.Usage)
+	return sw.writeData(&chunk)
 }
 
 func firstChoiceContent(oai map[string]any) string {

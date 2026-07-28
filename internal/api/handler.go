@@ -80,7 +80,7 @@ func oaiError(w http.ResponseWriter, status int, msg, errType string) {
 	}})
 }
 
-func sseEvent(obj map[string]any) string {
+func sseEvent(obj any) string {
 	var event strings.Builder
 	event.Grow(256)
 	event.WriteString("data: ")

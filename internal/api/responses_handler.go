@@ -2,12 +2,15 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/bsfdsagfadg/vertex/internal/cli"
+	"github.com/bsfdsagfadg/vertex/internal/jsonx"
 	"github.com/bsfdsagfadg/vertex/internal/transform"
 	"github.com/bsfdsagfadg/vertex/internal/vertex"
 )
@@ -388,60 +391,215 @@ func responsesTextContentCanPassThrough(content []any) bool {
 	return true
 }
 
-func buildResponsesResponse(request map[string]any, model, id string, out protocolOutput) map[string]any {
-	status := "completed"
-	var incomplete any
-	if out.Finish == "length" {
-		status = "incomplete"
-		incomplete = map[string]any{"reason": "max_output_tokens"}
+type responsesResponse struct {
+	CompletedAt        *int64                     `json:"completed_at"`
+	CreatedAt          int64                      `json:"created_at"`
+	Error              *responsesResponseError    `json:"error"`
+	ID                 string                     `json:"id"`
+	IncompleteDetails  *responsesIncompleteDetail `json:"incomplete_details"`
+	Instructions       any                        `json:"instructions"`
+	MaxOutputTokens    any                        `json:"max_output_tokens"`
+	Metadata           any                        `json:"metadata"`
+	Model              string                     `json:"model"`
+	Object             string                     `json:"object"`
+	Output             []any                      `json:"output"`
+	ParallelToolCalls  bool                       `json:"parallel_tool_calls"`
+	PreviousResponseID any                        `json:"previous_response_id"`
+	Reasoning          any                        `json:"reasoning"`
+	Status             string                     `json:"status"`
+	Store              bool                       `json:"store"`
+	Temperature        any                        `json:"temperature"`
+	Text               any                        `json:"text"`
+	ToolChoice         any                        `json:"tool_choice"`
+	Tools              any                        `json:"tools"`
+	TopP               any                        `json:"top_p"`
+	Truncation         any                        `json:"truncation"`
+	Usage              *responsesResponseUsage    `json:"usage"`
+
+	completedAt       int64                     `json:"-"`
+	incompleteDetails responsesIncompleteDetail `json:"-"`
+	usage             responsesResponseUsage    `json:"-"`
+}
+
+type responsesResponseError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+type responsesIncompleteDetail struct {
+	Reason string `json:"reason"`
+}
+
+type responsesResponseUsage struct {
+	InputTokens         int                         `json:"input_tokens"`
+	InputTokensDetails  responsesInputTokenDetails  `json:"input_tokens_details"`
+	OutputTokens        int                         `json:"output_tokens"`
+	OutputTokensDetails responsesOutputTokenDetails `json:"output_tokens_details"`
+	TotalTokens         int                         `json:"total_tokens"`
+}
+
+type responsesInputTokenDetails struct {
+	CachedTokens int `json:"cached_tokens"`
+}
+
+type responsesOutputTokenDetails struct {
+	ReasoningTokens int `json:"reasoning_tokens"`
+}
+
+type responsesDefaultTextConfig struct {
+	Format responsesDefaultTextFormat `json:"format"`
+}
+
+type responsesDefaultTextFormat struct {
+	Type string `json:"type"`
+}
+
+type responsesDefaultReasoningConfig struct {
+	Effort  any `json:"effort"`
+	Summary any `json:"summary"`
+}
+
+type responsesEmptyObject struct{}
+
+var (
+	defaultResponsesText = responsesDefaultTextConfig{ //nolint:gochecknoglobals
+		Format: responsesDefaultTextFormat{Type: "text"},
 	}
-	output := responseOutputItems(out)
+	defaultResponsesReasoning = responsesDefaultReasoningConfig{} //nolint:gochecknoglobals
+	defaultResponsesMetadata  = responsesEmptyObject{}            //nolint:gochecknoglobals
+	defaultResponsesTools     = []any{}                           //nolint:gochecknoglobals
+)
+
+func buildResponsesResponse(request map[string]any, model, id string, out protocolOutput) *responsesResponse {
+	response := &responsesResponse{}
+	fillResponsesResponse(response, request, model, id, out, nil)
+	return response
+}
+
+func fillResponsesResponse(
+	response *responsesResponse,
+	request map[string]any,
+	model, id string,
+	out protocolOutput,
+	output []any,
+) {
 	textCfg := request["text"]
 	if textCfg == nil {
-		textCfg = map[string]any{"format": map[string]any{"type": "text"}}
+		textCfg = &defaultResponsesText
 	}
 	reasoning := request["reasoning"]
 	if reasoning == nil {
-		reasoning = map[string]any{"effort": nil, "summary": nil}
+		reasoning = &defaultResponsesReasoning
 	}
-	return map[string]any{
-		"id": id, "object": "response", "created_at": time.Now().Unix(),
-		"completed_at": time.Now().Unix(), "status": status, "error": nil,
-		"incomplete_details": incomplete, "instructions": request["instructions"],
-		"max_output_tokens": request["max_output_tokens"], "model": model, "output": output,
-		"parallel_tool_calls":  defaultBool(request["parallel_tool_calls"], true),
-		"previous_response_id": request["previous_response_id"], "reasoning": reasoning,
-		"store": defaultBool(request["store"], false), "temperature": request["temperature"],
-		"text": textCfg, "tool_choice": defaultAny(request["tool_choice"], "auto"),
-		"tools": defaultAny(request["tools"], []any{}), "top_p": request["top_p"],
-		"truncation": defaultAny(request["truncation"], "disabled"), "metadata": defaultAny(request["metadata"], map[string]any{}),
-		"usage": map[string]any{
-			"input_tokens": out.Input, "input_tokens_details": map[string]any{"cached_tokens": out.CachedInputTokens},
-			"output_tokens": out.Output, "output_tokens_details": map[string]any{"reasoning_tokens": out.ReasoningTokens},
-			"total_tokens": out.Total,
+
+	*response = responsesResponse{
+		CreatedAt:          time.Now().Unix(),
+		ID:                 id,
+		Instructions:       request["instructions"],
+		MaxOutputTokens:    request["max_output_tokens"],
+		Metadata:           defaultAny(request["metadata"], &defaultResponsesMetadata),
+		Model:              model,
+		Object:             "response",
+		ParallelToolCalls:  defaultBool(request["parallel_tool_calls"], true),
+		PreviousResponseID: request["previous_response_id"],
+		Reasoning:          reasoning,
+		Store:              defaultBool(request["store"], false),
+		Temperature:        request["temperature"],
+		Text:               textCfg,
+		ToolChoice:         defaultAny(request["tool_choice"], "auto"),
+		Tools:              defaultAny(request["tools"], defaultResponsesTools),
+		TopP:               request["top_p"],
+		Truncation:         defaultAny(request["truncation"], "disabled"),
+	}
+	fillResponsesResult(response, out, output)
+}
+
+func fillResponsesResult(response *responsesResponse, out protocolOutput, output []any) {
+	status := "completed"
+	if out.Finish == "length" {
+		status = "incomplete"
+	}
+	if output == nil {
+		output = responseOutputItems(out)
+	}
+	response.completedAt = time.Now().Unix()
+	response.CompletedAt = &response.completedAt
+	response.Error = nil
+	response.IncompleteDetails = nil
+	response.Output = output
+	response.Status = status
+	response.usage = responsesResponseUsage{
+		InputTokens: out.Input,
+		InputTokensDetails: responsesInputTokenDetails{
+			CachedTokens: out.CachedInputTokens,
 		},
+		OutputTokens: out.Output,
+		OutputTokensDetails: responsesOutputTokenDetails{
+			ReasoningTokens: out.ReasoningTokens,
+		},
+		TotalTokens: out.Total,
+	}
+	response.Usage = &response.usage
+	if status == "incomplete" {
+		response.incompleteDetails.Reason = "max_output_tokens"
+		response.IncompleteDetails = &response.incompleteDetails
 	}
 }
 
+func cacheResponsesStreamStaticFields(response *responsesResponse) {
+	response.Instructions = cacheResponsesStaticJSON(response.Instructions)
+	response.Metadata = cacheResponsesStaticJSON(response.Metadata)
+	response.Reasoning = cacheResponsesStaticJSON(response.Reasoning)
+	response.Text = cacheResponsesStaticJSON(response.Text)
+	response.ToolChoice = cacheResponsesStaticJSON(response.ToolChoice)
+	response.Tools = cacheResponsesStaticJSON(response.Tools)
+}
+
+func cacheResponsesStaticJSON(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		if len(typed) == 0 {
+			return value
+		}
+	case []any:
+		if len(typed) == 0 {
+			return value
+		}
+	default:
+		return value
+	}
+	encoded, err := jsonx.Marshal(value)
+	if err == nil {
+		return json.RawMessage(encoded)
+	}
+	return value
+}
+
 func responseOutputItems(out protocolOutput) []any {
-	items := []any{}
-	if out.Text != "" || len(out.ToolCalls) == 0 {
-		items = append(items, map[string]any{
-			"id": "msg_" + reqID24(), "type": "message", "status": "completed", "role": "assistant",
-			"content": []any{map[string]any{
-				"type": "output_text", "text": out.Text, "annotations": []any{}, "logprobs": []any{},
+	textOutput := out.Text != "" || len(out.ToolCalls) == 0
+	capacity := len(out.ToolCalls)
+	if textOutput {
+		capacity++
+	}
+	items := make([]any, 0, capacity)
+	if textOutput {
+		items = append(items, &responsesCompletedTextMessageItem{
+			Content: [1]responsesOutputTextPart{{
+				Annotations: []any{}, Logprobs: []any{}, Text: out.Text, Type: "output_text",
 			}},
+			ID: "msg_" + reqID24(), Role: "assistant", Status: "completed", Type: "message",
 		})
 	}
 	for _, tc := range out.ToolCalls {
-		item := map[string]any{
-			"id": "fc_" + reqID24(), "type": "function_call", "status": "completed",
-			"call_id": tc.ID, "name": tc.Name, "arguments": tc.Arguments,
-		}
-		if tc.Namespace != "" {
-			item["namespace"] = tc.Namespace
-		}
-		items = append(items, item)
+		items = append(items, &responsesFunctionCallItem{
+			Arguments: tc.Arguments,
+			CallID:    tc.ID,
+			ID:        "fc_" + reqID24(),
+			Name:      tc.Name,
+			Namespace: tc.Namespace,
+			Status:    "completed",
+			Type:      "function_call",
+		})
 	}
 	return items
 }
@@ -473,15 +631,7 @@ func (h *ResponsesHandler) streamResponses(
 	state := &responsesStreamState{
 		sw: sw, id: id, model: displayModel, request: request, namespaceTools: namespaceTools,
 	}
-	state.emit("response.created", map[string]any{
-		"response": state.responseObject("in_progress", protocolOutput{}),
-	})
-	if state.streamFailed() {
-		return
-	}
-	state.emit("response.in_progress", map[string]any{
-		"response": state.responseObject("in_progress", protocolOutput{}),
-	})
+	state.start()
 	if state.streamFailed() {
 		return
 	}
@@ -530,31 +680,64 @@ func (h *ResponsesHandler) streamResponses(
 	}
 }
 
+func (s *responsesStreamState) start() {
+	response := s.responseObject("in_progress", protocolOutput{}, []any{})
+	s.emitResponse("response.created", response)
+	if s.streamFailed() {
+		return
+	}
+	s.emitResponse("response.in_progress", response)
+}
+
 type responsesStreamState struct {
-	sw                     *sseWriter
-	id                     string
-	model                  string
-	request                map[string]any
-	namespaceTools         map[string]responsesNamespacedTool
-	sequence               int
-	outputIndex            int
-	textID                 string
-	text                   transform.StringAccumulator
-	textBlocks             []string
-	textCache              string
-	textCacheValid         bool
-	textOpen               bool
-	textDeltaEvent         responsesOutputTextDeltaEvent
-	textItemEvent          responsesOutputTextItemEvent
-	textContentPartEvent   responsesOutputTextContentPartEvent
-	textDoneEvent          responsesOutputTextDoneEvent
-	textItemContent        [1]responsesOutputTextPart
-	functionItemEvent      responsesFunctionCallItemEvent
-	functionArgumentsEvent responsesFunctionCallArgumentsEvent
-	functionNamespace      string
-	functionArguments      string
-	items                  []any
-	out                    protocolOutput
+	sw              *sseWriter
+	id              string
+	model           string
+	request         map[string]any
+	namespaceTools  map[string]responsesNamespacedTool
+	sequence        int
+	outputIndex     int
+	textID          string
+	text            transform.StringAccumulator
+	textBlocks      []string
+	textCache       string
+	textCacheValid  bool
+	textOpen        bool
+	textEvents      *responsesTextEventState
+	functionEvents  *responsesFunctionEventState
+	lifecycleEvents *responsesLifecycleEventState
+	items           []any
+	out             protocolOutput
+}
+
+// Responses text and function-call events are mutually exclusive for the
+// common single-output case. Keep their reusable encoding state lazy so a
+// text-only request does not retain function-call structs and vice versa.
+type responsesTextEventState struct {
+	deltaEvent       responsesOutputTextDeltaEvent
+	itemEvent        responsesOutputTextItemEvent
+	contentPartEvent responsesOutputTextContentPartEvent
+	doneEvent        responsesOutputTextDoneEvent
+	itemContent      [1]responsesOutputTextPart
+}
+
+type responsesFunctionEventState struct {
+	itemEvent      responsesFunctionCallItemEvent
+	argumentsEvent responsesFunctionCallArgumentsEvent
+	arguments      string
+}
+
+type responsesLifecycleEventState struct {
+	event       responsesLifecycleEvent
+	response    responsesResponse
+	err         responsesResponseError
+	initialized bool
+}
+
+type responsesLifecycleEvent struct {
+	Response       *responsesResponse `json:"response"`
+	SequenceNumber int                `json:"sequence_number"`
+	Type           string             `json:"type"`
 }
 
 type responsesOutputTextDeltaEvent struct {
@@ -580,6 +763,14 @@ type responsesOutputTextMessageItem struct {
 	Role    string                    `json:"role"`
 	Status  string                    `json:"status"`
 	Type    string                    `json:"type"`
+}
+
+type responsesCompletedTextMessageItem struct {
+	Content [1]responsesOutputTextPart `json:"content"`
+	ID      string                     `json:"id"`
+	Role    string                     `json:"role"`
+	Status  string                     `json:"status"`
+	Type    string                     `json:"type"`
 }
 
 type responsesOutputTextItemEvent struct {
@@ -617,13 +808,13 @@ type responsesFunctionCallItemEvent struct {
 }
 
 type responsesFunctionCallItem struct {
-	Arguments string  `json:"arguments"`
-	CallID    string  `json:"call_id"`
-	ID        string  `json:"id"`
-	Name      string  `json:"name"`
-	Namespace *string `json:"namespace,omitempty"`
-	Status    string  `json:"status"`
-	Type      string  `json:"type"`
+	Arguments string `json:"arguments"`
+	CallID    string `json:"call_id"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Namespace string `json:"namespace,omitempty"`
+	Status    string `json:"status"`
+	Type      string `json:"type"`
 }
 
 type responsesFunctionCallArgumentsEvent struct {
@@ -649,12 +840,46 @@ func (s *responsesStreamState) streamFailed() bool {
 	return s == nil || (s.sw != nil && s.sw.failed.Load())
 }
 
+func (s *responsesStreamState) textEventState() *responsesTextEventState {
+	if s.textEvents == nil {
+		s.textEvents = &responsesTextEventState{}
+	}
+	return s.textEvents
+}
+
+func (s *responsesStreamState) functionEventState() *responsesFunctionEventState {
+	if s.functionEvents == nil {
+		s.functionEvents = &responsesFunctionEventState{}
+	}
+	return s.functionEvents
+}
+
+func (s *responsesStreamState) lifecycleEventState() *responsesLifecycleEventState {
+	if s.lifecycleEvents == nil {
+		s.lifecycleEvents = &responsesLifecycleEventState{}
+	}
+	return s.lifecycleEvents
+}
+
+func (s *responsesStreamState) emitResponse(event string, response *responsesResponse) {
+	if s.streamFailed() {
+		return
+	}
+	events := s.lifecycleEventState()
+	s.sequence++
+	events.event = responsesLifecycleEvent{
+		Response: response, SequenceNumber: s.sequence, Type: event,
+	}
+	_ = s.sw.writeNamed(event, &events.event)
+}
+
 func (s *responsesStreamState) emitTextDelta(delta string) {
 	if s.streamFailed() {
 		return
 	}
+	events := s.textEventState()
 	s.sequence++
-	s.textDeltaEvent = responsesOutputTextDeltaEvent{
+	events.deltaEvent = responsesOutputTextDeltaEvent{
 		Type:           "response.output_text.delta",
 		SequenceNumber: s.sequence,
 		ItemID:         s.textID,
@@ -663,17 +888,18 @@ func (s *responsesStreamState) emitTextDelta(delta string) {
 		Delta:          delta,
 		Logprobs:       []any{},
 	}
-	_ = s.sw.writeNamed("response.output_text.delta", &s.textDeltaEvent)
+	_ = s.sw.writeNamed("response.output_text.delta", &events.deltaEvent)
 }
 
 func (s *responsesStreamState) emitTextBlockStart() {
 	if s.streamFailed() {
 		return
 	}
+	events := s.textEventState()
 	s.sequence++
-	s.textItemEvent = responsesOutputTextItemEvent{
+	events.itemEvent = responsesOutputTextItemEvent{
 		Item: responsesOutputTextMessageItem{
-			Content: s.textItemContent[:0],
+			Content: events.itemContent[:0],
 			ID:      s.textID,
 			Role:    "assistant",
 			Status:  "in_progress",
@@ -683,12 +909,12 @@ func (s *responsesStreamState) emitTextBlockStart() {
 		SequenceNumber: s.sequence,
 		Type:           "response.output_item.added",
 	}
-	if !s.sw.writeNamed("response.output_item.added", &s.textItemEvent) {
+	if !s.sw.writeNamed("response.output_item.added", &events.itemEvent) {
 		return
 	}
 
 	s.sequence++
-	s.textContentPartEvent = responsesOutputTextContentPartEvent{
+	events.contentPartEvent = responsesOutputTextContentPartEvent{
 		ContentIndex: 0,
 		ItemID:       s.textID,
 		OutputIndex:  s.outputIndex,
@@ -698,17 +924,18 @@ func (s *responsesStreamState) emitTextBlockStart() {
 		SequenceNumber: s.sequence,
 		Type:           "response.content_part.added",
 	}
-	_ = s.sw.writeNamed("response.content_part.added", &s.textContentPartEvent)
+	_ = s.sw.writeNamed("response.content_part.added", &events.contentPartEvent)
 }
 
 func (s *responsesStreamState) emitTextBlockDone(text string) {
 	if s.streamFailed() {
 		return
 	}
+	events := s.textEventState()
 	// Codex CLI SDK 严格解析 output_text.done 事件，期望 logprobs 和
 	// annotations 字段都存在，即使它们是空数组。
 	s.sequence++
-	s.textDoneEvent = responsesOutputTextDoneEvent{
+	events.doneEvent = responsesOutputTextDoneEvent{
 		Annotations:    []any{},
 		ContentIndex:   0,
 		ItemID:         s.textID,
@@ -718,7 +945,7 @@ func (s *responsesStreamState) emitTextBlockDone(text string) {
 		Text:           text,
 		Type:           "response.output_text.done",
 	}
-	if !s.sw.writeNamed("response.output_text.done", &s.textDoneEvent) {
+	if !s.sw.writeNamed("response.output_text.done", &events.doneEvent) {
 		return
 	}
 
@@ -726,7 +953,7 @@ func (s *responsesStreamState) emitTextBlockDone(text string) {
 		Annotations: []any{}, Logprobs: []any{}, Text: text, Type: "output_text",
 	}
 	s.sequence++
-	s.textContentPartEvent = responsesOutputTextContentPartEvent{
+	events.contentPartEvent = responsesOutputTextContentPartEvent{
 		ContentIndex:   0,
 		ItemID:         s.textID,
 		OutputIndex:    s.outputIndex,
@@ -734,15 +961,15 @@ func (s *responsesStreamState) emitTextBlockDone(text string) {
 		SequenceNumber: s.sequence,
 		Type:           "response.content_part.done",
 	}
-	if !s.sw.writeNamed("response.content_part.done", &s.textContentPartEvent) {
+	if !s.sw.writeNamed("response.content_part.done", &events.contentPartEvent) {
 		return
 	}
 
-	s.textItemContent[0] = part
+	events.itemContent[0] = part
 	s.sequence++
-	s.textItemEvent = responsesOutputTextItemEvent{
+	events.itemEvent = responsesOutputTextItemEvent{
 		Item: responsesOutputTextMessageItem{
-			Content: s.textItemContent[:],
+			Content: events.itemContent[:],
 			ID:      s.textID,
 			Role:    "assistant",
 			Status:  "completed",
@@ -752,7 +979,7 @@ func (s *responsesStreamState) emitTextBlockDone(text string) {
 		SequenceNumber: s.sequence,
 		Type:           "response.output_item.done",
 	}
-	_ = s.sw.writeNamed("response.output_item.done", &s.textItemEvent)
+	_ = s.sw.writeNamed("response.output_item.done", &events.itemEvent)
 }
 
 func (s *responsesStreamState) emitFunctionCallItem(
@@ -763,19 +990,15 @@ func (s *responsesStreamState) emitFunctionCallItem(
 	if s.streamFailed() {
 		return
 	}
+	events := s.functionEventState()
 	s.sequence++
-	s.functionNamespace = tc.Namespace
-	var namespace *string
-	if tc.Namespace != "" {
-		namespace = &s.functionNamespace
-	}
-	s.functionItemEvent = responsesFunctionCallItemEvent{
+	events.itemEvent = responsesFunctionCallItemEvent{
 		Item: responsesFunctionCallItem{
 			Arguments: arguments,
 			CallID:    tc.ID,
 			ID:        itemID,
 			Name:      tc.Name,
-			Namespace: namespace,
+			Namespace: tc.Namespace,
 			Status:    status,
 			Type:      "function_call",
 		},
@@ -783,36 +1006,50 @@ func (s *responsesStreamState) emitFunctionCallItem(
 		SequenceNumber: s.sequence,
 		Type:           event,
 	}
-	_ = s.sw.writeNamed(event, &s.functionItemEvent)
+	_ = s.sw.writeNamed(event, &events.itemEvent)
 }
 
 func (s *responsesStreamState) emitFunctionCallArguments(event, itemID, arguments string) {
 	if s.streamFailed() {
 		return
 	}
+	events := s.functionEventState()
 	s.sequence++
-	s.functionArguments = arguments
-	s.functionArgumentsEvent = responsesFunctionCallArgumentsEvent{
+	events.arguments = arguments
+	events.argumentsEvent = responsesFunctionCallArgumentsEvent{
 		ItemID:         itemID,
 		OutputIndex:    s.outputIndex,
 		SequenceNumber: s.sequence,
 		Type:           event,
 	}
 	if event == "response.function_call_arguments.delta" {
-		s.functionArgumentsEvent.Delta = &s.functionArguments
+		events.argumentsEvent.Delta = &events.arguments
 	} else {
-		s.functionArgumentsEvent.Arguments = &s.functionArguments
+		events.argumentsEvent.Arguments = &events.arguments
 	}
-	_ = s.sw.writeNamed(event, &s.functionArgumentsEvent)
+	_ = s.sw.writeNamed(event, &events.argumentsEvent)
 }
 
-func (s *responsesStreamState) responseObject(status string, out protocolOutput) map[string]any {
-	resp := buildResponsesResponse(s.request, s.model, s.id, out)
-	resp["status"] = status
+func (s *responsesStreamState) responseObject(
+	status string,
+	out protocolOutput,
+	output []any,
+) *responsesResponse {
+	events := s.lifecycleEventState()
+	resp := &events.response
+	if events.initialized {
+		fillResponsesResult(resp, out, output)
+	} else {
+		fillResponsesResponse(resp, s.request, s.model, s.id, out, output)
+		cacheResponsesStreamStaticFields(resp)
+		events.initialized = true
+	}
+	if status != "" {
+		resp.Status = status
+	}
 	if status == "in_progress" {
-		resp["completed_at"] = nil
-		resp["output"] = []any{}
-		resp["usage"] = nil
+		resp.CompletedAt = nil
+		resp.Usage = nil
 	}
 	return resp
 }
@@ -862,6 +1099,14 @@ func (s *responsesStreamState) consume(chunk protocolOutput) {
 			return
 		}
 	}
+	if len(chunk.ToolCalls) > 0 {
+		additionalItems := len(chunk.ToolCalls)
+		if s.textOpen {
+			additionalItems++
+		}
+		s.items = slices.Grow(s.items, additionalItems)
+		s.out.ToolCalls = slices.Grow(s.out.ToolCalls, len(chunk.ToolCalls))
+	}
 	for _, tc := range chunk.ToolCalls {
 		if s.streamFailed() {
 			return
@@ -875,14 +1120,15 @@ func (s *responsesStreamState) consume(chunk protocolOutput) {
 		if s.streamFailed() {
 			return
 		}
-		item := map[string]any{
-			"id": itemID, "type": "function_call", "status": "completed",
-			"call_id": tc.ID, "name": tc.Name, "arguments": tc.Arguments,
-		}
-		if tc.Namespace != "" {
-			item["namespace"] = tc.Namespace
-		}
-		s.items = append(s.items, item)
+		s.items = append(s.items, &responsesFunctionCallItem{
+			Arguments: tc.Arguments,
+			CallID:    tc.ID,
+			ID:        itemID,
+			Name:      tc.Name,
+			Namespace: tc.Namespace,
+			Status:    "completed",
+			Type:      "function_call",
+		})
 		s.out.ToolCalls = append(s.out.ToolCalls, tc)
 		s.outputIndex++
 	}
@@ -898,12 +1144,12 @@ func (s *responsesStreamState) closeText() {
 	if s.streamFailed() {
 		return
 	}
-	part := map[string]any{"type": "output_text", "text": text, "annotations": []any{}, "logprobs": []any{}}
-	item := map[string]any{
-		"id": s.textID, "type": "message", "status": "completed", "role": "assistant",
-		"content": []any{part},
-	}
-	s.items = append(s.items, item)
+	s.items = append(s.items, &responsesCompletedTextMessageItem{
+		Content: [1]responsesOutputTextPart{{
+			Annotations: []any{}, Logprobs: []any{}, Text: text, Type: "output_text",
+		}},
+		ID: s.textID, Role: "assistant", Status: "completed", Type: "message",
+	})
 	s.outputIndex++
 	s.textOpen = false
 	s.text.Reset()
@@ -925,22 +1171,23 @@ func (s *responsesStreamState) finish() {
 	if s.out.Total == 0 {
 		s.out.Total = s.out.Input + s.out.Output
 	}
-	resp := buildResponsesResponse(s.request, s.model, s.id, s.out)
-	resp["output"] = s.items
+	resp := s.responseObject("", s.out, s.items)
 	event := "response.completed"
-	if resp["status"] == "incomplete" {
+	if resp.Status == "incomplete" {
 		event = "response.incomplete"
 	}
-	s.emit(event, map[string]any{"response": resp})
+	s.emitResponse(event, resp)
 }
 
 func (s *responsesStreamState) fail(err *vertex.VertexError) {
 	if s.streamFailed() {
 		return
 	}
-	resp := s.responseObject("failed", s.output())
-	resp["error"] = map[string]any{"code": err.Kind, "message": vertex.FriendlyErrorMessage(err)}
-	s.emit("response.failed", map[string]any{"response": resp})
+	resp := s.responseObject("failed", s.output(), nil)
+	events := s.lifecycleEventState()
+	events.err = responsesResponseError{Code: err.Kind, Message: vertex.FriendlyErrorMessage(err)}
+	resp.Error = &events.err
+	s.emitResponse("response.failed", resp)
 }
 
 func (s *responsesStreamState) output() protocolOutput {

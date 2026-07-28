@@ -128,11 +128,9 @@ func TestProtocolStreamStatesConsumeUsageOnlyFrame(t *testing.T) {
 		t.Fatalf("Responses 流丢失独立 usage 帧: %+v", responses.out)
 	}
 	response := buildResponsesResponse(map[string]any{}, "m", "resp_test", responses.out)
-	responseUsage := response["usage"].(map[string]any)
-	inputDetails := responseUsage["input_tokens_details"].(map[string]any)
-	outputDetails := responseUsage["output_tokens_details"].(map[string]any)
-	if inputDetails["cached_tokens"] != 4 || outputDetails["reasoning_tokens"] != 5 {
-		t.Fatalf("Responses usage 细分统计丢失: %#v", responseUsage)
+	if response.Usage == nil || response.Usage.InputTokensDetails.CachedTokens != 4 ||
+		response.Usage.OutputTokensDetails.ReasoningTokens != 5 {
+		t.Fatalf("Responses usage 细分统计丢失: %#v", response.Usage)
 	}
 
 	anthropic := &anthropicStreamState{}
@@ -148,13 +146,12 @@ func TestAnthropicMessageUsagePreservesCacheAndThinkingDetails(t *testing.T) {
 		Input: 10, Output: 25, Total: 35, CachedInputTokens: 4, ReasoningTokens: 5,
 	}
 	message := anthropicMessage("claude-test", "msg_test", out)
-	usage := message["usage"].(map[string]any)
-	if usage["input_tokens"] != 6 || usage["cache_read_input_tokens"] != 4 ||
-		usage["cache_creation_input_tokens"] != 0 || usage["output_tokens"] != 25 {
+	usage := &message.Usage
+	if usage.InputTokens != 6 || usage.CacheReadInputTokens != 4 ||
+		usage.CacheCreationInputTokens != 0 || usage.OutputTokens != 25 {
 		t.Fatalf("Anthropic cache usage mapping=%#v", usage)
 	}
-	details, ok := usage["output_tokens_details"].(map[string]any)
-	if !ok || details["thinking_tokens"] != 5 {
+	if usage.OutputTokensDetails == nil || usage.OutputTokensDetails.ThinkingTokens != 5 {
 		t.Fatalf("Anthropic thinking usage mapping=%#v", usage)
 	}
 
@@ -177,19 +174,18 @@ func TestAnthropicUsageClampsInvalidBreakdowns(t *testing.T) {
 	usage := anthropicUsage(protocolOutput{
 		Input: 3, Output: 2, CachedInputTokens: 5, ReasoningTokens: 7,
 	})
-	if usage["input_tokens"] != 0 || usage["cache_read_input_tokens"] != 3 || usage["output_tokens"] != 2 {
+	if usage.InputTokens != 0 || usage.CacheReadInputTokens != 3 || usage.OutputTokens != 2 {
 		t.Fatalf("clamped Anthropic usage=%#v", usage)
 	}
-	details := usage["output_tokens_details"].(map[string]any)
-	if details["thinking_tokens"] != 2 {
-		t.Fatalf("clamped thinking details=%#v", details)
+	if usage.OutputTokensDetails == nil || usage.OutputTokensDetails.ThinkingTokens != 2 {
+		t.Fatalf("clamped thinking details=%#v", usage.OutputTokensDetails)
 	}
 
 	empty := anthropicUsage(protocolOutput{Input: -1, Output: -2, CachedInputTokens: -3, ReasoningTokens: -4})
-	if empty["input_tokens"] != 0 || empty["cache_read_input_tokens"] != 0 || empty["output_tokens"] != 0 {
+	if empty.InputTokens != 0 || empty.CacheReadInputTokens != 0 || empty.OutputTokens != 0 {
 		t.Fatalf("negative Anthropic usage=%#v", empty)
 	}
-	if _, exists := empty["output_tokens_details"]; exists {
+	if empty.OutputTokensDetails != nil {
 		t.Fatalf("zero thinking details should be omitted: %#v", empty)
 	}
 }

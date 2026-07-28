@@ -138,6 +138,61 @@ type NormalizedUsage struct {
 	CompletionTextTokens  int
 }
 
+// OpenAIUsage is the typed wire representation used by streaming adapters.
+// Field order matches encoding/json's sorted map-key order to preserve the
+// existing JSON bytes while avoiding map reflection and allocation.
+type OpenAIUsage struct {
+	CompletionTokens        int                           `json:"completion_tokens"`
+	CompletionTokensDetails *OpenAICompletionTokenDetails `json:"completion_tokens_details,omitempty"`
+	PromptTokens            int                           `json:"prompt_tokens"`
+	PromptTokensDetails     *OpenAIPromptTokenDetails     `json:"prompt_tokens_details,omitempty"`
+	TotalTokens             int                           `json:"total_tokens"`
+
+	completionTokensDetails OpenAICompletionTokenDetails `json:"-"`
+	promptTokensDetails     OpenAIPromptTokenDetails     `json:"-"`
+}
+
+type OpenAICompletionTokenDetails struct {
+	AudioTokens     int `json:"audio_tokens,omitempty"`
+	ImageTokens     int `json:"image_tokens,omitempty"`
+	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+	TextTokens      int `json:"text_tokens,omitempty"`
+}
+
+type OpenAIPromptTokenDetails struct {
+	AudioTokens  int `json:"audio_tokens,omitempty"`
+	CachedTokens int `json:"cached_tokens,omitempty"`
+	TextTokens   int `json:"text_tokens,omitempty"`
+}
+
+// FillOpenAIUsage writes the normalized counters into reusable typed storage.
+func (u NormalizedUsage) FillOpenAIUsage(dst *OpenAIUsage) {
+	if dst == nil {
+		return
+	}
+	*dst = OpenAIUsage{
+		CompletionTokens: u.CompletionTokens,
+		PromptTokens:     u.PromptTokens,
+		TotalTokens:      u.TotalTokens,
+	}
+	if u.ReasoningTokens > 0 || u.CompletionImageTokens > 0 ||
+		u.CompletionAudioTokens > 0 || u.CompletionTextTokens > 0 {
+		dst.completionTokensDetails = OpenAICompletionTokenDetails{
+			AudioTokens:     u.CompletionAudioTokens,
+			ImageTokens:     u.CompletionImageTokens,
+			ReasoningTokens: u.ReasoningTokens,
+			TextTokens:      u.CompletionTextTokens,
+		}
+		dst.CompletionTokensDetails = &dst.completionTokensDetails
+	}
+	if u.CachedInputTokens > 0 || u.PromptAudioTokens > 0 || u.PromptTextTokens > 0 {
+		dst.promptTokensDetails = OpenAIPromptTokenDetails{
+			AudioTokens: u.PromptAudioTokens, CachedTokens: u.CachedInputTokens, TextTokens: u.PromptTextTokens,
+		}
+		dst.PromptTokensDetails = &dst.promptTokensDetails
+	}
+}
+
 // ConvertUsageForCandidate 把 Gemini usageMetadata 转成 OpenAI usage，并利用候选项
 // tokenCount 补齐部分匿名/预览模型只返回 totalTokenCount 时缺失的输出分项。
 func ConvertUsageForCandidate(meta, candidate map[string]any) map[string]any {

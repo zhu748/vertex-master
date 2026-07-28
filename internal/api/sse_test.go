@@ -1,11 +1,14 @@
 package api
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/bsfdsagfadg/vertex/internal/vertex"
 )
 
 type failingStreamResponseWriter struct {
@@ -103,6 +106,48 @@ func TestSSEWriterDataSerializationAndFallback(t *testing.T) {
 			}
 			if got := recorder.Body.String(); got != test.want {
 				t.Fatalf("writeData=%q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestOpenAIUsageTailMatchesCompatibilityJSON(t *testing.T) {
+	out := protocolOutput{
+		Input: 128, Output: 40, Total: 168, CachedInputTokens: 16, ReasoningTokens: 8,
+	}
+	for _, compatChoice := range []bool{false, true} {
+		name := "empty choices"
+		choices := []any{}
+		if compatChoice {
+			name = "RikkaHub compatibility choice"
+			choices = []any{map[string]any{
+				"delta": map[string]any{}, "finish_reason": nil, "index": 0,
+			}}
+		}
+		t.Run(name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			if !writeOAIStreamUsageValues(
+				newSSEWriter(recorder, "text/event-stream"), out,
+				"gemini<&中文>", "req<&中文>", 1234567890, compatChoice,
+			) {
+				t.Fatal("writeOAIStreamUsageValues returned false")
+			}
+			want := sseEvent(map[string]any{
+				"choices": choices,
+				"created": int64(1234567890),
+				"id":      "chatcmpl-req<&中文>",
+				"model":   "gemini<&中文>",
+				"object":  "chat.completion.chunk",
+				"usage": map[string]any{
+					"completion_tokens":         40,
+					"completion_tokens_details": map[string]any{"reasoning_tokens": 8},
+					"prompt_tokens":             128,
+					"prompt_tokens_details":     map[string]any{"cached_tokens": 16},
+					"total_tokens":              168,
+				},
+			})
+			if got := recorder.Body.String(); got != want {
+				t.Fatalf("typed usage tail=%q, compatibility JSON=%q", got, want)
 			}
 		})
 	}
@@ -326,6 +371,117 @@ func TestAnthropicTypedBlockBoundaryEventsMatchGenericSSE(t *testing.T) {
 	}
 }
 
+func TestAnthropicTypedLifecycleEventsMatchGenericSSE(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	state := anthropicStreamState{
+		sw: &sseWriter{w: recorder}, id: "msg_<中文>", model: "gemini<&>",
+		out: protocolOutput{
+			Finish: "length", Input: 10, Output: 5, CachedInputTokens: 4, ReasoningTokens: 2,
+		},
+	}
+	state.start()
+	state.finish()
+
+	startUsage := map[string]any{
+		"cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+		"input_tokens": 0, "output_tokens": 0,
+	}
+	want := namedSSE("message_start", map[string]any{
+		"message": map[string]any{
+			"content": []any{}, "id": "msg_<中文>", "model": "gemini<&>", "role": "assistant",
+			"stop_reason": nil, "stop_sequence": nil, "type": "message", "usage": startUsage,
+		},
+		"type": "message_start",
+	})
+	deltaUsage := map[string]any{
+		"cache_creation_input_tokens": 0, "cache_read_input_tokens": 4,
+		"input_tokens": 6, "output_tokens": 5,
+		"output_tokens_details": map[string]any{"thinking_tokens": 2},
+	}
+	want += namedSSE("message_delta", map[string]any{
+		"delta": map[string]any{"stop_reason": "max_tokens", "stop_sequence": nil},
+		"type":  "message_delta", "usage": deltaUsage,
+	})
+	want += namedSSE("message_stop", map[string]any{"type": "message_stop"})
+	if got := recorder.Body.String(); got != want {
+		t.Fatalf("typed Anthropic lifecycle=%q, generic lifecycle=%q", got, want)
+	}
+
+	recorder.Body.Reset()
+	failure := vertex.NewInvalidArgumentError("bad <参数>")
+	state = anthropicStreamState{sw: &sseWriter{w: recorder}}
+	state.fail(failure)
+	want = namedSSE("error", map[string]any{
+		"error": map[string]any{
+			"message": vertex.FriendlyErrorMessage(failure), "type": anthropicErrorType(failure),
+		},
+		"type": "error",
+	})
+	if got := recorder.Body.String(); got != want {
+		t.Fatalf("typed Anthropic error=%q, generic error=%q", got, want)
+	}
+}
+
+func TestAnthropicTypedCompletedMessageMatchesGenericJSON(t *testing.T) {
+	tests := []struct {
+		name string
+		out  protocolOutput
+	}{
+		{name: "empty text", out: protocolOutput{}},
+		{
+			name: "thinking text and tools",
+			out: protocolOutput{
+				Reasoning: "<思考> & reason", Text: "<完成> & answer",
+				ToolCalls: []protocolToolCall{
+					{ID: "toolu_1", Name: "lookup", Arguments: `{"q":"<北京>"}`},
+					{ID: "toolu_2", Name: "empty", Arguments: ""},
+					{ID: "toolu_3", Name: "invalid", Arguments: "{broken"},
+				},
+				Finish: "tool_calls", Input: 10, Output: 6, CachedInputTokens: 3, ReasoningTokens: 2,
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			message := anthropicMessage("gemini<&>", "msg_<中文>", test.out)
+			content := make([]any, 0, len(message.Content))
+			if test.out.Reasoning != "" {
+				content = append(content, map[string]any{
+					"signature": thinkingSignature(test.out.Reasoning),
+					"thinking":  test.out.Reasoning,
+					"type":      "thinking",
+				})
+			}
+			if test.out.Text != "" || len(test.out.ToolCalls) == 0 {
+				content = append(content, map[string]any{"text": test.out.Text, "type": "text"})
+			}
+			for _, call := range test.out.ToolCalls {
+				content = append(content, map[string]any{
+					"id": call.ID, "input": jsonValue(call.Arguments), "name": call.Name, "type": "tool_use",
+				})
+			}
+			usage := map[string]any{
+				"cache_creation_input_tokens": 0,
+				"cache_read_input_tokens":     min(max(test.out.CachedInputTokens, 0), max(test.out.Input, 0)),
+				"input_tokens":                max(test.out.Input-test.out.CachedInputTokens, 0),
+				"output_tokens":               max(test.out.Output, 0),
+			}
+			if thinking := min(max(test.out.ReasoningTokens, 0), max(test.out.Output, 0)); thinking > 0 {
+				usage["output_tokens_details"] = map[string]any{"thinking_tokens": thinking}
+			}
+			generic := map[string]any{
+				"content": content, "id": "msg_<中文>", "model": "gemini<&>", "role": "assistant",
+				"stop_reason":   anthropicStopReason(test.out.Finish, len(test.out.ToolCalls) > 0),
+				"stop_sequence": nil, "type": "message", "usage": usage,
+			}
+			if got, want := namedSSE("message", message), namedSSE("message", generic); got != want {
+				t.Fatalf("typed Anthropic message=%q, generic message=%q", got, want)
+			}
+		})
+	}
+}
+
 func TestResponsesTypedFunctionCallEventsMatchGenericSSE(t *testing.T) {
 	tests := []struct {
 		name string
@@ -432,6 +588,246 @@ func TestResponsesTypedTextBoundaryEventsMatchGenericSSE(t *testing.T) {
 			})
 			if got := recorder.Body.String(); got != want {
 				t.Fatalf("typed Responses text events=%q, generic events=%q", got, want)
+			}
+		})
+	}
+}
+
+func TestResponsesTypedEventStateIsAllocatedOnDemand(t *testing.T) {
+	t.Run("text only", func(t *testing.T) {
+		state := responsesStreamState{
+			sw: &sseWriter{w: httptest.NewRecorder()}, textID: "msg_test", textOpen: true,
+		}
+		state.consume(protocolOutput{Text: "hello"})
+		if state.textEvents == nil {
+			t.Fatal("text stream did not initialize its reusable event state")
+		}
+		if state.functionEvents != nil {
+			t.Fatal("text-only stream initialized function-call event state")
+		}
+	})
+
+	t.Run("function only", func(t *testing.T) {
+		state := responsesStreamState{sw: &sseWriter{w: httptest.NewRecorder()}}
+		state.consume(protocolOutput{ToolCalls: []protocolToolCall{{
+			ID: "call_test", Name: "lookup", Arguments: `{}`,
+		}}})
+		if state.functionEvents == nil {
+			t.Fatal("function-call stream did not initialize its reusable event state")
+		}
+		if state.textEvents != nil {
+			t.Fatal("function-only stream initialized text event state")
+		}
+	})
+
+	t.Run("mixed", func(t *testing.T) {
+		state := responsesStreamState{sw: &sseWriter{w: httptest.NewRecorder()}}
+		state.consume(protocolOutput{Text: "before", ToolCalls: []protocolToolCall{{
+			ID: "call_test", Name: "lookup", Arguments: `{}`,
+		}}})
+		if state.textEvents == nil || state.functionEvents == nil {
+			t.Fatal("mixed stream must retain both reusable event states")
+		}
+	})
+}
+
+func TestResponsesTypedLifecycleEventsMatchGenericSSE(t *testing.T) {
+	request := map[string]any{
+		"instructions":         "<系统提示>",
+		"max_output_tokens":    256,
+		"metadata":             map[string]any{"trace": "<&>"},
+		"parallel_tool_calls":  false,
+		"previous_response_id": "resp_previous",
+		"reasoning":            map[string]any{"effort": "high", "summary": nil},
+		"store":                true,
+		"temperature":          0.25,
+		"text":                 map[string]any{"format": map[string]any{"type": "text"}},
+		"tool_choice":          "auto",
+		"tools":                []any{},
+		"top_p":                0.9,
+		"truncation":           "disabled",
+	}
+	tests := []struct {
+		name   string
+		event  string
+		status string
+		out    protocolOutput
+		error  *responsesResponseError
+	}{
+		{name: "in progress", event: "response.created", status: "in_progress"},
+		{
+			name: "completed", event: "response.completed",
+			out: protocolOutput{Text: "<完成>", Input: 10, Output: 4, Total: 14, CachedInputTokens: 2},
+		},
+		{
+			name: "incomplete", event: "response.incomplete",
+			out: protocolOutput{Text: "partial", Finish: "length", Input: 10, Output: 4, Total: 14},
+		},
+		{
+			name: "failed", event: "response.failed", status: "failed",
+			error: &responsesResponseError{Code: "upstream_error", Message: "失败 <&>"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			state := responsesStreamState{
+				sw: &sseWriter{w: recorder}, id: "resp_<中文>", model: "gemini<&>",
+				request: request, sequence: 9,
+			}
+			var output []any
+			if test.status == "in_progress" {
+				output = []any{}
+			}
+			response := state.responseObject(test.status, test.out, output)
+			if test.error != nil {
+				state.lifecycleEventState().err = *test.error
+				response.Error = &state.lifecycleEventState().err
+			}
+			state.emitResponse(test.event, response)
+
+			encoded, err := json.Marshal(response)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var genericResponse map[string]any
+			if err := json.Unmarshal(encoded, &genericResponse); err != nil {
+				t.Fatal(err)
+			}
+			want := namedSSE(test.event, map[string]any{
+				"response": genericResponse, "sequence_number": 10, "type": test.event,
+			})
+			if got := recorder.Body.String(); got != want {
+				t.Fatalf("typed lifecycle event=%q, generic event=%q", got, want)
+			}
+			if len(genericResponse) != 23 {
+				t.Fatalf("Responses lifecycle field count=%d, want 23: %#v", len(genericResponse), genericResponse)
+			}
+
+			switch test.event {
+			case "response.created":
+				if genericResponse["status"] != "in_progress" || genericResponse["completed_at"] != nil ||
+					genericResponse["usage"] != nil || len(genericResponse["output"].([]any)) != 0 {
+					t.Fatalf("invalid in-progress response: %#v", genericResponse)
+				}
+			case "response.completed":
+				usage := genericResponse["usage"].(map[string]any)
+				if usage["input_tokens"] != float64(10) || usage["output_tokens"] != float64(4) ||
+					usage["total_tokens"] != float64(14) {
+					t.Fatalf("invalid completed usage: %#v", usage)
+				}
+			case "response.incomplete":
+				details := genericResponse["incomplete_details"].(map[string]any)
+				if details["reason"] != "max_output_tokens" || genericResponse["status"] != "incomplete" {
+					t.Fatalf("invalid incomplete response: %#v", genericResponse)
+				}
+			case "response.failed":
+				failure := genericResponse["error"].(map[string]any)
+				if failure["code"] != test.error.Code || failure["message"] != test.error.Message {
+					t.Fatalf("invalid failed response: %#v", genericResponse)
+				}
+			}
+		})
+	}
+}
+
+func TestResponsesLifecycleReusesStaticResponseFields(t *testing.T) {
+	request := map[string]any{
+		"metadata":  map[string]any{"trace": "<中文>"},
+		"reasoning": map[string]any{"effort": "high", "summary": nil},
+		"text":      map[string]any{"format": map[string]any{"type": "text"}},
+		"tools": []any{map[string]any{
+			"type": "function", "name": "lookup",
+		}},
+	}
+	state := responsesStreamState{
+		sw: &sseWriter{w: httptest.NewRecorder()}, id: "resp_test", model: "gemini-test", request: request,
+	}
+	initial := state.responseObject("in_progress", protocolOutput{}, []any{})
+	createdAt := initial.CreatedAt
+	for name, value := range map[string]any{
+		"metadata":  initial.Metadata,
+		"reasoning": initial.Reasoning,
+		"text":      initial.Text,
+		"tools":     initial.Tools,
+	} {
+		if _, ok := value.(json.RawMessage); !ok {
+			t.Fatalf("%s was not cached as raw JSON: %T", name, value)
+		}
+	}
+
+	items := []any{map[string]any{"id": "msg_test", "type": "message"}}
+	completed := state.responseObject("", protocolOutput{Input: 10, Output: 4, Total: 14}, items)
+	if completed != initial {
+		t.Fatal("lifecycle response object was replaced instead of reused")
+	}
+	if completed.CreatedAt != createdAt || completed.Status != "completed" || completed.Usage == nil ||
+		completed.Usage.TotalTokens != 14 || len(completed.Output) != 1 {
+		t.Fatalf("reused lifecycle response lost dynamic state: %#v", completed)
+	}
+	if _, ok := completed.Tools.(json.RawMessage); !ok {
+		t.Fatalf("cached static tools were rebuilt: %T", completed.Tools)
+	}
+}
+
+func TestResponsesTypedCompletedOutputItemsMatchGenericJSON(t *testing.T) {
+	tests := []struct {
+		name string
+		out  protocolOutput
+	}{
+		{name: "empty text", out: protocolOutput{}},
+		{
+			name: "text and tools",
+			out: protocolOutput{
+				Text: "<完成> & ok",
+				ToolCalls: []protocolToolCall{
+					{ID: "call_plain", Name: "lookup", Arguments: `{"q":"plain"}`},
+					{
+						ID: "call_namespaced", Name: "search<&>", Namespace: "mcp__中文",
+						Arguments: `{"q":"<北京>"}`,
+					},
+				},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			items := responseOutputItems(test.out)
+			generic := make([]any, 0, len(items))
+			index := 0
+			if test.out.Text != "" || len(test.out.ToolCalls) == 0 {
+				message, ok := items[index].(*responsesCompletedTextMessageItem)
+				if !ok {
+					t.Fatalf("text output item type=%T", items[index])
+				}
+				part := map[string]any{
+					"annotations": []any{}, "logprobs": []any{}, "text": test.out.Text, "type": "output_text",
+				}
+				generic = append(generic, map[string]any{
+					"content": []any{part}, "id": message.ID, "role": "assistant",
+					"status": "completed", "type": "message",
+				})
+				index++
+			}
+			for _, call := range test.out.ToolCalls {
+				item, ok := items[index].(*responsesFunctionCallItem)
+				if !ok {
+					t.Fatalf("function output item type=%T", items[index])
+				}
+				value := map[string]any{
+					"arguments": call.Arguments, "call_id": call.ID, "id": item.ID,
+					"name": call.Name, "status": "completed", "type": "function_call",
+				}
+				if call.Namespace != "" {
+					value["namespace"] = call.Namespace
+				}
+				generic = append(generic, value)
+				index++
+			}
+			if got, want := namedSSE("output", items), namedSSE("output", generic); got != want {
+				t.Fatalf("typed completed output=%q, generic output=%q", got, want)
 			}
 		})
 	}

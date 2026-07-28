@@ -234,6 +234,48 @@ func BenchmarkOpenAITextDeltaDirectStream(b *testing.B) {
 	}
 }
 
+func BenchmarkOpenAIUsageDirectStream(b *testing.B) {
+	sw := &sseWriter{w: benchmarkResponseWriter{}}
+	encoder := transform.NewOpenAIStreamEncoder("gemini-benchmark", "benchmark")
+	chunk := map[string]any{
+		"candidates": []any{map[string]any{"tokenCount": 32}},
+		"usageMetadata": map[string]any{
+			"promptTokenCount": 128, "candidatesTokenCount": 32,
+			"thoughtsTokenCount": 8, "cachedContentTokenCount": 16, "totalTokenCount": 168,
+		},
+	}
+	emit := func(payload any) bool { return sw.writeData(payload) }
+	b.ReportAllocs()
+	for range b.N {
+		if _, ok := encoder.Emit(chunk, false, emit); !ok {
+			b.Fatal("direct OpenAI usage stream failed")
+		}
+	}
+}
+
+func BenchmarkOpenAIUsageTail(b *testing.B) {
+	out := protocolOutput{
+		Input: 128, Output: 40, Total: 168, CachedInputTokens: 16, ReasoningTokens: 8,
+	}
+	for _, compatChoice := range []bool{false, true} {
+		name := "empty_choices"
+		if compatChoice {
+			name = "compat_choice"
+		}
+		b.Run(name, func(b *testing.B) {
+			sw := &sseWriter{w: benchmarkResponseWriter{}}
+			b.ReportAllocs()
+			for range b.N {
+				if !writeOAIStreamUsageValues(
+					sw, out, "gemini-benchmark", "benchmark", 1234567890, compatChoice,
+				) {
+					b.Fatal("OpenAI usage tail failed")
+				}
+			}
+		})
+	}
+}
+
 func BenchmarkAnthropicTextDeltaStream(b *testing.B) {
 	state := anthropicStreamState{
 		sw:       &sseWriter{w: benchmarkResponseWriter{}},
@@ -317,6 +359,64 @@ func BenchmarkAnthropicToolCallStreamState(b *testing.B) {
 	}
 }
 
+func BenchmarkAnthropicMessageLifecycle(b *testing.B) {
+	out := protocolOutput{Input: 128, Output: 32, Total: 160}
+	b.ReportAllocs()
+	for range b.N {
+		state := anthropicStreamState{
+			sw: &sseWriter{w: benchmarkResponseWriter{}}, id: "msg_benchmark", model: "gemini-benchmark",
+			out: out,
+		}
+		state.start()
+		state.finish()
+		if !state.connected() {
+			b.Fatal("unexpected Anthropic lifecycle disconnect")
+		}
+	}
+}
+
+func BenchmarkAnthropicCompletedMessage(b *testing.B) {
+	toolCalls := make([]protocolToolCall, 16)
+	for i := range toolCalls {
+		toolCalls[i] = protocolToolCall{
+			ID: "toolu_benchmark", Name: "lookup", Arguments: `{"query":"benchmark"}`,
+		}
+	}
+	tests := []struct {
+		name string
+		out  protocolOutput
+	}{
+		{
+			name: "text", out: protocolOutput{
+				Text: strings.Repeat("x", 256), Input: 128, Output: 32, Total: 160,
+			},
+		},
+		{
+			name: "thinking_and_text", out: protocolOutput{
+				Reasoning: strings.Repeat("r", 128), ReasoningTokens: 16,
+				Text: strings.Repeat("x", 256), Input: 128, Output: 48, Total: 176,
+			},
+		},
+		{
+			name: "sixteen_tools", out: protocolOutput{
+				ToolCalls: toolCalls, Input: 2048, Output: 128, Total: 2176,
+			},
+		},
+	}
+	for _, test := range tests {
+		b.Run(test.name, func(b *testing.B) {
+			sw := &sseWriter{w: benchmarkResponseWriter{}}
+			b.ReportAllocs()
+			for range b.N {
+				message := anthropicMessage("gemini-benchmark", "msg_benchmark", test.out)
+				if !sw.writeData(message) {
+					b.Fatal("unexpected Anthropic message write failure")
+				}
+			}
+		})
+	}
+}
+
 func BenchmarkResponsesToolCallStreamState(b *testing.B) {
 	chunk := protocolOutput{ToolCalls: []protocolToolCall{{
 		ID: "call_benchmark", Name: "lookup", Namespace: "mcp__demo", Arguments: `{"query":"benchmark"}`,
@@ -341,5 +441,102 @@ func BenchmarkResponsesTextBlockLifecycle(b *testing.B) {
 		if len(state.items) != 1 || state.outputIndex != 1 {
 			b.Fatal("unexpected Responses text block state")
 		}
+	}
+}
+
+func BenchmarkResponsesResponseLifecycle(b *testing.B) {
+	request := map[string]any{}
+	items := []any{map[string]any{
+		"id": "msg_benchmark", "type": "message", "status": "completed", "role": "assistant",
+		"content": []any{},
+	}}
+	out := protocolOutput{Input: 128, Output: 32, Total: 160}
+	b.ReportAllocs()
+	for range b.N {
+		state := responsesStreamState{
+			sw: &sseWriter{w: benchmarkResponseWriter{}}, id: "resp_benchmark", model: "gemini-benchmark",
+			request: request, items: items, out: out,
+		}
+		state.start()
+		state.finish()
+		if state.sequence != 3 {
+			b.Fatal("unexpected Responses lifecycle sequence")
+		}
+	}
+}
+
+func BenchmarkResponsesResponseLifecycleRichRequest(b *testing.B) {
+	tool := map[string]any{
+		"type": "function", "name": "lookup", "description": strings.Repeat("search ", 8),
+		"parameters": map[string]any{
+			"type": "object", "properties": map[string]any{
+				"query": map[string]any{"type": "string", "description": "search query"},
+			},
+		},
+	}
+	tools := make([]any, 16)
+	for i := range tools {
+		tools[i] = tool
+	}
+	request := map[string]any{
+		"instructions": "Follow the system prompt.",
+		"metadata":     map[string]any{"session": "benchmark", "source": "codex"},
+		"reasoning":    map[string]any{"effort": "high", "summary": nil},
+		"text":         map[string]any{"format": map[string]any{"type": "text"}},
+		"tool_choice":  map[string]any{"type": "auto"},
+		"tools":        tools,
+	}
+	items := []any{map[string]any{
+		"id": "msg_benchmark", "type": "message", "status": "completed", "role": "assistant",
+		"content": []any{},
+	}}
+	out := protocolOutput{Input: 2048, Output: 128, Total: 2176}
+	b.ReportAllocs()
+	for range b.N {
+		state := responsesStreamState{
+			sw: &sseWriter{w: benchmarkResponseWriter{}}, id: "resp_benchmark", model: "gemini-benchmark",
+			request: request, items: items, out: out,
+		}
+		state.start()
+		state.finish()
+		if state.sequence != 3 {
+			b.Fatal("unexpected Responses lifecycle sequence")
+		}
+	}
+}
+
+func BenchmarkResponsesCompletedResponse(b *testing.B) {
+	toolCalls := make([]protocolToolCall, 16)
+	for i := range toolCalls {
+		toolCalls[i] = protocolToolCall{
+			ID: "call_benchmark", Name: "lookup", Namespace: "mcp__demo",
+			Arguments: `{"query":"benchmark"}`,
+		}
+	}
+	tests := []struct {
+		name string
+		out  protocolOutput
+	}{
+		{
+			name: "text",
+			out:  protocolOutput{Text: strings.Repeat("x", 256), Input: 128, Output: 32, Total: 160},
+		},
+		{
+			name: "sixteen_tools",
+			out:  protocolOutput{ToolCalls: toolCalls, Input: 2048, Output: 128, Total: 2176},
+		},
+	}
+	for _, test := range tests {
+		b.Run(test.name, func(b *testing.B) {
+			sw := &sseWriter{w: benchmarkResponseWriter{}}
+			request := map[string]any{}
+			b.ReportAllocs()
+			for range b.N {
+				response := buildResponsesResponse(request, "gemini-benchmark", "resp_benchmark", test.out)
+				if !sw.writeData(response) || len(response.Output) == 0 {
+					b.Fatal("unexpected completed Responses output")
+				}
+			}
+		})
 	}
 }

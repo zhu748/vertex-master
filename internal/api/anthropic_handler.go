@@ -301,41 +301,101 @@ func anthropicToolResult(v any) string {
 	return jsonString(v)
 }
 
-func anthropicMessage(model, id string, out protocolOutput) map[string]any {
-	content := []any{}
-	if out.Reasoning != "" {
-		// 非流式响应同样需要非空 signature，否则 Claude Code SDK 在下一轮对话历史中会拒绝该 thinking 块。
-		content = append(content, map[string]any{"type": "thinking", "thinking": out.Reasoning, "signature": thinkingSignature(out.Reasoning)})
-	}
-	if out.Text != "" || len(out.ToolCalls) == 0 {
-		content = append(content, map[string]any{"type": "text", "text": out.Text})
-	}
-	for _, tc := range out.ToolCalls {
-		content = append(content, map[string]any{
-			"type": "tool_use", "id": tc.ID, "name": tc.Name, "input": jsonValue(tc.Arguments),
-		})
-	}
-	return map[string]any{
-		"id": id, "type": "message", "role": "assistant", "model": model,
-		"content": content, "stop_reason": anthropicStopReason(out.Finish, len(out.ToolCalls) > 0),
-		"stop_sequence": nil,
-		"usage":         anthropicUsage(out),
-	}
+type anthropicMessageResponse struct {
+	Content      []any              `json:"content"`
+	ID           string             `json:"id"`
+	Model        string             `json:"model"`
+	Role         string             `json:"role"`
+	StopReason   string             `json:"stop_reason"`
+	StopSequence *string            `json:"stop_sequence"`
+	Type         string             `json:"type"`
+	Usage        anthropicUsageData `json:"usage"`
 }
 
-func anthropicUsage(out protocolOutput) map[string]any {
+type anthropicThinkingContent struct {
+	Signature string `json:"signature"`
+	Thinking  string `json:"thinking"`
+	Type      string `json:"type"`
+}
+
+type anthropicTextContent struct {
+	Text string `json:"text"`
+	Type string `json:"type"`
+}
+
+type anthropicToolUseContent struct {
+	ID    string `json:"id"`
+	Input any    `json:"input"`
+	Name  string `json:"name"`
+	Type  string `json:"type"`
+}
+
+type anthropicUsageData struct {
+	CacheCreationInputTokens int                          `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int                          `json:"cache_read_input_tokens"`
+	InputTokens              int                          `json:"input_tokens"`
+	OutputTokens             int                          `json:"output_tokens"`
+	OutputTokensDetails      *anthropicOutputTokenDetails `json:"output_tokens_details,omitempty"`
+
+	outputTokensDetails anthropicOutputTokenDetails `json:"-"`
+}
+
+type anthropicOutputTokenDetails struct {
+	ThinkingTokens int `json:"thinking_tokens"`
+}
+
+func anthropicMessage(model, id string, out protocolOutput) *anthropicMessageResponse {
+	capacity := len(out.ToolCalls)
+	if out.Reasoning != "" {
+		capacity++
+	}
+	if out.Text != "" || len(out.ToolCalls) == 0 {
+		capacity++
+	}
+	message := &anthropicMessageResponse{
+		Content: make([]any, 0, capacity),
+		ID:      id,
+		Model:   model,
+		Role:    "assistant",
+		Type:    "message",
+	}
+	if out.Reasoning != "" {
+		// 非流式响应同样需要非空 signature，否则 Claude Code SDK 在下一轮对话历史中会拒绝该 thinking 块。
+		message.Content = append(message.Content, &anthropicThinkingContent{
+			Signature: thinkingSignature(out.Reasoning), Thinking: out.Reasoning, Type: "thinking",
+		})
+	}
+	if out.Text != "" || len(out.ToolCalls) == 0 {
+		message.Content = append(message.Content, &anthropicTextContent{Text: out.Text, Type: "text"})
+	}
+	for _, tc := range out.ToolCalls {
+		message.Content = append(message.Content, &anthropicToolUseContent{
+			ID: tc.ID, Input: jsonValue(tc.Arguments), Name: tc.Name, Type: "tool_use",
+		})
+	}
+	message.StopReason = anthropicStopReason(out.Finish, len(out.ToolCalls) > 0)
+	fillAnthropicUsage(&message.Usage, out)
+	return message
+}
+
+func anthropicUsage(out protocolOutput) *anthropicUsageData {
+	usage := &anthropicUsageData{}
+	fillAnthropicUsage(usage, out)
+	return usage
+}
+
+func fillAnthropicUsage(usage *anthropicUsageData, out protocolOutput) {
 	totalInput := max(out.Input, 0)
 	cacheRead := min(max(out.CachedInputTokens, 0), totalInput)
-	usage := map[string]any{
-		"input_tokens":                totalInput - cacheRead,
-		"output_tokens":               max(out.Output, 0),
-		"cache_creation_input_tokens": 0,
-		"cache_read_input_tokens":     cacheRead,
+	*usage = anthropicUsageData{
+		CacheReadInputTokens: cacheRead,
+		InputTokens:          totalInput - cacheRead,
+		OutputTokens:         max(out.Output, 0),
 	}
 	if thinking := min(max(out.ReasoningTokens, 0), max(out.Output, 0)); thinking > 0 {
-		usage["output_tokens_details"] = map[string]any{"thinking_tokens": thinking}
+		usage.outputTokensDetails.ThinkingTokens = thinking
+		usage.OutputTokensDetails = &usage.outputTokensDetails
 	}
-	return usage
 }
 
 func anthropicStopReason(finish string, hasTools bool) string {
@@ -458,8 +518,57 @@ type anthropicStreamState struct {
 	emptyObject         struct{}
 	toolID              string
 	toolName            string
+	lifecycleEvents     *anthropicLifecycleEventState
 	out                 protocolOutput
 	mu                  sync.Mutex // 保护 sw 的并发写（ping goroutine 与主回调可能竞争）
+}
+
+type anthropicLifecycleEventState struct {
+	messageStart anthropicMessageStartEvent
+	messageDelta anthropicMessageDeltaEvent
+	messageStop  anthropicMessageStopEvent
+	failure      anthropicErrorEvent
+}
+
+type anthropicMessageStartEvent struct {
+	Message anthropicMessageStart `json:"message"`
+	Type    string                `json:"type"`
+}
+
+type anthropicMessageStart struct {
+	Content      [0]any             `json:"content"`
+	ID           string             `json:"id"`
+	Model        string             `json:"model"`
+	Role         string             `json:"role"`
+	StopReason   *string            `json:"stop_reason"`
+	StopSequence *string            `json:"stop_sequence"`
+	Type         string             `json:"type"`
+	Usage        anthropicUsageData `json:"usage"`
+}
+
+type anthropicMessageDeltaEvent struct {
+	Delta anthropicMessageDelta `json:"delta"`
+	Type  string                `json:"type"`
+	Usage anthropicUsageData    `json:"usage"`
+}
+
+type anthropicMessageDelta struct {
+	StopReason   string  `json:"stop_reason"`
+	StopSequence *string `json:"stop_sequence"`
+}
+
+type anthropicMessageStopEvent struct {
+	Type string `json:"type"`
+}
+
+type anthropicErrorEvent struct {
+	Error anthropicErrorPayload `json:"error"`
+	Type  string                `json:"type"`
+}
+
+type anthropicErrorPayload struct {
+	Message string `json:"message"`
+	Type    string `json:"type"`
 }
 
 type anthropicContentBlockDeltaEvent struct {
@@ -497,16 +606,6 @@ type anthropicContentBlockStart struct {
 type anthropicContentBlockStopEvent struct {
 	Index int    `json:"index"`
 	Type  string `json:"type"`
-}
-
-func (s *anthropicStreamState) emit(event string, fields map[string]any) {
-	if !s.connected() {
-		return
-	}
-	fields["type"] = event
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.writeNamedLocked(event, fields)
 }
 
 func (s *anthropicStreamState) emitContentBlockDelta(delta anthropicContentBlockDelta) {
@@ -547,6 +646,74 @@ func (s *anthropicStreamState) emitContentBlockStop() {
 	s.writeNamedLocked("content_block_stop", &s.blockStopEvent)
 }
 
+func (s *anthropicStreamState) lifecycleEventState() *anthropicLifecycleEventState {
+	if s.lifecycleEvents == nil {
+		s.lifecycleEvents = &anthropicLifecycleEventState{}
+	}
+	return s.lifecycleEvents
+}
+
+func (s *anthropicStreamState) emitMessageStart() {
+	if !s.connected() {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	events := s.lifecycleEventState()
+	events.messageStart = anthropicMessageStartEvent{
+		Message: anthropicMessageStart{
+			ID: s.id, Model: s.model, Role: "assistant", Type: "message",
+		},
+		Type: "message_start",
+	}
+	fillAnthropicUsage(&events.messageStart.Message.Usage, protocolOutput{})
+	s.writeNamedLocked("message_start", &events.messageStart)
+}
+
+func (s *anthropicStreamState) emitMessageDelta() {
+	if !s.connected() {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	events := s.lifecycleEventState()
+	events.messageDelta = anthropicMessageDeltaEvent{
+		Delta: anthropicMessageDelta{
+			StopReason: anthropicStopReason(s.out.Finish, len(s.out.ToolCalls) > 0),
+		},
+		Type: "message_delta",
+	}
+	fillAnthropicUsage(&events.messageDelta.Usage, s.out)
+	s.writeNamedLocked("message_delta", &events.messageDelta)
+}
+
+func (s *anthropicStreamState) emitMessageStop() {
+	if !s.connected() {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	events := s.lifecycleEventState()
+	events.messageStop = anthropicMessageStopEvent{Type: "message_stop"}
+	s.writeNamedLocked("message_stop", &events.messageStop)
+}
+
+func (s *anthropicStreamState) emitError(err *vertex.VertexError) {
+	if !s.connected() {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	events := s.lifecycleEventState()
+	events.failure = anthropicErrorEvent{
+		Error: anthropicErrorPayload{
+			Message: vertex.FriendlyErrorMessage(err), Type: anthropicErrorType(err),
+		},
+		Type: "error",
+	}
+	s.writeNamedLocked("error", &events.failure)
+}
+
 func (s *anthropicStreamState) connected() bool {
 	return s != nil && (s.sw == nil || !s.sw.failed.Load())
 }
@@ -580,11 +747,7 @@ func (s *anthropicStreamState) emitPing() bool {
 }
 
 func (s *anthropicStreamState) start() {
-	s.emit("message_start", map[string]any{"message": map[string]any{
-		"id": s.id, "type": "message", "role": "assistant", "model": s.model,
-		"content": []any{}, "stop_reason": nil, "stop_sequence": nil,
-		"usage": anthropicUsage(protocolOutput{}),
-	}})
+	s.emitMessageStart()
 }
 
 func (s *anthropicStreamState) consume(chunk protocolOutput) {
@@ -713,14 +876,8 @@ func (s *anthropicStreamState) finish() {
 		return
 	}
 	s.out = s.output()
-	s.emit("message_delta", map[string]any{
-		"delta": map[string]any{
-			"stop_reason":   anthropicStopReason(s.out.Finish, len(s.out.ToolCalls) > 0),
-			"stop_sequence": nil,
-		},
-		"usage": anthropicUsage(s.out),
-	})
-	s.emit("message_stop", map[string]any{})
+	s.emitMessageDelta()
+	s.emitMessageStop()
 }
 
 func (s *anthropicStreamState) output() protocolOutput {
@@ -747,12 +904,7 @@ func thinkingSignature(thinking string) string {
 }
 
 func (s *anthropicStreamState) fail(err *vertex.VertexError) {
-	if !s.connected() {
-		return
-	}
-	s.emit("error", map[string]any{"error": map[string]any{
-		"type": anthropicErrorType(err), "message": vertex.FriendlyErrorMessage(err),
-	}})
+	s.emitError(err)
 }
 
 func (h *AnthropicHandler) anthropicError(w http.ResponseWriter, status int, typ, message string) {
