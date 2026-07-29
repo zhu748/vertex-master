@@ -14,6 +14,46 @@ import (
 	"github.com/bsfdsagfadg/vertex/internal/nodes"
 )
 
+type serialRaceConfig struct {
+	config.ConfigProvider
+}
+
+func (serialRaceConfig) ParallelPoolEnabled() bool { return false }
+
+func (serialRaceConfig) ProxyFailoverMaxAttempts() int {
+	panic("serial race accessed parallel failover settings")
+}
+
+func (serialRaceConfig) ParallelNodeTopK() int {
+	panic("serial race accessed parallel ranking settings")
+}
+
+func (serialRaceConfig) DebugMode() bool {
+	panic("serial race accessed parallel debug settings")
+}
+
+func (serialRaceConfig) StickyNodePriority() bool {
+	panic("serial race accessed parallel sticky settings")
+}
+
+func TestRunRaceDisabledPoolSkipsParallelSelection(t *testing.T) {
+	base := config.DefaultConfig()
+	base.ActiveNodeURI = "http://serial.invalid:8080"
+	cfg := serialRaceConfig{ConfigProvider: config.StaticProvider(base)}
+	var selectedProxy string
+
+	_, err := RunRace(context.Background(), cfg, func(_ context.Context, proxyURI string) (string, error) {
+		selectedProxy = proxyURI
+		return "", NewInvalidArgumentError("expected test stop")
+	})
+	if err == nil {
+		t.Fatal("RunRace() error = nil, want test stop")
+	}
+	if selectedProxy != base.ActiveNodeURI {
+		t.Fatalf("RunRace() proxy = %q, want %q", selectedProxy, base.ActiveNodeURI)
+	}
+}
+
 func TestRunRaceRetryableFailureLaunchesNextImmediately(t *testing.T) {
 	installRaceTestNodes(t, 3)
 	cfg := raceTestConfig(1, 3, 5_000)

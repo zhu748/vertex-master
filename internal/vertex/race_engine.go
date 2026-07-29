@@ -124,16 +124,17 @@ func runRacePreferred[T any](
 		o(&rc)
 	}
 
-	stickyPool := nodes.GetStickyPool()
+	var cands []nodes.Node
+	if cfg.ParallelPoolEnabled() {
+		cands = nodes.SelectForParallel(
+			cfg.ProxyFailoverMaxAttempts(),
+			cfg.ParallelNodeTopK(),
+			cfg.DebugMode(),
+			cfg.StickyNodePriority(),
+		)
+	}
 
-	cands := nodes.SelectForParallel(
-		cfg.ProxyFailoverMaxAttempts(),
-		cfg.ParallelNodeTopK(),
-		cfg.DebugMode(),
-		cfg.StickyNodePriority(),
-	)
-
-	if !cfg.ParallelPoolEnabled() || len(cands) == 0 {
+	if len(cands) == 0 {
 		proxy := cfg.ActiveNodeURI()
 		if proxy == "" {
 			proxy = cfg.ProxyURL()
@@ -153,6 +154,7 @@ func runRacePreferred[T any](
 		}
 		return value, err
 	}
+	stickyPool := nodes.GetStickyPool()
 
 	if cfg.DebugMode() {
 		log.Printf("[Vertex] [RunParallel] 开启对冲延迟竞速, %d 个节点参与", len(cands))
