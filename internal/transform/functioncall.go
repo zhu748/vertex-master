@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"strings"
+	"unsafe"
 )
 
 const skipThoughtSentinel = "skip_thought_signature_validator"
@@ -12,7 +13,15 @@ var encodedSkipThoughtSentinel = base64.StdEncoding.EncodeToString( //nolint:goc
 	[]byte(skipThoughtSentinel),
 )
 
-var base64URLReplacer = strings.NewReplacer("-", "+", "_", "/") //nolint:gochecknoglobals
+var base64StandardAlphabet = func() [256]byte { //nolint:gochecknoglobals
+	var replacements [256]byte
+	for index := range replacements {
+		replacements[index] = byte(index)
+	}
+	replacements['-'] = '+'
+	replacements['_'] = '/'
+	return replacements
+}()
 
 // NormalizeBase64 规范化 base64：剥离 data URI 前缀、URL-safe 字符还原、补 padding。
 func NormalizeBase64(data string) string {
@@ -32,11 +41,28 @@ func NormalizeBase64(data string) string {
 		}
 		return value + strings.Repeat("=", padding)
 	}
-	value = base64URLReplacer.Replace(value)
-	if padding > 0 {
-		value += strings.Repeat("=", padding)
+
+	normalized := make([]byte, len(value)+padding)
+	index := 0
+	for ; index+7 < len(value); index += 8 {
+		normalized[index] = base64StandardAlphabet[value[index]]
+		normalized[index+1] = base64StandardAlphabet[value[index+1]]
+		normalized[index+2] = base64StandardAlphabet[value[index+2]]
+		normalized[index+3] = base64StandardAlphabet[value[index+3]]
+		normalized[index+4] = base64StandardAlphabet[value[index+4]]
+		normalized[index+5] = base64StandardAlphabet[value[index+5]]
+		normalized[index+6] = base64StandardAlphabet[value[index+6]]
+		normalized[index+7] = base64StandardAlphabet[value[index+7]]
 	}
-	return value
+	for ; index < len(value); index++ {
+		normalized[index] = base64StandardAlphabet[value[index]]
+	}
+	for index := len(value); index < len(normalized); index++ {
+		normalized[index] = '='
+	}
+	// normalized escapes with the returned immutable string and is never mutated
+	// again, so reusing its backing storage avoids a second multi-megabyte copy.
+	return unsafe.String(unsafe.SliceData(normalized), len(normalized))
 }
 
 // FcNameTracker 按出现顺序追踪 functionCall 名称。

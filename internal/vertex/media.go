@@ -201,7 +201,7 @@ func audioInlineSegment(raw any) (data, mime string, ok bool) {
 
 func appendBase64Loose(dst []byte, encoded string) ([]byte, error) {
 	start := len(dst)
-	decodedCapacity := base64.StdEncoding.DecodedLen(len(encoded))
+	decodedCapacity := base64.RawStdEncoding.DecodedLen(len(encoded))
 	dst = slices.Grow(dst, decodedCapacity)
 	dst = dst[:start+decodedCapacity]
 	written, err := base64.StdEncoding.Decode(dst[start:], []byte(encoded))
@@ -210,16 +210,50 @@ func appendBase64Loose(dst []byte, encoded string) ([]byte, error) {
 	}
 	dst = dst[:start]
 
-	// URL-safe 字符替换 + 补 padding，与 decodeBase64Loose 的兼容语义一致。
+	hasURLAlphabet := strings.IndexByte(encoded, '-') >= 0 || strings.IndexByte(encoded, '_') >= 0
+	payloadLength := len(encoded)
+	if strings.IndexByte(encoded, '\r') >= 0 || strings.IndexByte(encoded, '\n') >= 0 {
+		payloadLength = 0
+		for index := range len(encoded) {
+			if encoded[index] != '\r' && encoded[index] != '\n' {
+				payloadLength++
+			}
+		}
+	}
+
+	if hasURLAlphabet {
+		encoding := base64.URLEncoding
+		if payloadLength%4 != 0 {
+			encoding = base64.RawURLEncoding
+		}
+		dst = dst[:start+decodedCapacity]
+		written, err = encoding.Decode(dst[start:], []byte(encoded))
+		if err == nil {
+			return dst[:start+written], nil
+		}
+		dst = dst[:start]
+	} else if payloadLength%4 != 0 {
+		dst = dst[:start+decodedCapacity]
+		written, err = base64.RawStdEncoding.Decode(dst[start:], []byte(encoded))
+		if err == nil {
+			return dst[:start+written], nil
+		}
+		dst = dst[:start]
+	}
+
+	// 直接解码失败时保留旧版的混合字母表与 padding 宽松兼容路径。
 	normalized := strings.ReplaceAll(strings.ReplaceAll(encoded, "-", "+"), "_", "/")
 	if pad := len(normalized) % 4; pad != 0 {
 		normalized += strings.Repeat("=", 4-pad)
 	}
-	decoded, fallbackErr := base64.StdEncoding.DecodeString(normalized)
+	fallbackCapacity := base64.StdEncoding.DecodedLen(len(normalized))
+	dst = slices.Grow(dst, fallbackCapacity)
+	dst = dst[:start+fallbackCapacity]
+	written, fallbackErr := base64.StdEncoding.Decode(dst[start:], []byte(normalized))
 	if fallbackErr != nil {
-		return dst, fallbackErr //nolint:wrapcheck
+		return dst[:start], fallbackErr //nolint:wrapcheck
 	}
-	return append(dst, decoded...), nil
+	return dst[:start+written], nil
 }
 
 // firstCandidateParts 取 result.candidates[0].content.parts（无则空切片）。
@@ -243,13 +277,5 @@ func firstCandidateParts(result map[string]any) []any {
 // decodeBase64Loose 容错解码 base64：先 standard、失败再 URL-safe、再补 padding，保持宽松性
 // （上游偶有 URL-safe / 缺 padding 的段）。
 func decodeBase64Loose(s string) ([]byte, error) {
-	if b, err := base64.StdEncoding.DecodeString(s); err == nil {
-		return b, nil
-	}
-	// URL-safe 字符替换 + 补 padding
-	t := strings.ReplaceAll(strings.ReplaceAll(s, "-", "+"), "_", "/")
-	if pad := len(t) % 4; pad != 0 {
-		t += strings.Repeat("=", 4-pad)
-	}
-	return base64.StdEncoding.DecodeString(t) //nolint:wrapcheck
+	return appendBase64Loose(nil, s)
 }

@@ -8,6 +8,33 @@ import (
 
 var benchmarkAudioData AudioData   //nolint:gochecknoglobals
 var benchmarkImageData []ImageData //nolint:gochecknoglobals
+var benchmarkDecodedBase64 []byte  //nolint:gochecknoglobals
+
+func BenchmarkAppendBase64LooseOneMiB(b *testing.B) {
+	raw := make([]byte, 1<<20)
+	for index := range raw {
+		raw[index] = byte(index)
+	}
+	standard := base64.StdEncoding.EncodeToString(raw)
+	urlSafe := base64.RawURLEncoding.EncodeToString(raw)
+
+	for name, input := range map[string]string{
+		"standard":          standard,
+		"url_safe_unpadded": urlSafe,
+	} {
+		b.Run(name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.SetBytes(int64(len(raw)))
+			for range b.N {
+				var err error
+				benchmarkDecodedBase64, err = appendBase64Loose(nil, input)
+				if err != nil || len(benchmarkDecodedBase64) != len(raw) {
+					b.Fatalf("decoded bytes=%d, err=%v", len(benchmarkDecodedBase64), err)
+				}
+			}
+		})
+	}
+}
 
 func BenchmarkExtractAudioResponseSixteenSegments(b *testing.B) {
 	segment := make([]byte, 64<<10)
@@ -280,7 +307,9 @@ func TestDecodeBase64Loose(t *testing.T) {
 		{"standard base64", std, []byte("hello world"), false},
 		// URL-safe: 含 -/_ 字符。bytes 0xfb 0xff 0xbf → std "+/+/" 中含 +、/
 		{"url-safe with dash underscore", "-_-_", mustStdDecode("+/+/"), false},
+		{"mixed standard and URL-safe alphabet", "+_+/", mustStdDecode("+/+/"), false},
 		{"missing padding restored", "aGVsbG8", []byte("hello"), false}, // "hello" std = aGVsbG8= (缺1个=)
+		{"line breaks ignored", "aGVs\r\nbG8=", []byte("hello"), false},
 		{"empty string", "", []byte{}, false},
 		{"invalid chars", "@@@@", nil, true},
 	}
@@ -300,6 +329,25 @@ func TestDecodeBase64Loose(t *testing.T) {
 				t.Errorf("decodeBase64Loose(%q)=%v，期望 %v", c.in, got, c.want)
 			}
 		})
+	}
+}
+
+func TestAppendBase64LoosePreservesDestinationOnFailure(t *testing.T) {
+	prefix := []byte("existing-audio")
+	got, err := appendBase64Loose(append([]byte(nil), prefix...), "@@@@")
+	if err == nil {
+		t.Fatal("invalid Base64 must return an error")
+	}
+	if string(got) != string(prefix) {
+		t.Fatalf("destination changed after failed decode: got %q, want %q", got, prefix)
+	}
+
+	got, err = appendBase64Loose(got, "aGVsbG8")
+	if err != nil {
+		t.Fatalf("append unpadded Base64: %v", err)
+	}
+	if want := "existing-audiohello"; string(got) != want {
+		t.Fatalf("appended bytes=%q, want %q", got, want)
 	}
 }
 
