@@ -297,7 +297,11 @@ func runRacePreferred[T any](
 					RequestIDFromContext(ctx),
 					proxyAttemptMilliseconds(res.elapsed),
 				)
-				log.Printf("[Racing] 竞速胜出节点: %s", name)
+				log.Printf(
+					"[Racing] 竞速胜出节点: %s, 请求ID=%s",
+					name,
+					RequestIDFromContext(ctx),
+				)
 				cli.UpdateReqWinner(RequestIDFromContext(ctx), name)
 				cli.UpdateReqState(RequestIDFromContext(ctx), "🟢 数据传输", "\033[32m", "已建立连接")
 

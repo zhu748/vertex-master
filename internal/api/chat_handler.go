@@ -48,7 +48,7 @@ func (c *ChatHandler) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	actualModel, useFake := stripFakePrefix(rawModel, c.cfg.FakePrefixes())
+	actualModel, useFake := resolveRequestedModel(rawModel, c.cfg)
 	body["model"] = actualModel
 	cli.UpdateReqModel(vertex.RequestIDFromContext(r.Context()), actualModel)
 
@@ -59,6 +59,25 @@ func (c *ChatHandler) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 	if convErr != nil {
 		oaiError(w, http.StatusBadRequest, "请求参数有误: "+convErr.Error()+" (invalid argument)", "invalid_request_error")
 		return
+	}
+	if prefill := transform.AssistantPrefillFromPayload(geminiPayload); prefill != "" {
+		shape := summarizePrompt(geminiPayload)
+		log.Printf(
+			"[Server] [Prefill] 请求ID=%s, 文本提示摘要=%s, 轮次=%d (user=%d, model=%d, function=%d), "+
+				"system=%dB, text=%dB, non_text=%d, prefill=%dB, 假流式=%v, 并发池=%v",
+			vertex.RequestIDFromContext(r.Context()),
+			shape.Fingerprint,
+			shape.Turns,
+			shape.UserTurns,
+			shape.ModelTurns,
+			shape.FunctionTurns,
+			shape.SystemBytes,
+			shape.TextBytes,
+			shape.NonTextParts,
+			len(prefill),
+			useFake,
+			c.cfg.ParallelPoolEnabled(),
+		)
 	}
 
 	n, nErr := resolveN(body["n"], c.cfg.MaxN())

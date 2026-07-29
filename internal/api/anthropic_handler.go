@@ -42,7 +42,7 @@ func (h *AnthropicHandler) handleMessages(w http.ResponseWriter, r *http.Request
 		h.anthropicError(w, http.StatusBadRequest, "invalid_request_error", "max_tokens is required")
 		return
 	}
-	actualModel, useFake := stripFakePrefix(rawModel, h.cfg.FakePrefixes())
+	actualModel, useFake := resolveRequestedModel(rawModel, h.cfg)
 	cli.UpdateReqModel(vertex.RequestIDFromContext(r.Context()), actualModel)
 
 	chatBody, err := anthropicToChatRequest(body)
@@ -91,7 +91,7 @@ func (h *AnthropicHandler) handleCountTokens(w http.ResponseWriter, r *http.Requ
 		h.anthropicError(w, http.StatusBadRequest, "invalid_request_error", "model is required")
 		return
 	}
-	actualModel, _ := stripFakePrefix(rawModel, h.cfg.FakePrefixes())
+	actualModel, _ := resolveRequestedModel(rawModel, h.cfg)
 	chatBody, err := anthropicToChatRequest(body)
 	if err != nil {
 		h.anthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())

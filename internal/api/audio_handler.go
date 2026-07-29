@@ -67,7 +67,7 @@ func (a *AudioHandler) handleAudioSpeech(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	actualModel, _ := stripFakePrefix(getStr(body, "model", ""), a.cfg.FakePrefixes())
+	actualModel, _ := resolveRequestedModel(getStr(body, "model", ""), a.cfg)
 	if actualModel == "" || !strings.HasPrefix(actualModel, "gemini") {
 		actualModel = ttsDefaultModel
 	}

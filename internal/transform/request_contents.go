@@ -1,11 +1,66 @@
 package transform
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 
 	"github.com/bsfdsagfadg/vertex/internal/config"
 )
+
+// validateConvertibleMessageContent prevents one valid part from masking other
+// unsupported parts in the same OpenAI message. Without this check a client can
+// send [valid text, unknown prompt block] and receive 200 even though part of
+// its context was silently discarded.
+func validateConvertibleMessageContent(content any) error {
+	switch value := content.(type) {
+	case nil, string:
+		return nil
+	case []any:
+		for index, rawItem := range value {
+			if _, ok := rawItem.(string); ok {
+				continue
+			}
+			item, ok := rawItem.(map[string]any)
+			if !ok {
+				return fmt.Errorf("content[%d] must be a string or object", index)
+			}
+			contentType, _ := item["type"].(string)
+			switch contentType {
+			case "text", "input_text", "output_text":
+				if _, ok := item["text"].(string); !ok {
+					return fmt.Errorf("content[%d].text must be a string", index)
+				}
+			case "image_url":
+				url := imageURLString(item["image_url"])
+				if strings.HasPrefix(url, "data:") {
+					mime, data := parseDataURI(url)
+					if mime == "" || data == "" {
+						return fmt.Errorf("content[%d] contains an invalid data image", index)
+					}
+				} else if !hasRemotePrefix(url) {
+					return fmt.Errorf("content[%d] contains an unsupported image URL", index)
+				}
+			case "video_url", "input_video":
+				url := holderURLString(item[contentType])
+				_, data := parseDataURI(url)
+				if !strings.HasPrefix(url, "data:") || data == "" {
+					return fmt.Errorf("content[%d] contains an unsupported video", index)
+				}
+			case "input_audio":
+				_, data := parseInputAudio(item["input_audio"])
+				if data == "" {
+					return fmt.Errorf("content[%d] contains invalid input audio", index)
+				}
+			default:
+				return fmt.Errorf("content[%d] has unsupported type %q", index, contentType)
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("content must be a string or an array")
+	}
+}
 
 // assistantImageMarkdownRe 匹配 assistant 文本里嵌的 markdown data-URI 图片。
 var assistantImageMarkdownRe = regexp.MustCompile(`!\[[^\]]*\]\((data:[^()\s;,]+;base64,[A-Za-z0-9+/=_\-]+)\)`)

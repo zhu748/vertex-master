@@ -3,11 +3,169 @@ package transform
 import (
 	"encoding/base64"
 	"encoding/json"
+	"math"
 	"strings"
 	"testing"
 
 	"github.com/bsfdsagfadg/vertex/internal/config"
 )
+
+func TestConvertChatRequestRejectsSilentlyDroppedMessages(t *testing.T) {
+	validToolCall := []any{map[string]any{
+		"id": "call_1",
+		"function": map[string]any{
+			"name":      "lookup",
+			"arguments": "{}",
+		},
+	}}
+	tests := []struct {
+		name     string
+		messages []any
+	}{
+		{
+			name:     "non-object message",
+			messages: []any{"plain string"},
+		},
+		{
+			name: "unsupported role",
+			messages: []any{
+				map[string]any{"role": "observer", "content": "hidden prompt"},
+			},
+		},
+		{
+			name: "unconvertible user content",
+			messages: []any{
+				map[string]any{"role": "user", "content": []any{
+					map[string]any{"type": "unknown", "value": "hidden prompt"},
+				}},
+			},
+		},
+		{
+			name: "partially unconvertible user content",
+			messages: []any{
+				map[string]any{"role": "user", "content": []any{
+					map[string]any{"type": "text", "text": "visible prompt"},
+					map[string]any{"type": "unknown", "value": "hidden prompt"},
+				}},
+			},
+		},
+		{
+			name: "unconvertible system content",
+			messages: []any{
+				map[string]any{"role": "system", "content": []any{
+					map[string]any{"type": "unknown", "value": "hidden prompt"},
+				}},
+			},
+		},
+		{
+			name: "partially unconvertible system content",
+			messages: []any{
+				map[string]any{"role": "system", "content": []any{
+					map[string]any{"type": "text", "text": "visible prompt"},
+					map[string]any{"type": "unknown", "value": "hidden prompt"},
+				}},
+			},
+		},
+		{
+			name: "unconvertible assistant content is not masked by tool calls",
+			messages: []any{
+				map[string]any{
+					"role":       "assistant",
+					"content":    map[string]any{"unexpected": "hidden prompt"},
+					"tool_calls": validToolCall,
+				},
+			},
+		},
+		{
+			name: "no system or valid contents",
+			messages: []any{
+				map[string]any{"role": "assistant", "content": nil},
+			},
+		},
+		{
+			name: "empty user is not valid content",
+			messages: []any{
+				map[string]any{"role": "user", "content": ""},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := ConvertChatRequest(
+				map[string]any{"model": "m", "messages": tc.messages},
+				config.StaticProvider(config.DefaultConfig()),
+			)
+			if err == nil {
+				t.Fatal("expected invalid message content to return an error")
+			}
+		})
+	}
+}
+
+func TestConvertChatRequestAllowsAssistantToolCallWithoutText(t *testing.T) {
+	body := map[string]any{
+		"model": "m",
+		"messages": []any{
+			map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{
+				map[string]any{"id": "call_1", "function": map[string]any{
+					"name": "lookup", "arguments": "{}",
+				}},
+			}},
+		},
+	}
+	_, payload, err := ConvertChatRequest(body, config.StaticProvider(config.DefaultConfig()))
+	if err != nil {
+		t.Fatalf("assistant tool-call turn should remain supported: %v", err)
+	}
+	contents, _ := payload["contents"].([]any)
+	if len(contents) != 1 {
+		t.Fatalf("contents len=%d, want 1", len(contents))
+	}
+}
+
+func TestConvertChatRequestValidatesMaxTokenInteger(t *testing.T) {
+	invalid := []any{
+		float64(0),
+		float64(-1),
+		1.5,
+		math.NaN(),
+		math.Inf(1),
+		math.Inf(-1),
+		"128",
+	}
+	for _, field := range []string{"max_tokens", "max_completion_tokens"} {
+		for _, value := range invalid {
+			t.Run(field, func(t *testing.T) {
+				body := map[string]any{
+					"model":    "m",
+					"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+					field:      value,
+				}
+				if _, _, err := ConvertChatRequest(
+					body,
+					config.StaticProvider(config.DefaultConfig()),
+				); err == nil {
+					t.Fatalf("%s=%v should be rejected", field, value)
+				}
+			})
+		}
+	}
+
+	for _, field := range []string{"max_tokens", "max_completion_tokens"} {
+		body := map[string]any{
+			"model":    "m",
+			"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+			field:      float64(128),
+		}
+		if _, _, err := ConvertChatRequest(
+			body,
+			config.StaticProvider(config.DefaultConfig()),
+		); err != nil {
+			t.Fatalf("%s integer should remain valid: %v", field, err)
+		}
+	}
+}
 
 // ============ 多模态 content 转换 ============
 

@@ -14,6 +14,9 @@ const assistantPrefillInstructionPrefix = "The JSON string below represents text
 	"JSON syntax, delimiters, an explanation, or a restarted answer.\n" +
 	"Assistant prefix JSON: "
 
+const assistantPrefillContinueNudge = "Continue the immediately preceding assistant response. " +
+	"Output only its continuation; do not repeat, explain, or restart it."
+
 const lowerHexDigits = "0123456789abcdef"
 
 // AdaptGemini36Prefill applies the trailing model-turn compatibility rewrite
@@ -42,10 +45,11 @@ func AdaptGemini36Prefill(model string, payload map[string]any) string {
 	return prefix
 }
 
-// convertTrailingAssistantPrefill rewrites a plain-text assistant prefill into
-// a final user continuation instruction. Gemini 3.6 rejects requests ending in
-// a non-empty model turn, while clients such as SillyTavern use exactly that
-// shape for Continue Prefill.
+// convertTrailingAssistantPrefill preserves a valid plain-text assistant
+// prefill and appends a final user continuation nudge. Gemini 3.6 rejects
+// requests ending in a non-empty model turn, while clients such as SillyTavern
+// use exactly that shape for Continue Prefill. Invalid model-only/consecutive
+// model shapes use a data-encoded user fallback.
 func convertTrailingAssistantPrefill(contents []any) ([]any, string) {
 	if len(contents) == 0 {
 		return contents, ""
@@ -89,6 +93,29 @@ func convertTrailingAssistantPrefill(contents []any) ([]any, string) {
 	}
 
 	prefix := prefill.String()
+
+	// Preserve the assistant role whenever the prefix follows a valid prompt
+	// turn. Gemini 3.6 only rejects a request that *ends* in a non-empty model
+	// turn; appending a short user nudge makes the request legal without turning
+	// character text into the nearest user instruction. This is the common
+	// SillyTavern Continue Prefill shape.
+	if len(contents) > 1 {
+		previous, _ := contents[len(contents)-2].(map[string]any)
+		previousRole, _ := previous["role"].(string)
+		if previousRole == "user" || previousRole == "function" {
+			nudge := map[string]any{
+				"role": "user",
+				"parts": []any{
+					map[string]any{"text": assistantPrefillContinueNudge},
+				},
+			}
+			return append(contents, nudge), prefix
+		}
+	}
+
+	// A model-only or consecutive-model payload is not valid Gemini history.
+	// Fall back to encoding the prefix as data in a user instruction so legacy
+	// and malformed clients still receive the established compatibility path.
 	instruction := buildAssistantPrefillInstruction(prefix)
 	instructionPart := map[string]any{"text": instruction}
 

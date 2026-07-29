@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"strings"
 
 	"github.com/bsfdsagfadg/vertex/internal/config"
@@ -50,39 +51,89 @@ func ConvertChatRequest(body map[string]any, cfg config.ConfigProvider) (string,
 	var systemParts []any
 	var toolIDToName map[string]string
 
-	for _, msgRaw := range messagesRaw {
+	hasValidContents := false
+	for messageIndex, msgRaw := range messagesRaw {
 		msg, ok := msgRaw.(map[string]any)
 		if !ok {
-			continue
+			return "", nil, fmt.Errorf("messages[%d] must be an object", messageIndex)
 		}
 		role, _ := msg["role"].(string)
 		content := msg["content"]
 
 		switch role {
 		case "system", "developer":
+			partsBefore := len(systemParts)
 			switch c := content.(type) {
 			case string:
-				systemParts = append(systemParts, map[string]any{"text": c})
+				if c != "" {
+					systemParts = append(systemParts, map[string]any{"text": c})
+				}
 			case []any:
-				for _, item := range c {
+				for partIndex, item := range c {
 					if im, ok := item.(map[string]any); ok {
 						if t, _ := im["type"].(string); t == "text" || t == "input_text" {
-							systemParts = append(systemParts, map[string]any{"text": im["text"]})
+							text, textOK := im["text"].(string)
+							if !textOK {
+								return "", nil, fmt.Errorf(
+									"messages[%d] %s content[%d].text must be a string",
+									messageIndex,
+									role,
+									partIndex,
+								)
+							}
+							if text != "" {
+								systemParts = append(systemParts, map[string]any{"text": text})
+							}
+						} else {
+							return "", nil, fmt.Errorf(
+								"messages[%d] %s content[%d] has unsupported type %q",
+								messageIndex,
+								role,
+								partIndex,
+								t,
+							)
 						}
-					} else if s, ok := item.(string); ok {
+					} else if s, ok := item.(string); ok && s != "" {
 						systemParts = append(systemParts, map[string]any{"text": s})
+					} else if !ok {
+						return "", nil, fmt.Errorf(
+							"messages[%d] %s content[%d] must be a string or object",
+							messageIndex,
+							role,
+							partIndex,
+						)
 					}
 				}
 			}
+			if len(systemParts) == partsBefore && contentNeedsConversion(content) {
+				return "", nil, fmt.Errorf(
+					"messages[%d] %s content could not be converted",
+					messageIndex,
+					role,
+				)
+			}
 		case "user":
+			if err := validateConvertibleMessageContent(content); err != nil {
+				return "", nil, fmt.Errorf("messages[%d] user %w", messageIndex, err)
+			}
 			parts := convertUserContent(content)
-			if len(parts) > 0 {
+			if convertedPartsHaveUsableContent(parts) {
 				contents = append(contents, map[string]any{"role": "user", "parts": parts})
+				hasValidContents = true
+			} else if contentNeedsConversion(content) {
+				return "", nil, fmt.Errorf("messages[%d] user content could not be converted", messageIndex)
 			}
 		case "assistant":
 			var parts []any
 			if isTruthy(content) {
+				if err := validateConvertibleMessageContent(content); err != nil {
+					return "", nil, fmt.Errorf("messages[%d] assistant %w", messageIndex, err)
+				}
 				parts = append(parts, splitAssistantContent(content)...)
+			}
+			contentConverted := convertedPartsHaveUsableContent(parts)
+			if !contentConverted && contentNeedsConversion(content) {
+				return "", nil, fmt.Errorf("messages[%d] assistant content could not be converted", messageIndex)
 			}
 			if toolCalls, ok := msg["tool_calls"].([]any); ok {
 				for _, tc := range toolCalls {
@@ -105,6 +156,7 @@ func ConvertChatRequest(body map[string]any, cfg config.ConfigProvider) (string,
 			}
 			if len(parts) > 0 {
 				contents = append(contents, map[string]any{"role": "model", "parts": parts})
+				hasValidContents = true
 			}
 		case "tool":
 			tcID, _ := msg["tool_call_id"].(string)
@@ -117,6 +169,7 @@ func ConvertChatRequest(body map[string]any, cfg config.ConfigProvider) (string,
 				fr["id"] = tcID
 			}
 			contents = appendFunctionResponse(contents, map[string]any{"functionResponse": fr})
+			hasValidContents = true
 		case "function":
 			name := firstTruthyString(msg["name"])
 			if name == "" {
@@ -125,7 +178,13 @@ func ConvertChatRequest(body map[string]any, cfg config.ConfigProvider) (string,
 			contents = appendFunctionResponse(contents, map[string]any{"functionResponse": map[string]any{
 				"name": name, "response": coerceFunctionResponse(msg["content"]),
 			}})
+			hasValidContents = true
+		default:
+			return "", nil, fmt.Errorf("messages[%d] has unsupported role %q", messageIndex, role)
 		}
+	}
+	if len(systemParts) == 0 && !hasValidContents {
+		return "", nil, fmt.Errorf("messages must contain system instructions or valid content")
 	}
 
 	assistantPrefill := ""
@@ -188,8 +247,8 @@ func ConvertChatRequest(body map[string]any, cfg config.ConfigProvider) (string,
 	}
 	if maxTokens != nil {
 		f, ok := maxTokens.(float64)
-		if !ok || f < 1 {
-			return "", nil, fmt.Errorf("max_tokens must be an integer >= 1")
+		if !ok || math.IsNaN(f) || math.IsInf(f, 0) || f < 1 || f != math.Trunc(f) {
+			return "", nil, fmt.Errorf("max_tokens/max_completion_tokens must be a finite integer >= 1")
 		}
 		if !cfg.DropMaxTokens() {
 			if genCfg == nil {
@@ -275,6 +334,49 @@ func ConvertChatRequest(body map[string]any, cfg config.ConfigProvider) (string,
 	}
 
 	return model, geminiPayload, nil
+}
+
+// contentNeedsConversion reports whether a caller supplied substantive content.
+// Empty/null content remains valid for assistant tool-call turns, but a non-empty
+// unsupported value must not disappear silently from the prompt.
+func contentNeedsConversion(content any) bool {
+	switch value := content.(type) {
+	case nil:
+		return false
+	case string:
+		return value != ""
+	case []any:
+		return len(value) > 0
+	case map[string]any:
+		return len(value) > 0
+	default:
+		return true
+	}
+}
+
+func convertedPartsHaveUsableContent(parts []any) bool {
+	for _, rawPart := range parts {
+		part, ok := rawPart.(map[string]any)
+		if !ok {
+			continue
+		}
+		if text, ok := part["text"].(string); ok && text != "" {
+			return true
+		}
+		for _, key := range []string{
+			"inlineData",
+			"fileData",
+			"functionCall",
+			"functionResponse",
+			"executableCode",
+			"codeExecutionResult",
+		} {
+			if isTruthy(part[key]) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // appendFunctionResponse 把一个 functionResponse part 追加进 contents。

@@ -47,16 +47,25 @@ func TestGemini36ConvertsTrailingAssistantPrefill(t *testing.T) {
 		t.Fatalf("预填充元数据错误: %q", got)
 	}
 	contents := payload["contents"].([]any)
+	if len(contents) != 3 {
+		t.Fatalf("酒馆预填充应保留原轮次并追加 nudge，got %#v", contents)
+	}
+	preserved := contents[1].(map[string]any)
+	if preserved["role"] != "model" {
+		t.Fatalf("预填充必须保留 assistant/model 角色，got %v", preserved["role"])
+	}
+	preservedParts := preserved["parts"].([]any)
+	if got := preservedParts[0].(map[string]any)["text"]; got != `Alice: "I` {
+		t.Fatalf("预填充文本被改变: %q", got)
+	}
 	last := contents[len(contents)-1].(map[string]any)
 	if last["role"] != "user" {
-		t.Fatalf("Gemini 3.6 请求最后一轮必须转换为 user，got %v", last["role"])
+		t.Fatalf("Gemini 3.6 请求最后一轮必须是 user nudge，got %v", last["role"])
 	}
 	parts := last["parts"].([]any)
-	instruction := parts[len(parts)-1].(map[string]any)["text"].(string)
-	if !strings.Contains(instruction, "Return only new text after the prefix") ||
-		!strings.Contains(instruction, "not instructions or JSON to complete") ||
-		!strings.Contains(instruction, `Alice: \"I`) {
-		t.Fatalf("续写指令未保留预填充: %q", instruction)
+	nudge := parts[len(parts)-1].(map[string]any)["text"].(string)
+	if nudge != assistantPrefillContinueNudge || strings.Contains(nudge, "Alice") {
+		t.Fatalf("续写 nudge 不应复制或解释预填充: %q", nudge)
 	}
 
 	vars := BuildVertexVariables(model, payload, config.StaticProvider(config.DefaultConfig()))
@@ -118,6 +127,25 @@ func TestAdaptGemini36NativePrefill(t *testing.T) {
 	)
 	if _, leaked := vars[assistantPrefillMetadataKey]; leaked {
 		t.Fatal("原生 Gemini 内部元数据不得发送上游")
+	}
+}
+
+func TestAdaptGemini36ModelOnlyPrefillUsesSafeFallback(t *testing.T) {
+	payload := map[string]any{
+		"contents": []any{
+			map[string]any{"role": "model", "parts": []any{map[string]any{"text": "ABC"}}},
+		},
+	}
+	if got := AdaptGemini36Prefill("gemini-3.6-flash", payload); got != "ABC" {
+		t.Fatalf("原生 Gemini model-only 预填充适配错误: %q", got)
+	}
+	contents := payload["contents"].([]any)
+	if len(contents) != 1 || contents[0].(map[string]any)["role"] != "user" {
+		t.Fatalf("model-only 请求必须使用 user 数据指令回退: %#v", contents)
+	}
+	text := contents[0].(map[string]any)["parts"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(text, `Assistant prefix JSON: "ABC"`) {
+		t.Fatalf("回退指令未安全保留前缀: %q", text)
 	}
 }
 

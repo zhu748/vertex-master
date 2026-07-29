@@ -50,7 +50,7 @@ func (h *ResponsesHandler) handleResponses(w http.ResponseWriter, r *http.Reques
 		oaiError(w, http.StatusBadRequest, "missing required field 'model'", "invalid_request_error")
 		return
 	}
-	actualModel, useFake := stripFakePrefix(rawModel, h.cfg.FakePrefixes())
+	actualModel, useFake := resolveRequestedModel(rawModel, h.cfg)
 	cli.UpdateReqModel(vertex.RequestIDFromContext(r.Context()), actualModel)
 
 	chatBody, err := responsesToChatRequest(body)
@@ -203,15 +203,9 @@ func responsesToChatRequest(body map[string]any) (map[string]any, error) {
 				if role == "" {
 					role = "user"
 				}
-				var content any
-				if role == "assistant" {
-					content = responseInstructions(item["content"])
-				} else {
-					var err error
-					content, err = responseContentToChat(item["content"])
-					if err != nil {
-						return nil, err
-					}
+				content, err := responseContentToChat(item["content"])
+				if err != nil {
+					return nil, err
 				}
 				if explicitRole == role && reusableResponsesMessage(item, content) {
 					// The decoded request is read-only for the remainder of the

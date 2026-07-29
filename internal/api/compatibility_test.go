@@ -189,6 +189,40 @@ func TestResponsesAndAnthropicGemini36AssistantPrefill(t *testing.T) {
 	}
 }
 
+func TestResponsesGemini36AssistantBlocksPreserveExactPrefill(t *testing.T) {
+	chat, err := responsesToChatRequest(map[string]any{
+		"input": []any{
+			map[string]any{"type": "message", "role": "user", "content": "Continue"},
+			map[string]any{"type": "message", "role": "assistant", "content": []any{
+				map[string]any{"type": "output_text", "text": "A"},
+				map[string]any{"type": "output_text", "text": "B"},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	chat["model"] = "gemini-3.6-flash"
+	_, payload, err := transform.ConvertChatRequest(
+		chat,
+		config.StaticProvider(config.DefaultConfig()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := transform.AssistantPrefillFromPayload(payload); got != "AB" {
+		t.Fatalf("Responses assistant 文本块之间不得插入分隔符: %q", got)
+	}
+	contents := anySlice(payload["contents"])
+	prefill := contents[len(contents)-2].(map[string]any)
+	parts := anySlice(prefill["parts"])
+	if len(parts) != 2 ||
+		stringValue(parts[0].(map[string]any)["text"]) != "A" ||
+		stringValue(parts[1].(map[string]any)["text"]) != "B" {
+		t.Fatalf("Responses assistant 文本块未精确保留: %#v", prefill)
+	}
+}
+
 func TestAnthropicGemini36DisabledThinkingUsesSupportedMinimum(t *testing.T) {
 	chat, err := anthropicToChatRequest(map[string]any{
 		"max_tokens": float64(64),
@@ -1127,16 +1161,24 @@ func assertGemini36PrefillVariables(t *testing.T, variables map[string]any) {
 	if stringValue(last["role"]) != "user" {
 		t.Fatalf("Gemini 3.6 出站请求仍以 model 结束: %#v", contents)
 	}
-	foundInstruction := false
-	for _, rawPart := range anySlice(last["parts"]) {
-		part, _ := rawPart.(map[string]any)
-		if strings.Contains(stringValue(part["text"]), `Assistant prefix JSON: "ABC"`) {
-			foundInstruction = true
-			break
-		}
+	if len(contents) < 2 {
+		t.Fatalf("Gemini 3.6 出站请求未保留 model 预填充: %#v", contents)
 	}
-	if !foundInstruction {
-		t.Fatalf("出站请求缺少精确预填充上下文: %#v", last)
+	prefillTurn, _ := contents[len(contents)-2].(map[string]any)
+	if stringValue(prefillTurn["role"]) != "model" {
+		t.Fatalf("Gemini 3.6 出站请求改变了预填充角色: %#v", contents)
+	}
+	prefillParts := anySlice(prefillTurn["parts"])
+	if len(prefillParts) != 1 ||
+		stringValue(prefillParts[0].(map[string]any)["text"]) != "ABC" {
+		t.Fatalf("出站请求未精确保留预填充: %#v", prefillTurn)
+	}
+	lastParts := anySlice(last["parts"])
+	const expectedNudge = "Continue the immediately preceding assistant response. " +
+		"Output only its continuation; do not repeat, explain, or restart it."
+	if len(lastParts) != 1 ||
+		stringValue(lastParts[0].(map[string]any)["text"]) != expectedNudge {
+		t.Fatalf("出站请求缺少安全续写 nudge: %#v", last)
 	}
 	if _, leaked := variables["__vproxy_assistant_prefill"]; leaked {
 		t.Fatal("内部预填充元数据泄漏到 Vertex 请求")

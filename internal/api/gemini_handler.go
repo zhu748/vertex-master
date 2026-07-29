@@ -84,7 +84,7 @@ func (g *GeminiHandler) readGeminiBody(w http.ResponseWriter, r *http.Request) (
 }
 
 func (g *GeminiHandler) handleGeminiGenerate(w http.ResponseWriter, r *http.Request, model string) {
-	actualModel, _ := stripFakePrefix(model, g.cfg.FakePrefixes())
+	actualModel, _ := resolveRequestedModel(model, g.cfg)
 	body, ok := g.readGeminiBody(w, r)
 	if !ok {
 		return
@@ -117,7 +117,7 @@ func (g *GeminiHandler) handleGeminiGenerate(w http.ResponseWriter, r *http.Requ
 }
 
 func (g *GeminiHandler) handleGeminiStreamGenerate(w http.ResponseWriter, r *http.Request, model string) {
-	actualModel, useFake := stripFakePrefix(model, g.cfg.FakePrefixes())
+	actualModel, useFake := resolveRequestedModel(model, g.cfg)
 	body, ok := g.readGeminiBody(w, r)
 	if !ok {
 		return
@@ -340,7 +340,7 @@ func (g *GeminiHandler) geminiFakeStream(ctx context.Context, sw *sseWriter, mod
 }
 
 func (g *GeminiHandler) handleCountTokens(w http.ResponseWriter, r *http.Request, model string) {
-	actualModel, _ := stripFakePrefix(model, g.cfg.FakePrefixes())
+	actualModel, _ := resolveRequestedModel(model, g.cfg)
 	body, ok := g.readGeminiBody(w, r)
 	if !ok {
 		return
