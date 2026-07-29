@@ -189,8 +189,8 @@ func cleanupAdminSessions() int {
 }
 
 func adminTokenFromRequest(r *http.Request) string {
-	if auth := r.Header.Get("Authorization"); strings.HasPrefix(strings.ToLower(auth), "bearer ") {
-		return strings.TrimSpace(auth[7:])
+	if token, ok := bearerToken(r.Header.Get("Authorization")); ok {
+		return token
 	}
 	if c, err := r.Cookie(adminCookieName); err == nil && c.Value != "" {
 		return c.Value
@@ -214,10 +214,7 @@ func adminRequestOriginAllowed(r *http.Request) bool {
 	if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
 		return true
 	}
-	if auth := strings.TrimSpace(r.Header.Get("Authorization")); strings.HasPrefix(
-		strings.ToLower(auth),
-		"bearer ",
-	) {
+	if _, ok := bearerToken(strings.TrimSpace(r.Header.Get("Authorization"))); ok {
 		return true
 	}
 	if _, err := r.Cookie(adminCookieName); err != nil {

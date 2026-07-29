@@ -11,7 +11,7 @@ import (
 
 // ---- extractAPIKey：Bearer > x-api-key > x-goog-api-key > query ?key= ----
 
-func newReq(t *testing.T, headers map[string]string, query string) *http.Request {
+func newReq(t testing.TB, headers map[string]string, query string) *http.Request {
 	t.Helper()
 	rawURL := "http://example.com/v1/chat/completions"
 	if query != "" {
@@ -44,6 +44,11 @@ func TestExtractAPIKey(t *testing.T) {
 			name:    "bearer case-insensitive scheme",
 			headers: map[string]string{"Authorization": "bearer sk-low"},
 			want:    "sk-low",
+		},
+		{ //nolint:exhaustruct
+			name:    "bearer mixed-case scheme",
+			headers: map[string]string{"Authorization": "bEaReR sk-mixed"},
+			want:    "sk-mixed",
 		},
 		{ //nolint:exhaustruct
 			name:    "bearer trims whitespace",
@@ -81,6 +86,26 @@ func TestExtractAPIKey(t *testing.T) {
 			query: "key=sk-query",
 			want:  "sk-query",
 		},
+		{ //nolint:exhaustruct
+			name:  "encoded query key fallback",
+			query: "other=value&key=sk%2Dencoded%2Bvalue",
+			want:  "sk-encoded+value",
+		},
+		{ //nolint:exhaustruct
+			name:  "encoded leading query key fallback",
+			query: "key=sk%2Dencoded",
+			want:  "sk-encoded",
+		},
+		{ //nolint:exhaustruct
+			name:  "plus in query key fallback",
+			query: "key=sk+with+spaces",
+			want:  "sk with spaces",
+		},
+		{ //nolint:exhaustruct
+			name:  "first repeated query key wins",
+			query: "key=sk-first&key=sk-second",
+			want:  "sk-first",
+		},
 		{
 			name:    "non-bearer authorization ignored, falls to query",
 			headers: map[string]string{"Authorization": "Basic xyz"},
@@ -103,6 +128,53 @@ func TestExtractAPIKey(t *testing.T) {
 			r := newReq(t, c.headers, c.query)
 			if got := extractAPIKey(r); got != c.want {
 				t.Errorf("extractAPIKey=%q，期望 %q", got, c.want)
+			}
+		})
+	}
+}
+
+func BenchmarkExtractAPIKey(b *testing.B) {
+	tests := []struct {
+		name    string
+		headers map[string]string
+		query   string
+		want    string
+	}{
+		{
+			name:    "authorization_bearer",
+			headers: map[string]string{"Authorization": "Bearer benchmark-secret-key"},
+			want:    "benchmark-secret-key",
+		},
+		{
+			name:    "anthropic_x_api_key",
+			headers: map[string]string{"x-api-key": "benchmark-secret-key"},
+			want:    "benchmark-secret-key",
+		},
+		{
+			name:    "gemini_x_goog_api_key",
+			headers: map[string]string{"x-goog-api-key": "benchmark-secret-key"},
+			want:    "benchmark-secret-key",
+		},
+		{
+			name:  "gemini_plain_query_key",
+			query: "key=benchmark-secret-key",
+			want:  "benchmark-secret-key",
+		},
+		{
+			name:  "gemini_encoded_query_key",
+			query: "other=value&key=benchmark%2Dsecret%2Dkey",
+			want:  "benchmark-secret-key",
+		},
+	}
+	for _, test := range tests {
+		b.Run(test.name, func(b *testing.B) {
+			request := newReq(b, test.headers, test.query)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				if got := extractAPIKey(request); got != test.want {
+					b.Fatalf("extractAPIKey=%q, want %q", got, test.want)
+				}
 			}
 		})
 	}

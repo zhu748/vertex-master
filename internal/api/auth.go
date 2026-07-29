@@ -126,19 +126,44 @@ func (m *APIKeyManager) Count() int {
 // extractAPIKey 从请求提取 API key：
 // Bearer 头 > x-api-key（Anthropic）> x-goog-api-key（Gemini）> query 参数 key。
 func extractAPIKey(r *http.Request) string {
-	if auth := r.Header.Get("Authorization"); auth != "" && strings.HasPrefix(strings.ToLower(auth), "bearer ") {
-		return strings.TrimSpace(auth[7:])
+	if token, ok := bearerToken(r.Header.Get("Authorization")); ok {
+		return token
 	}
-	if a := r.Header.Get("x-api-key"); a != "" {
+	// Canonical MIME header spellings let net/http perform direct map lookups
+	// instead of allocating a canonicalized temporary key.
+	if a := r.Header.Get("X-Api-Key"); a != "" {
 		return strings.TrimSpace(a)
 	}
-	if g := r.Header.Get("x-goog-api-key"); g != "" {
+	if g := r.Header.Get("X-Goog-Api-Key"); g != "" {
 		return strings.TrimSpace(g)
 	}
-	if k := r.URL.Query().Get("key"); k != "" {
-		return strings.TrimSpace(k)
+	if key := queryAPIKey(r); key != "" {
+		return key
 	}
 	return ""
+}
+
+func bearerToken(authorization string) (string, bool) {
+	const prefix = "bearer "
+	if len(authorization) < len(prefix) || !strings.EqualFold(authorization[:len(prefix)], prefix) {
+		return "", false
+	}
+	return strings.TrimSpace(authorization[len(prefix):]), true
+}
+
+func queryAPIKey(r *http.Request) string {
+	const prefix = "key="
+	rawQuery := r.URL.RawQuery
+	if strings.HasPrefix(rawQuery, prefix) {
+		value := rawQuery[len(prefix):]
+		// The common Gemini form is ?key=<plain key>. It is already decoded
+		// and can bypass url.Values construction. Encoded or multi-parameter
+		// queries retain net/url's exact parsing semantics.
+		if !strings.ContainsAny(value, "&;+%") {
+			return strings.TrimSpace(value)
+		}
+	}
+	return strings.TrimSpace(r.URL.Query().Get("key"))
 }
 
 // ---- admin 后台的密钥读写 ----
