@@ -1,7 +1,8 @@
 name: Release
 
 # 推送 v* 标签时构建多平台产物并发布 Release；
-# 也可在 Actions 页面手动触发（workflow_dispatch）指定版本号试跑。
+# 也可在 Actions 页面手动触发（workflow_dispatch）指定版本号试跑；
+# 手动触发默认只保留构建 artifact，不创建 tag 或 Release。
 #
 # 架构：verify → build(matrix, 并行) → publish(汇总发布)
 # 9 个平台拆成 4 组并行编译，总耗时从 ~15 分钟降到 ~4-5 分钟。
@@ -12,24 +13,101 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: '版本号（如 v1.0.0）'
+        description: 'SemVer 版本号（如 v1.0.0 或 v1.0.0-rc.1）'
         required: true
         type: string
-      draft:
-        description: '发布为草稿（不直接公开）'
+      publish:
+        description: '创建 Release（默认仅构建 artifact）'
         required: false
         default: false
         type: boolean
+      draft:
+        description: '创建草稿 Release（仅在 publish=true 时生效）'
+        required: false
+        default: true
+        type: boolean
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   verify:
     name: 构建前校验
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v7
+
+      - name: Validate release metadata
+        id: release
+        env:
+          RELEASE_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+          MANUAL_PUBLISH: ${{ inputs.publish || false }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="$RELEASE_VERSION"
+          SEMVER_RE='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*)|([0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))(\.((0|[1-9][0-9]*)|([0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)))*)?(\+([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*))?$'
+          if [[ ! "$VERSION" =~ $SEMVER_RE ]]; then
+            echo "非法版本号: $VERSION" >&2
+            echo "必须是以 v 开头的完整 SemVer，例如 v1.2.3 或 v1.2.3-rc.1" >&2
+            exit 1
+          fi
+
+          TAG_REF="refs/tags/$VERSION"
+          TAG_REFS="$(git ls-remote origin "$TAG_REF" "${TAG_REF}^{}")"
+          TAG_OBJECT="$(printf '%s\n' "$TAG_REFS" | awk -v ref="$TAG_REF" '$2 == ref { print $1; exit }')"
+          TAG_COMMIT="$(printf '%s\n' "$TAG_REFS" | awk -v ref="${TAG_REF}^{}" '$2 == ref { print $1; exit }')"
+          if [ -z "$TAG_COMMIT" ]; then
+            TAG_COMMIT="$TAG_OBJECT"
+          fi
+
+          if [ -n "$TAG_OBJECT" ] && [ "$TAG_COMMIT" != "$GITHUB_SHA" ]; then
+            echo "版本 $VERSION 已指向 $TAG_COMMIT，当前构建提交为 $GITHUB_SHA，拒绝继续。" >&2
+            exit 1
+          fi
+          if [ "$GITHUB_EVENT_NAME" = "push" ] && [ -z "$TAG_OBJECT" ]; then
+            echo "标签推送事件中未找到远端标签 $VERSION，拒绝继续。" >&2
+            exit 1
+          fi
+
+          if [ "$GITHUB_EVENT_NAME" = "push" ] || [ "$MANUAL_PUBLISH" = "true" ]; then
+            STATUS="$(curl --silent --show-error --location \
+              --output "$RUNNER_TEMP/existing-release.json" \
+              --write-out '%{http_code}' \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer $GITHUB_TOKEN" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$VERSION")"
+            case "$STATUS" in
+              404)
+                ;;
+              200)
+                echo "版本 $VERSION 已存在 Release，拒绝覆盖其元数据或附件。" >&2
+                exit 1
+                ;;
+              *)
+                echo "检查已有 Release 失败，GitHub API 返回 HTTP $STATUS。" >&2
+                exit 1
+                ;;
+            esac
+          fi
+
+          VERSION_WITHOUT_BUILD="${VERSION%%+*}"
+          PRERELEASE=false
+          if [[ "$VERSION_WITHOUT_BUILD" == *-* ]]; then
+            PRERELEASE=true
+          fi
+          printf 'version=%s\n' "$VERSION" >> "$GITHUB_OUTPUT"
+          printf 'prerelease=%s\n' "$PRERELEASE" >> "$GITHUB_OUTPUT"
+          echo "构建版本: $VERSION"
+
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
@@ -96,24 +174,14 @@ jobs:
             exit 1
           fi
 
-      - name: Resolve version
-        id: version
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION="${{ inputs.version }}"
-          else
-            VERSION="${GITHUB_REF#refs/tags/}"
-          fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "构建版本: $VERSION"
-
       - name: Build ${{ matrix.group }} packages
         env:
+          RELEASE_VERSION: ${{ needs.verify.outputs.version }}
           TARGET_PLATFORMS: ${{ matrix.platforms }}
         run: |
           # 逐个平台编译，复用 scripts/build-release.sh 里的 build() 函数。
           # 通过环境变量 TARGET_PLATFORMS 指定只构建哪些平台。
-          bash scripts/build-release-targets.sh "${{ steps.version.outputs.version }}" "$TARGET_PLATFORMS"
+          bash scripts/build-release-targets.sh "$RELEASE_VERSION" "$TARGET_PLATFORMS"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
@@ -126,19 +194,12 @@ jobs:
   # 汇总所有平台的产物，生成 SHA256 校验清单，发布 GitHub Release。
   publish:
     name: 汇总并发布
-    needs: build
+    if: github.event_name == 'push' || inputs.publish
+    needs: [verify, build]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - name: Resolve version
-        id: version
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION="${{ inputs.version }}"
-          else
-            VERSION="${GITHUB_REF#refs/tags/}"
-          fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
       # 下载所有矩阵 job 的产物到 dist/ 目录（artifact 会按 name 分子目录）。
       - name: Download all artifacts
         uses: actions/download-artifact@v8
@@ -157,8 +218,12 @@ jobs:
       - name: Publish Release
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ steps.version.outputs.version }}
-          name: ${{ steps.version.outputs.version }}
+          tag_name: ${{ needs.verify.outputs.version }}
+          name: ${{ needs.verify.outputs.version }}
           draft: ${{ github.event_name == 'workflow_dispatch' && inputs.draft }}
+          prerelease: ${{ needs.verify.outputs.prerelease }}
+          target_commitish: ${{ github.sha }}
           generate_release_notes: true
+          overwrite_files: false
+          fail_on_unmatched_files: true
           files: dist/*

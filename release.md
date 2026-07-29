@@ -66,8 +66,12 @@ git push origin v1.1.1
 不推标签也能在 Actions 页面手动触发 workflow：
 
 - 进入 Actions → Release → Run workflow
-- 输入版本号（如 `v1.2.0-rc1`）
-- 勾选 `draft` 可发布为草稿（不直接公开）
+- 输入合法的完整 SemVer 版本号（如 `v1.2.0-rc.1`）
+- 默认不要勾选 `publish`：工作流只构建并保留 7 天 artifact，不创建 tag 或 Release
+- 如需创建草稿 Release，勾选 `publish` 并保持 `draft` 为勾选状态
+- 只有明确需要公开发布时，才同时勾选 `publish` 并取消勾选 `draft`
+
+手动发布会拒绝覆盖已有 Release；如果同名 tag 已存在，也必须与本次选择的构建提交完全一致。正式发布仍推荐通过推送新的 `v*` 标签自动触发。
 
 ## 本地构建（不通过 Actions）
 
