@@ -84,9 +84,31 @@ func BenchmarkConvertAndBuildVertexVariablesLargeToolSchema(b *testing.B) {
 	}
 }
 
+func BenchmarkConvertChatRequestToolSchemaSize(b *testing.B) {
+	cfg := config.StaticProvider(config.DefaultConfig())
+	for _, propertyCount := range []int{1, 16, 64, 256} {
+		b.Run(strconv.Itoa(propertyCount), func(b *testing.B) {
+			body := toolSchemaBenchmarkBody("question", propertyCount)
+			b.ReportAllocs()
+			for range b.N {
+				model, payload, err := ConvertChatRequest(body, cfg)
+				if err != nil {
+					b.Fatal(err)
+				}
+				benchmarkConvertedModel = model
+				benchmarkConvertedPayload = payload
+			}
+		})
+	}
+}
+
 func largeToolSchemaBenchmarkBody(message string) map[string]any {
-	properties := make(map[string]any, 64)
-	for index := range 64 {
+	return toolSchemaBenchmarkBody(message, 64)
+}
+
+func toolSchemaBenchmarkBody(message string, propertyCount int) map[string]any {
+	properties := make(map[string]any, propertyCount)
+	for index := range propertyCount {
 		properties["field_"+strconv.Itoa(index)] = map[string]any{
 			"type": "string", "description": strings.Repeat("x", 128),
 		}

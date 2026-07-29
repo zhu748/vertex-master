@@ -24,6 +24,15 @@ var schemaUnsupportedKeys = map[string]bool{ //nolint:gochecknoglobals
 	"title": true,
 }
 
+// nativeSchemaProperty 与 Vertex 原生 Schema 的 {key,value} JSON 结构一致。
+// 使用连续结构体切片可避免为每个属性额外分配一个两元素 map。
+type nativeSchemaProperty struct {
+	Key   string `json:"key"`
+	Value any    `json:"value"`
+}
+
+type nativeSchemaProperties []nativeSchemaProperty
+
 // cleanNativeFunctionParameters 在一次递归中用 Gemini 白名单清洗 JSON
 // Schema，并转换为匿名 Vertex UI 端点需要的原生 Map-style Schema。
 func cleanNativeFunctionParameters(schema any) any {
@@ -44,10 +53,10 @@ func cleanNativeFunctionParameters(schema any) any {
 			switch key {
 			case "properties":
 				if vm, ok := value.(map[string]any); ok {
-					props := make([]any, 0, len(vm))
+					props := make(nativeSchemaProperties, 0, len(vm))
 					for k, v := range vm {
-						props = append(props, map[string]any{
-							"key": k, "value": cleanNativeFunctionParameters(v),
+						props = append(props, nativeSchemaProperty{
+							Key: k, Value: cleanNativeFunctionParameters(v),
 						})
 					}
 					cleaned[key] = props
@@ -177,7 +186,7 @@ func canonicalNativeSchema(schema any) bool {
 		}
 		switch key {
 		case "properties":
-			if _, ok := value.([]any); !ok {
+			if !canonicalNativeProperties(value) {
 				return false
 			}
 		case "items":
@@ -193,6 +202,15 @@ func canonicalNativeSchema(schema any) bool {
 		}
 	}
 	return true
+}
+
+func canonicalNativeProperties(value any) bool {
+	switch value.(type) {
+	case nativeSchemaProperties, []any:
+		return true
+	default:
+		return false
+	}
 }
 
 func validNativeSchemaType(value string) bool {

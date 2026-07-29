@@ -807,14 +807,25 @@ func TestCleanNativeFunctionParametersFusesCleaningWithoutMutatingInput(t *testi
 	if items["type"] != "OBJECT" || items["maxLength"] != "8" {
 		t.Fatalf("native items=%#v", items)
 	}
-	properties := items["properties"].([]any)
+	properties := items["properties"].(nativeSchemaProperties)
 	if len(properties) != 1 {
 		t.Fatalf("native properties=%#v", properties)
 	}
-	property := properties[0].(map[string]any)
-	value := property["value"].(map[string]any)
-	if property["key"] != "enabled" || value["type"] != "BOOLEAN" || value["$ref"] != nil {
+	property := properties[0]
+	value := property.Value.(map[string]any)
+	if property.Key != "enabled" || value["type"] != "BOOLEAN" || value["$ref"] != nil {
 		t.Fatalf("native property=%#v", property)
+	}
+	encodedProperties, err := json.Marshal(properties)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var genericProperties []map[string]any
+	if err := json.Unmarshal(encodedProperties, &genericProperties); err != nil {
+		t.Fatal(err)
+	}
+	if genericProperties[0]["key"] != "enabled" {
+		t.Fatalf("紧凑属性切片的 JSON 结构不兼容: %s", encodedProperties)
 	}
 }
 
@@ -870,7 +881,7 @@ func TestConvertToolsFormat_NativeParameters(t *testing.T) {
 	if params["type"] != "OBJECT" {
 		t.Errorf("归一后 parameters.type=%v, want OBJECT", params["type"])
 	}
-	if _, ok := params["properties"].([]any); !ok {
+	if !canonicalNativeProperties(params["properties"]) {
 		t.Errorf("归一后 properties 应是列表: %v", params["properties"])
 	}
 }
