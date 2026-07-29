@@ -3,12 +3,15 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/bsfdsagfadg/vertex/internal/config"
@@ -24,12 +27,21 @@ func resetAdminSessions() {
 	adminLoginAttemptsMu.Unlock()
 }
 
+func mustIssueAdminToken(t *testing.T) string {
+	t.Helper()
+	token, err := issueAdminToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return token
+}
+
 // ---- session token：生成 / 校验 / 过期 / 登出 ----
 
 func TestAdminSessionLifecycle(t *testing.T) {
 	resetAdminSessions()
 
-	tok := issueAdminToken()
+	tok := mustIssueAdminToken(t)
 	if len(tok) != 64 { // 32 字节 → 64 hex 字符
 		t.Fatalf("token 应为 64 个 hex 字符（32 字节），实际 %d", len(tok))
 	}
@@ -37,7 +49,7 @@ func TestAdminSessionLifecycle(t *testing.T) {
 		t.Fatalf("刚签发的 token 应有效")
 	}
 	// 两次签发不应相同（crypto/rand）。
-	if tok2 := issueAdminToken(); tok2 == tok {
+	if tok2 := mustIssueAdminToken(t); tok2 == tok {
 		t.Fatalf("两次签发的 token 不应相同")
 	}
 
@@ -50,6 +62,37 @@ func TestAdminSessionLifecycle(t *testing.T) {
 	dropAdminToken(tok)
 	if checkAdminToken(tok) {
 		t.Fatalf("dropAdminToken 后 token 应失效")
+	}
+}
+
+func TestGenerateAdminTokenReportsRandomSourceFailure(t *testing.T) {
+	sentinel := errors.New("random source unavailable")
+	token, err := generateAdminToken(iotest.ErrReader(sentinel))
+	if token != "" || !errors.Is(err, sentinel) {
+		t.Fatalf("generateAdminToken() = %q, %v; want empty token wrapping sentinel", token, err)
+	}
+}
+
+func TestAdminSessionsStayBoundedAndEvictOldest(t *testing.T) {
+	resetAdminSessions()
+	t.Cleanup(resetAdminSessions)
+
+	now := time.Now()
+	for index := range maxAdminSessions + 100 {
+		token := fmt.Sprintf("session-%04d", index)
+		storeAdminSession(token, now.Add(time.Duration(index+1)*time.Second), now)
+	}
+
+	adminSessionsMu.Lock()
+	defer adminSessionsMu.Unlock()
+	if got := len(adminSessions); got != maxAdminSessions {
+		t.Fatalf("admin session count = %d, want %d", got, maxAdminSessions)
+	}
+	if _, exists := adminSessions["session-0000"]; exists {
+		t.Fatal("oldest admin session was not evicted")
+	}
+	if _, exists := adminSessions[fmt.Sprintf("session-%04d", maxAdminSessions+99)]; !exists {
+		t.Fatal("newest admin session was unexpectedly evicted")
 	}
 }
 

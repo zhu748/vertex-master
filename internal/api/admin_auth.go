@@ -6,6 +6,8 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
+	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -27,6 +29,7 @@ const (
 	adminLoginWindow       = 15 * time.Minute
 	adminLoginLockDuration = 15 * time.Minute
 	maxAdminLoginTrackers  = 10_000
+	maxAdminSessions       = 1024
 )
 
 type adminLoginAttempt struct {
@@ -138,14 +141,47 @@ func cleanupAdminLoginAttempts(now time.Time) {
 	adminLoginAttemptsMu.Unlock()
 }
 
-func issueAdminToken() string {
+func generateAdminToken(random io.Reader) (string, error) {
 	b := make([]byte, 32)
-	_, _ = cryptorand.Read(b)
-	tok := hex.EncodeToString(b)
+	if _, err := io.ReadFull(random, b); err != nil {
+		return "", fmt.Errorf("generate admin token: %w", err)
+	}
+	return hex.EncodeToString(b), nil
+}
+
+func issueAdminToken() (string, error) {
+	tok, err := generateAdminToken(cryptorand.Reader)
+	if err != nil {
+		return "", err
+	}
+	now := time.Now()
+	storeAdminSession(tok, now.Add(adminSessionTTL), now)
+	return tok, nil
+}
+
+func storeAdminSession(tok string, expiresAt, now time.Time) {
 	adminSessionsMu.Lock()
-	adminSessions[tok] = time.Now().Add(adminSessionTTL)
-	adminSessionsMu.Unlock()
-	return tok
+	defer adminSessionsMu.Unlock()
+
+	if _, exists := adminSessions[tok]; exists {
+		adminSessions[tok] = expiresAt
+		return
+	}
+	if len(adminSessions) >= maxAdminSessions {
+		pruneExpiredAdminSessionsLocked(now)
+	}
+	if len(adminSessions) >= maxAdminSessions {
+		oldestToken := ""
+		var oldestExpiry time.Time
+		for existingToken, expiry := range adminSessions {
+			if oldestToken == "" || expiry.Before(oldestExpiry) {
+				oldestToken = existingToken
+				oldestExpiry = expiry
+			}
+		}
+		delete(adminSessions, oldestToken)
+	}
+	adminSessions[tok] = expiresAt
 }
 
 func checkAdminToken(tok string) bool {
@@ -178,6 +214,10 @@ func cleanupAdminSessions() int {
 	now := time.Now()
 	adminSessionsMu.Lock()
 	defer adminSessionsMu.Unlock()
+	return pruneExpiredAdminSessionsLocked(now)
+}
+
+func pruneExpiredAdminSessionsLocked(now time.Time) int {
 	n := 0
 	for tok, exp := range adminSessions {
 		if now.After(exp) {
@@ -327,9 +367,13 @@ func (adm *AdminHandler) adminLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	clearAdminLoginFailures(clientIP)
+	tok, err := issueAdminToken()
+	if err != nil {
+		log.Printf("[Admin] 签发管理员会话失败: %v", err)
+		writeJSON(w, http.StatusInternalServerError, adminErr("管理员会话初始化失败"))
+		return
+	}
 	log.Printf("[Admin] 管理后台登录成功。来源 IP: %s", clientIP)
-	cleanupAdminSessions()
-	tok := issueAdminToken()
 	http.SetCookie(w, &http.Cookie{
 		Name:     adminCookieName,
 		Value:    tok,

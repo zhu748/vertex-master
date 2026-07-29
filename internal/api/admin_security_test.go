@@ -382,7 +382,7 @@ func TestAdminCORSAndCookieOriginProtection(t *testing.T) {
 		t.Fatalf("public API preflight changed unexpectedly: status=%d headers=%v", publicRec.Code, publicRec.Header())
 	}
 
-	token := issueAdminToken()
+	token := mustIssueAdminToken(t)
 	t.Cleanup(func() { dropAdminToken(token) })
 	adm := &AdminHandler{} //nolint:exhaustruct
 	crossSite := httptest.NewRequest(http.MethodPost, "https://app.example/api/admin/logout", nil)
@@ -407,7 +407,7 @@ func TestAdminCORSAndCookieOriginProtection(t *testing.T) {
 }
 
 func TestAdminRoutesRejectWrongMethods(t *testing.T) {
-	token := issueAdminToken()
+	token := mustIssueAdminToken(t)
 	t.Cleanup(func() { dropAdminToken(token) })
 	adm := &AdminHandler{} //nolint:exhaustruct
 	req := httptest.NewRequest(http.MethodGet, "/api/admin/nodes/test", nil)
