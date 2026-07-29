@@ -209,10 +209,13 @@ func (m *middleware) withMetrics(next http.Handler) http.Handler {
 		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 		ctx := context.WithValue(r.Context(), vertex.RequestIDKey{}, reqID)
 		cli.StartReq(reqID)
+		// The outer recovery middleware handles downstream panics. Keep request
+		// lifecycle cleanup local so unwinding cannot leave a permanent TUI
+		// entry behind.
+		defer cli.FinishReq(reqID)
 		start := time.Now()
 		next.ServeHTTP(sw, r.WithContext(ctx))
 		elapsed := time.Since(start)
-		cli.FinishReq(reqID)
 		log.Printf("[Server] %s %s - %d (%.3fs) 请求ID=%s", r.Method, r.URL.Path, sw.status, elapsed.Seconds(), reqID)
 	})
 }

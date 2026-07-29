@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/bsfdsagfadg/vertex/internal/cli"
 	"github.com/bsfdsagfadg/vertex/internal/config"
 	"github.com/bsfdsagfadg/vertex/internal/vertex"
 )
@@ -48,5 +49,35 @@ func TestWithMetrics(t *testing.T) {
 		if rec.Header().Get("X-Request-Id") != "" {
 			t.Fatalf("%s 不应设 X-Request-Id", path)
 		}
+	}
+}
+
+func TestWithMetricsFinishesTrackedRequestOnPanic(t *testing.T) {
+	mw := &middleware{} //nolint:exhaustruct
+	tracked := mw.withMetrics(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic("test panic")
+	}))
+	recorder := httptest.NewRecorder()
+
+	var recovered any
+	func() {
+		defer func() {
+			recovered = recover()
+		}()
+		tracked.ServeHTTP(
+			recorder,
+			httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
+		)
+	}()
+	if recovered == nil {
+		t.Fatal("downstream panic was unexpectedly swallowed")
+	}
+
+	requestID := recorder.Header().Get("X-Request-Id")
+	if requestID == "" {
+		t.Fatal("metrics middleware did not assign a request ID")
+	}
+	if cli.FinishReq(requestID) {
+		t.Fatal("panicking request remained in the active request tracker")
 	}
 }

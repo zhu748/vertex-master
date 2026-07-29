@@ -379,13 +379,15 @@ func UpdateReqWinner(id, nodeName string) {
 	}
 }
 
-func FinishReq(id string) {
+func FinishReq(id string) bool {
 	mu.Lock()
 	defer mu.Unlock()
+	_, existed := activeReqs[id]
 	delete(activeReqs, id)
 	if enabled {
 		drawTUI()
 	}
+	return existed
 }
 
 // printBanner 在 TUI 启动时一次性打印顶部版权/版本面板（黄色框），
