@@ -41,7 +41,7 @@ func NewServer(vc *vertex.VertexAIClient, keys *APIKeyManager, cfg config.Config
 		image:     &ImageHandler{h},
 		audio:     &AudioHandler{h},
 		gemini:    &GeminiHandler{h},
-		admin:     &AdminHandler{h},
+		admin:     &AdminHandler{handler: h}, //nolint:exhaustruct
 		mw:        &middleware{cfg: cfg, keys: keys},
 		version:   "dev",
 		commit:    "unknown",

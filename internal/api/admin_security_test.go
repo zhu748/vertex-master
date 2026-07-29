@@ -6,11 +6,13 @@ import (
 	"image/color"
 	"image/png"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/bsfdsagfadg/vertex/internal/config"
@@ -29,6 +31,147 @@ func TestValidateBackgroundImage(t *testing.T) {
 	if _, err := validateBackgroundImage([]byte("<script>alert(1)</script>")); err == nil {
 		t.Fatal("non-image upload should be rejected")
 	}
+}
+
+func TestBackgroundAssetFilename(t *testing.T) {
+	for _, name := range []string{
+		"background.jpg", "background-user.png", "background1.jpeg", "Background1.PNG",
+		"background123.jpg", "background999.gif",
+	} {
+		if !backgroundAssetFilename(name) {
+			t.Errorf("background asset %q was not recognized", name)
+		}
+	}
+	for _, name := range []string{
+		"background1.txt", "other.jpg", "../background1.png", "background/evil.png",
+	} {
+		if backgroundAssetFilename(name) {
+			t.Errorf("unsupported asset %q was accepted", name)
+		}
+	}
+}
+
+func TestAdminUploadBackgroundSerializesAtomicPublishingAndActiveDeletion(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config", "config.json")
+	t.Setenv("VPROXY_CONFIG", configPath)
+	config.InvalidateCache()
+	t.Cleanup(config.InvalidateCache)
+	if err := config.WriteSettings(map[string]any{"background_image": "url('background.jpg')"}); err != nil {
+		t.Fatal(err)
+	}
+
+	assetsDir := filepath.Join(root, "assets")
+	if err := os.MkdirAll(assetsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"background100.png", "background.jpg", "background-user.png"} {
+		if err := os.WriteFile(filepath.Join(assetsDir, name), []byte("existing"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	img := image.NewRGBA(image.Rect(0, 0, 2, 2))
+	img.Set(0, 0, color.White)
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, img); err != nil {
+		t.Fatal(err)
+	}
+	const uploadCount = 8
+	requests := make([]*http.Request, uploadCount)
+	for index := range requests {
+		requests[index] = newBackgroundUploadRequest(t, encoded.Bytes())
+	}
+
+	adm := &AdminHandler{handler: handler{cfg: config.GetProvider()}} //nolint:exhaustruct
+	recorders := make([]*httptest.ResponseRecorder, uploadCount)
+	var wg sync.WaitGroup
+	for index := range requests {
+		recorders[index] = httptest.NewRecorder()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			adm.adminUploadBg(recorders[index], requests[index])
+		}()
+	}
+	wg.Wait()
+	for index, recorder := range recorders {
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("upload[%d] status=%d body=%s", index, recorder.Code, recorder.Body.String())
+		}
+	}
+
+	entries, err := os.ReadDir(assetsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".background-upload-") {
+			t.Fatalf("temporary upload leaked after successful publish: %q", entry.Name())
+		}
+	}
+	if len(entries) != uploadCount+3 {
+		t.Fatalf("asset count=%d, want upload history plus existing files", len(entries))
+	}
+	for _, preserved := range []string{"background100.png", "background.jpg", "background-user.png"} {
+		if _, err := os.Stat(filepath.Join(assetsDir, preserved)); err != nil {
+			t.Fatalf("existing asset %q was removed: %v", preserved, err)
+		}
+	}
+	current := config.Load().BackgroundImage
+	const urlPrefix = "url('/assets/"
+	if !strings.HasPrefix(current, urlPrefix) || !strings.HasSuffix(current, "')") {
+		t.Fatalf("unexpected background setting %q", current)
+	}
+	currentFilename := strings.TrimSuffix(strings.TrimPrefix(current, urlPrefix), "')")
+	if _, err := os.Stat(filepath.Join(assetsDir, currentFilename)); err != nil {
+		t.Fatalf("configured background was not published: %v", err)
+	}
+	if err := config.WriteSettings(map[string]any{
+		"custom_bg_presets": []string{current, "linear-gradient(red, blue)"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	deleteRequest := httptest.NewRequest(
+		http.MethodPost,
+		"/api/admin/delete-bg",
+		strings.NewReader(`{"filename":"`+currentFilename+`"}`),
+	)
+	deleteRecorder := httptest.NewRecorder()
+	adm.adminDeleteBg(deleteRecorder, deleteRequest)
+	if deleteRecorder.Code != http.StatusOK {
+		t.Fatalf("delete status=%d body=%s", deleteRecorder.Code, deleteRecorder.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(assetsDir, currentFilename)); !os.IsNotExist(err) {
+		t.Fatalf("active background still exists after delete: %v", err)
+	}
+	updated := config.Load()
+	if updated.BackgroundImage != defaultAdminBackground {
+		t.Fatalf("deleted active background setting=%q", updated.BackgroundImage)
+	}
+	if len(updated.CustomBgPresets) != 1 || updated.CustomBgPresets[0] != "linear-gradient(red, blue)" {
+		t.Fatalf("deleted background remained in custom presets: %#v", updated.CustomBgPresets)
+	}
+}
+
+func newBackgroundUploadRequest(t *testing.T, data []byte) *http.Request {
+	t.Helper()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", "background.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/admin/upload-bg", &body)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	return request
 }
 
 func TestAdminListBgsOnlyReturnsSupportedImages(t *testing.T) {

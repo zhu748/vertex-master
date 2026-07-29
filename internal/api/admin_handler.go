@@ -28,6 +28,7 @@ const (
 	maxAdminLogTailBytes      = 1 << 20
 	maxAdminLogTailLines      = 200
 	adminLogReadBlockSize     = 32 * 1024
+	defaultAdminBackground    = "url('background.jpg')"
 )
 
 var adminLogReadBlockPool = sync.Pool{ //nolint:gochecknoglobals
@@ -36,6 +37,7 @@ var adminLogReadBlockPool = sync.Pool{ //nolint:gochecknoglobals
 
 type AdminHandler struct {
 	handler
+	backgroundUploadMu sync.Mutex
 }
 
 func (adm *AdminHandler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
@@ -387,13 +389,19 @@ func (adm *AdminHandler) adminUploadBg(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	adm.backgroundUploadMu.Lock()
+	defer adm.backgroundUploadMu.Unlock()
+
 	assetsDir := filepath.Join(filepath.Dir(adm.cfg.ConfigDir()), "assets")
-	_ = os.MkdirAll(assetsDir, 0o755)
+	if err := os.MkdirAll(assetsDir, 0o755); err != nil {
+		writeJSON(w, http.StatusInternalServerError, adminErr("无法创建资源目录 (create directory error)"))
+		return
+	}
 
 	filename := fmt.Sprintf("background%d%s", time.Now().UnixNano(), extension)
 	targetPath := filepath.Join(assetsDir, filename)
 
-	if err := os.WriteFile(targetPath, data, 0o644); err != nil {
+	if err := writeBackgroundFileAtomically(targetPath, data); err != nil {
 		writeJSON(w, http.StatusInternalServerError, adminErr("无法保存文件 (create error)"))
 		return
 	}
@@ -405,8 +413,60 @@ func (adm *AdminHandler) adminUploadBg(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, adminErr("更新配置失败 (save config error)"))
 		return
 	}
-
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "url": bgURL})
+}
+
+func writeBackgroundFileAtomically(targetPath string, data []byte) error {
+	temp, err := os.CreateTemp(filepath.Dir(targetPath), ".background-upload-*")
+	if err != nil {
+		return err
+	}
+	tempPath := temp.Name()
+	committed := false
+	defer func() {
+		_ = temp.Close()
+		if !committed {
+			_ = os.Remove(tempPath)
+		}
+	}()
+
+	if err := temp.Chmod(0o644); err != nil {
+		return err
+	}
+	written, err := temp.Write(data)
+	if err != nil {
+		return err
+	}
+	if written != len(data) {
+		return io.ErrShortWrite
+	}
+	if err := temp.Sync(); err != nil {
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tempPath, targetPath); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
+func backgroundAssetFilename(name string) bool {
+	if name == "" || strings.Contains(name, "/") || strings.Contains(name, "\\") {
+		return false
+	}
+	lower := strings.ToLower(name)
+	if !strings.HasPrefix(lower, "background") {
+		return false
+	}
+	switch filepath.Ext(lower) {
+	case ".jpg", ".jpeg", ".png", ".gif":
+		return true
+	default:
+		return false
+	}
 }
 
 func validateBackgroundImage(data []byte) (string, error) {
@@ -445,13 +505,37 @@ func (adm *AdminHandler) adminDeleteBg(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, adminErr("文件名无效"))
 		return
 	}
-	if !strings.HasPrefix(body.Filename, "background") {
+	if !backgroundAssetFilename(body.Filename) {
 		writeJSON(w, http.StatusForbidden, adminErr("无权删除该文件"))
 		return
 	}
 
+	adm.backgroundUploadMu.Lock()
+	defer adm.backgroundUploadMu.Unlock()
+
 	assetsDir := filepath.Join(filepath.Dir(adm.cfg.ConfigDir()), "assets")
 	targetPath := filepath.Join(assetsDir, body.Filename)
+	assetURL := "url('/assets/" + body.Filename + "')"
+	updates := make(map[string]any, 2)
+	if adm.cfg.BackgroundImage() == assetURL {
+		updates["background_image"] = defaultAdminBackground
+	}
+	presets := adm.cfg.CustomBgPresets()
+	filtered := make([]string, 0, len(presets))
+	for _, preset := range presets {
+		if preset != assetURL {
+			filtered = append(filtered, preset)
+		}
+	}
+	if len(filtered) != len(presets) {
+		updates["custom_bg_presets"] = filtered
+	}
+	if len(updates) > 0 {
+		if err := config.WriteSettings(updates); err != nil {
+			writeJSON(w, http.StatusInternalServerError, adminErr("更新背景配置失败"))
+			return
+		}
+	}
 	if err := os.Remove(targetPath); err != nil && !os.IsNotExist(err) {
 		writeJSON(w, http.StatusInternalServerError, adminErr("删除文件失败"))
 		return
@@ -469,10 +553,7 @@ func (adm *AdminHandler) adminListBgs(w http.ResponseWriter, r *http.Request) {
 
 	var bgs []string
 	for _, f := range files {
-		name := strings.ToLower(f.Name())
-		if !f.IsDir() && strings.HasPrefix(name, "background") &&
-			(strings.HasSuffix(name, ".jpg") || strings.HasSuffix(name, ".jpeg") ||
-				strings.HasSuffix(name, ".png") || strings.HasSuffix(name, ".gif")) {
+		if !f.IsDir() && backgroundAssetFilename(f.Name()) {
 			bgs = append(bgs, f.Name())
 		}
 	}
