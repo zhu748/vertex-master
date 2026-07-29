@@ -17,6 +17,8 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Check workflows
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -shellcheck=
       - name: Lint
         uses: golangci/golangci-lint-action@v9
         with:
@@ -55,7 +57,7 @@ jobs:
       - name: Build production image
         # Docker Hub 在 GitHub Actions runner 上经常抖动（i/o timeout / rate limit），
         # 失败时重试最多 3 次，每次间隔 30 秒。
-        uses: nick-fields/retry@v3
+        uses: nick-fields/retry@v4
         with:
           max_attempts: 3
           timeout_minutes: 15

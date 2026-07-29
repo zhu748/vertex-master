@@ -34,6 +34,8 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Check workflows
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -shellcheck=
       - name: Lint
         uses: golangci/golangci-lint-action@v9
         with:
@@ -114,7 +116,7 @@ jobs:
           bash scripts/build-release-targets.sh "${{ steps.version.outputs.version }}" "$TARGET_PLATFORMS"
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-packages-${{ matrix.group }}
           path: dist/*
@@ -137,9 +139,9 @@ jobs:
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      # 下载所有矩阵 job 的产物到 dist/ 目录（upload-artifact v4 会按 artifact name 分子目录）。
+      # 下载所有矩阵 job 的产物到 dist/ 目录（artifact 会按 name 分子目录）。
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: release-packages-*
           merge-multiple: true
@@ -153,7 +155,7 @@ jobs:
           cat SHA256SUMS.txt
 
       - name: Publish Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.version.outputs.version }}
           name: ${{ steps.version.outputs.version }}

@@ -21,6 +21,9 @@ go test -race ./... -count=1
 
 # JS 语法检查（管理后台资源）
 for f in internal/admin/assets/*.js; do node --check "$f"; done
+
+# GitHub Actions 工作流检查
+go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -shellcheck=
 ```
 
 ### 2. 决定版本号
@@ -51,7 +54,7 @@ git push origin v1.1.1
 
 推送 `v*` 标签后，`.github/workflows/release.yml` 会自动触发：
 
-1. **verify** job：跑 `gofmt` / `go vet` / `go test` / `go test -race` / JS 语法检查
+1. **verify** job：跑 `actionlint` / `gofmt` / `go vet` / `go test` / `go test -race` / JS 语法检查
 2. **build** job：交叉编译 9 个平台产物，生成 SHA256SUMS.txt，发布 GitHub Release
 
 在 **Actions** 页面查看进度：`https://github.com/<user>/vertex-master/actions`
