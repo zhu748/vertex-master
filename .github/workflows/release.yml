@@ -43,6 +43,9 @@ jobs:
       prerelease: ${{ steps.release.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          # 发布校验需要确认目标提交已进入 main。
+          fetch-depth: 0
 
       - name: Validate release metadata
         id: release
@@ -75,6 +78,14 @@ jobs:
           if [ "$GITHUB_EVENT_NAME" = "push" ] && [ -z "$TAG_OBJECT" ]; then
             echo "标签推送事件中未找到远端标签 $VERSION，拒绝继续。" >&2
             exit 1
+          fi
+
+          if [ "$GITHUB_EVENT_NAME" = "push" ] || [ "$MANUAL_PUBLISH" = "true" ]; then
+            git fetch --no-tags origin main:refs/remotes/origin/main
+            if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main; then
+              echo "发布提交 $GITHUB_SHA 尚未合并到 origin/main，拒绝继续。" >&2
+              exit 1
+            fi
           fi
 
           if [ "$GITHUB_EVENT_NAME" = "push" ] || [ "$MANUAL_PUBLISH" = "true" ]; then
@@ -127,6 +138,8 @@ jobs:
           done
       - name: Vet
         run: go vet ./...
+      - name: Vulnerability scan
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
       - name: Test
         run: go test ./... -count=1
       # Race detector 只在 linux/amd64 上跑一次（最快），避免在每个平台重复跑拖慢 CI。

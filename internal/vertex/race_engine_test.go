@@ -283,7 +283,14 @@ func TestStreamParallelCancelsLoserAndWinnerWhenConsumerStops(t *testing.T) {
 			go func() {
 				defer close(stream)
 				select {
-				case stream <- StreamChunk{Data: map[string]any{"winner": true}}:
+				case stream <- StreamChunk{Data: map[string]any{
+					"candidates": []any{map[string]any{
+						"content": map[string]any{
+							"role":  "model",
+							"parts": []any{map[string]any{"text": "winner"}},
+						},
+					}},
+				}}:
 				case <-candidateCtx.Done():
 					winnerCanceled <- struct{}{}
 					return
@@ -303,7 +310,7 @@ func TestStreamParallelCancelsLoserAndWinnerWhenConsumerStops(t *testing.T) {
 		if chunk.Err != nil {
 			t.Fatalf("yielded stream error = %v", chunk.Err)
 		}
-		if winner, _ := chunk.Data["winner"].(bool); !winner {
+		if streamText(chunk.Data) != "winner" {
 			t.Fatalf("yielded chunk = %#v, want winner marker", chunk.Data)
 		}
 	case <-time.After(2 * time.Second):
@@ -316,6 +323,190 @@ func TestStreamParallelCancelsLoserAndWinnerWhenConsumerStops(t *testing.T) {
 	if got := atomic.LoadInt32(&calls); got != 2 {
 		t.Fatalf("stream candidate calls = %d, want 2", got)
 	}
+}
+
+func TestStreamParallelPrefersPayloadAndReplaysWinnerMetadata(t *testing.T) {
+	installRaceTestNodes(t, 2)
+	cfg := raceTestConfig(2, 2, 100)
+
+	var calls atomic.Int32
+	var yielded []StreamChunk
+	StreamParallel(context.Background(), cfg, func(ctx context.Context, _ string) <-chan StreamChunk {
+		call := calls.Add(1)
+		stream := make(chan StreamChunk)
+		go func() {
+			defer close(stream)
+			send := func(chunk StreamChunk) bool {
+				select {
+				case stream <- chunk:
+					return true
+				case <-ctx.Done():
+					return false
+				}
+			}
+			if call == 1 {
+				_ = send(StreamChunk{Data: map[string]any{
+					"modelVersion": "metadata-only-loser",
+				}})
+				return
+			}
+			if !send(StreamChunk{Data: map[string]any{"modelVersion": "winner-metadata"}}) {
+				return
+			}
+			_ = send(StreamChunk{Data: map[string]any{
+				"candidates": []any{map[string]any{
+					"content": map[string]any{
+						"role":  "model",
+						"parts": []any{map[string]any{"text": "winner-content"}},
+					},
+				}},
+			}})
+		}()
+		return stream
+	}, func(chunk StreamChunk) bool {
+		yielded = append(yielded, chunk)
+		return true
+	})
+
+	if calls.Load() != 2 {
+		t.Fatalf("candidate calls=%d, want 2", calls.Load())
+	}
+	if len(yielded) != 2 {
+		t.Fatalf("yielded=%#v, want winner metadata followed by payload", yielded)
+	}
+	if yielded[0].Data["modelVersion"] != "winner-metadata" {
+		t.Fatalf("metadata-only loser leaked or winner order changed: %#v", yielded)
+	}
+	if streamText(yielded[1].Data) != "winner-content" {
+		t.Fatalf("winner payload missing: %#v", yielded)
+	}
+}
+
+func TestStreamParallelDiscardsMetadataFromErroredCandidate(t *testing.T) {
+	installRaceTestNodes(t, 2)
+	cfg := raceTestConfig(2, 2, 100)
+
+	var calls atomic.Int32
+	var yielded []StreamChunk
+	StreamParallel(context.Background(), cfg, func(ctx context.Context, _ string) <-chan StreamChunk {
+		call := calls.Add(1)
+		stream := make(chan StreamChunk)
+		go func() {
+			defer close(stream)
+			send := func(chunk StreamChunk) bool {
+				select {
+				case stream <- chunk:
+					return true
+				case <-ctx.Done():
+					return false
+				}
+			}
+			if call == 1 {
+				if send(StreamChunk{Data: map[string]any{"modelVersion": "discard-me"}}) {
+					_ = send(StreamChunk{Err: NewUnavailableError("truncated before payload")})
+				}
+				return
+			}
+			_ = send(StreamChunk{Data: map[string]any{
+				"candidates": []any{map[string]any{
+					"content": map[string]any{
+						"role":  "model",
+						"parts": []any{map[string]any{"text": "healthy"}},
+					},
+					"finishReason": "STOP",
+				}},
+			}})
+		}()
+		return stream
+	}, func(chunk StreamChunk) bool {
+		yielded = append(yielded, chunk)
+		return true
+	})
+
+	if len(yielded) != 1 || yielded[0].Err != nil || streamText(yielded[0].Data) != "healthy" {
+		t.Fatalf("errored candidate metadata must not leak: %#v", yielded)
+	}
+}
+
+func TestStreamParallelKeepsMetadataFallbackWhenAllCandidatesLackPayload(t *testing.T) {
+	installRaceTestNodes(t, 2)
+	cfg := raceTestConfig(2, 2, 100)
+
+	var calls atomic.Int32
+	var yielded []StreamChunk
+	StreamParallel(context.Background(), cfg, func(ctx context.Context, _ string) <-chan StreamChunk {
+		call := calls.Add(1)
+		stream := make(chan StreamChunk)
+		go func() {
+			defer close(stream)
+			select {
+			case stream <- StreamChunk{Data: map[string]any{
+				"modelVersion": fmt.Sprintf("metadata-%d", call),
+			}}:
+			case <-ctx.Done():
+			}
+		}()
+		return stream
+	}, func(chunk StreamChunk) bool {
+		yielded = append(yielded, chunk)
+		return true
+	})
+
+	if calls.Load() != 2 {
+		t.Fatalf("candidate calls=%d, want all metadata fallbacks probed", calls.Load())
+	}
+	if len(yielded) != 1 || yielded[0].Err != nil ||
+		!strings.HasPrefix(fmt.Sprint(yielded[0].Data["modelVersion"]), "metadata-") {
+		t.Fatalf("all-metadata race must preserve one soft fallback: %#v", yielded)
+	}
+}
+
+func TestStreamParallelBoundsMetadataLookahead(t *testing.T) {
+	base := config.DefaultConfig()
+	base.ParallelPoolEnabled = false
+	cfg := config.StaticProvider(base)
+
+	var yielded []StreamChunk
+	StreamParallel(context.Background(), cfg, func(ctx context.Context, _ string) <-chan StreamChunk {
+		stream := make(chan StreamChunk)
+		go func() {
+			defer close(stream)
+			for index := 0; index <= maxStreamRaceMetadataChunks; index++ {
+				select {
+				case stream <- StreamChunk{Data: map[string]any{
+					"modelVersion": fmt.Sprintf("metadata-%d", index),
+				}}:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+		return stream
+	}, func(chunk StreamChunk) bool {
+		yielded = append(yielded, chunk)
+		return true
+	})
+
+	if len(yielded) != 1 || yielded[0].Err == nil ||
+		yielded[0].Err.Kind != "unavailable" {
+		t.Fatalf("metadata lookahead overflow must fail boundedly: %#v", yielded)
+	}
+}
+
+func streamText(data map[string]any) string {
+	candidates, _ := data["candidates"].([]any)
+	if len(candidates) == 0 {
+		return ""
+	}
+	candidate, _ := candidates[0].(map[string]any)
+	content, _ := candidate["content"].(map[string]any)
+	parts, _ := content["parts"].([]any)
+	if len(parts) == 0 {
+		return ""
+	}
+	part, _ := parts[0].(map[string]any)
+	text, _ := part["text"].(string)
+	return text
 }
 
 func raceTestConfig(poolSize, maxAttempts, delayMs int) config.ConfigProvider {

@@ -107,7 +107,9 @@ type openAIStreamPrepared struct {
 // OpenAIStreamEncoder 在单个请求内复用固定事件和 choices 存储。API 层可把事件
 // 直接编码到响应缓冲，避免每个正文 chunk 先创建临时 SSE 字符串。
 type OpenAIStreamEncoder struct {
-	event openAIStreamEvent
+	event             openAIStreamEvent
+	nextToolCallIndex int
+	sawToolCalls      bool
 }
 
 func NewOpenAIStreamEncoder(model, requestID string) *OpenAIStreamEncoder {
@@ -204,6 +206,13 @@ func (e *OpenAIStreamEncoder) emitPrepared(prepared openAIStreamPrepared, emit f
 		}
 	}
 	if len(prepared.toolCalls) > 0 {
+		for _, rawToolCall := range prepared.toolCalls {
+			if toolCall, ok := rawToolCall.(map[string]any); ok {
+				toolCall["index"] = e.nextToolCallIndex
+				e.nextToolCallIndex++
+			}
+		}
+		e.sawToolCalls = true
 		setOpenAIStreamChoice(&e.event, openAIStreamDelta{ToolCalls: prepared.toolCalls}, nil)
 		if !emit(&e.event) {
 			return false
@@ -211,7 +220,7 @@ func (e *OpenAIStreamEncoder) emitPrepared(prepared openAIStreamPrepared, emit f
 	}
 
 	if prepared.hasFinish {
-		oaiFinish := MapFinishReason(prepared.finish, len(prepared.toolCalls) > 0)
+		oaiFinish := MapFinishReason(prepared.finish, e.sawToolCalls)
 		setOpenAIStreamChoice(&e.event, openAIStreamDelta{}, &oaiFinish)
 		if !emit(&e.event) {
 			return false

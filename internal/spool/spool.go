@@ -25,6 +25,11 @@ func SetMaxSpillBytes(limit int64) {
 	maxMemSize.Store(limit)
 }
 
+// MaxSpillBytes returns the current in-memory threshold.
+func MaxSpillBytes() int64 {
+	return maxMemSize.Load()
+}
+
 // SpilledBytes 返回进程启动以来写入临时文件的累计字节数。
 // Buffer 本身按单请求串行使用，但多个请求会并发落盘并读取该计数器，故用原子操作。
 func SpilledBytes() int64 { return spilledBytes.Load() }

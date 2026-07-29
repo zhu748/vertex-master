@@ -135,11 +135,22 @@ func ConvertChatRequest(body map[string]any, cfg config.ConfigProvider) (string,
 			if !contentConverted && contentNeedsConversion(content) {
 				return "", nil, fmt.Errorf("messages[%d] assistant content could not be converted", messageIndex)
 			}
-			if toolCalls, ok := msg["tool_calls"].([]any); ok {
-				for _, tc := range toolCalls {
+			if rawToolCalls, exists := msg["tool_calls"]; exists && rawToolCalls != nil {
+				toolCalls, ok := rawToolCalls.([]any)
+				if !ok {
+					return "", nil, fmt.Errorf(
+						"messages[%d] assistant tool_calls must be an array",
+						messageIndex,
+					)
+				}
+				for toolCallIndex, tc := range toolCalls {
 					parsed := extractOAIToolCall(tc)
 					if parsed == nil {
-						continue
+						return "", nil, fmt.Errorf(
+							"messages[%d] assistant tool_calls[%d] must contain a function name",
+							messageIndex,
+							toolCallIndex,
+						)
 					}
 					if parsed.id != "" {
 						if toolIDToName == nil {
@@ -266,23 +277,46 @@ func ConvertChatRequest(body map[string]any, cfg config.ConfigProvider) (string,
 		case string:
 			genCfg["stopSequences"] = []any{s}
 		case []any:
+			for index, rawSequence := range s {
+				if _, ok := rawSequence.(string); !ok {
+					return "", nil, fmt.Errorf("stop[%d] must be a string", index)
+				}
+			}
 			genCfg["stopSequences"] = s
+		default:
+			return "", nil, fmt.Errorf("stop must be a string or array of strings")
 		}
 	}
 
-	if rf, ok := body["response_format"].(map[string]any); ok {
-		if t, _ := rf["type"].(string); t == "json_object" || t == "json_schema" {
+	if rawResponseFormat, exists := body["response_format"]; exists && rawResponseFormat != nil {
+		rf, ok := rawResponseFormat.(map[string]any)
+		if !ok {
+			return "", nil, fmt.Errorf("response_format must be an object")
+		}
+		responseType, _ := rf["type"].(string)
+		switch responseType {
+		case "", "text":
+		case "json_object":
 			if genCfg == nil {
 				genCfg = make(map[string]any, 8)
 			}
 			genCfg["responseMimeType"] = "application/json"
-			if t == "json_schema" {
-				if js, ok := rf["json_schema"].(map[string]any); ok {
-					if sch, ok := js["schema"].(map[string]any); ok {
-						genCfg["responseSchema"] = sch
-					}
-				}
+		case "json_schema":
+			jsonSchema, ok := rf["json_schema"].(map[string]any)
+			if !ok {
+				return "", nil, fmt.Errorf("response_format.json_schema must be an object")
 			}
+			schema, ok := jsonSchema["schema"].(map[string]any)
+			if !ok {
+				return "", nil, fmt.Errorf("response_format.json_schema.schema must be an object")
+			}
+			if genCfg == nil {
+				genCfg = make(map[string]any, 8)
+			}
+			genCfg["responseMimeType"] = "application/json"
+			genCfg["responseSchema"] = schema
+		default:
+			return "", nil, fmt.Errorf("unsupported response_format type %q", responseType)
 		}
 	}
 

@@ -92,6 +92,33 @@ func TestWriteSettingsMergesAndPreservesUnknown(t *testing.T) {
 	InvalidateCache() // 清理，避免影响其它测试
 }
 
+func TestWriteSettingsRejectsCorruptExistingConfig(t *testing.T) {
+	for _, original := range []string{`{"port_api":2156`, `null`} {
+		t.Run(original, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			t.Setenv("VPROXY_CONFIG", path)
+			InvalidateCache()
+			t.Cleanup(InvalidateCache)
+
+			if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			err := WriteSettings(map[string]any{"max_retries": 5})
+			if err == nil {
+				t.Fatal("损坏的现有配置必须拒绝更新，避免把其它设置静默覆盖")
+			}
+			data, readErr := os.ReadFile(path)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if string(data) != original {
+				t.Fatalf("更新失败后必须保留原始配置，got %q", data)
+			}
+		})
+	}
+}
+
 func TestWriteSettingsIfUnchangedPreservesNewerAdminValue(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	t.Setenv("VPROXY_CONFIG", path)
@@ -371,6 +398,9 @@ func TestLoadNormalizesOutOfRangeProxySettings(t *testing.T) {
 	t.Setenv("VPROXY_CONFIG", path)
 	clearProxyEnvironment(t)
 	initial := `{
+		"max_retries": -9,
+		"max_spill_mb": 0,
+		"max_n": 99,
 		"parallel_pool_size": 0,
 		"parallel_pool_delay_ms": 999999,
 		"proxy_failover_max_attempts": 1,
@@ -386,6 +416,15 @@ func TestLoadNormalizesOutOfRangeProxySettings(t *testing.T) {
 	t.Cleanup(InvalidateCache)
 
 	cfg := Load()
+	if cfg.MaxRetries != 0 {
+		t.Fatalf("负 max_retries 应限制为 0，got %d", cfg.MaxRetries)
+	}
+	if cfg.MaxSpillMB != 2048 {
+		t.Fatalf("max_spill_mb=0 应回退为 2048，got %d", cfg.MaxSpillMB)
+	}
+	if cfg.MaxN != 32 {
+		t.Fatalf("过大的 max_n 应限制为 32，got %d", cfg.MaxN)
+	}
 	if cfg.ParallelPoolSize != 5 {
 		t.Fatalf("parallel_pool_size=0 应回退为 5，got %d", cfg.ParallelPoolSize)
 	}
@@ -409,6 +448,9 @@ func TestLoadNormalizesOutOfRangeProxySettings(t *testing.T) {
 	}
 
 	waitForNormalizedConfig(t, path, map[string]int{
+		"max_retries":                         0,
+		"max_spill_mb":                        2048,
+		"max_n":                               32,
 		"parallel_pool_size":                  5,
 		"parallel_pool_delay_ms":              10000,
 		"proxy_failover_max_attempts":         5,

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bsfdsagfadg/vertex/internal/vertex"
 )
@@ -24,6 +25,50 @@ func (w *failingStreamResponseWriter) Write(data []byte) (int, error) {
 		return 0, errors.New("client disconnected")
 	}
 	return len(data), nil
+}
+
+type deadlineStreamResponseWriter struct {
+	header    http.Header
+	deadlines []time.Time
+	body      strings.Builder
+}
+
+func (w *deadlineStreamResponseWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = make(http.Header)
+	}
+	return w.header
+}
+
+func (w *deadlineStreamResponseWriter) WriteHeader(int) {}
+
+func (w *deadlineStreamResponseWriter) Write(data []byte) (int, error) {
+	return w.body.Write(data)
+}
+
+func (w *deadlineStreamResponseWriter) SetWriteDeadline(deadline time.Time) error {
+	w.deadlines = append(w.deadlines, deadline)
+	return nil
+}
+
+func TestSSEWriterRefreshesSlidingWriteDeadlineThroughMiddleware(t *testing.T) {
+	underlying := &deadlineStreamResponseWriter{}
+	wrapped := &statusWriter{ResponseWriter: underlying}
+	sw := newSSEWriter(wrapped, "text/event-stream")
+
+	started := time.Now()
+	if !sw.writeData(map[string]any{"text": "first"}) || !sw.write("data: [DONE]\n\n") {
+		t.Fatal("SSE writes unexpectedly failed")
+	}
+	if len(underlying.deadlines) != 2 {
+		t.Fatalf("write deadline refreshes=%d, want 2", len(underlying.deadlines))
+	}
+	for _, deadline := range underlying.deadlines {
+		if deadline.Before(started.Add(sseWriteTimeout-time.Second)) ||
+			deadline.After(time.Now().Add(sseWriteTimeout+time.Second)) {
+			t.Fatalf("unexpected sliding deadline %v", deadline)
+		}
+	}
 }
 
 func TestSSESerializationPreservesFramingAndHTML(t *testing.T) {
@@ -729,6 +774,45 @@ func TestResponsesTypedLifecycleEventsMatchGenericSSE(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestResponsesContentFilterProducesIncompleteLifecycle(t *testing.T) {
+	response := buildResponsesResponse(
+		map[string]any{},
+		"gemini-test",
+		"resp_test",
+		protocolOutput{Text: "partial", Finish: "content_filter"},
+	)
+	if response.Status != "incomplete" || response.IncompleteDetails == nil ||
+		response.IncompleteDetails.Reason != "content_filter" {
+		t.Fatalf("content filter lifecycle=%#v", response)
+	}
+	item, ok := response.Output[0].(*responsesCompletedTextMessageItem)
+	if !ok || item.Status != "incomplete" {
+		t.Fatalf("content-filter output item must be incomplete: %#v", response.Output)
+	}
+
+	recorder := httptest.NewRecorder()
+	state := responsesStreamState{
+		sw:      newSSEWriter(recorder, "text/event-stream"),
+		id:      "resp_stream",
+		model:   "gemini-test",
+		request: map[string]any{},
+	}
+	state.start()
+	state.consume(protocolOutput{Text: "partial"})
+	state.consume(protocolOutput{Finish: "content_filter"})
+	state.finish()
+	stream := recorder.Body.String()
+	for _, want := range []string{
+		"event: response.incomplete",
+		`"reason":"content_filter"`,
+		`"status":"incomplete"`,
+	} {
+		if !strings.Contains(stream, want) {
+			t.Fatalf("content-filter stream missing %q: %s", want, stream)
+		}
 	}
 }
 

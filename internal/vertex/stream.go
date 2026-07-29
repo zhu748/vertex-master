@@ -49,7 +49,10 @@ var errStreamObjectTooLarge = errors.New("upstream stream object too large")
 func (c *VertexAIClient) StreamChat(ctx context.Context, model string, geminiPayload map[string]any, yield func(StreamChunk) bool) {
 	preparedVariables := buildRequestVariables(model, geminiPayload, c.cfg)
 	op := func(ctx context.Context, proxyURI string) <-chan StreamChunk {
-		ch := make(chan StreamChunk, 64)
+		// Keep backpressure end-to-end. StreamParallel probes this channel while
+		// choosing a winner, so an additional per-candidate queue only multiplies
+		// the memory retained for large media/tool chunks.
+		ch := make(chan StreamChunk)
 		// 候选共享请求级只读 variables；每次 attempt 只复制顶层并注入 token。
 		go func() {
 			defer close(ch)
@@ -84,7 +87,7 @@ func (c *VertexAIClient) executeStreamingWithPreparedVariables(ctx context.Conte
 		cfg.ParallelPoolEnabled(),
 		cfg.ParallelPoolRetryEnabled(),
 	)
-	contentYielded := false
+	payloadYielded := false
 	var lastError *VertexError
 
 	reqID := RequestIDFromContext(ctx)
@@ -134,7 +137,9 @@ retryLoop:
 		chunkCount := 0
 		attemptErr := c.executeStreamingAttempt(ctx, sess, model, nodeName, preparedVariables, recaptchaToken, isFirstAuth, func(ch map[string]any) bool {
 			chunkCount++
-			contentYielded = true
+			if streamChunkHasPayload(StreamChunk{Data: ch}) {
+				payloadYielded = true
+			}
 			return yield(StreamChunk{Data: ch})
 		})
 
@@ -150,12 +155,15 @@ retryLoop:
 			return
 		}
 
+		if ctx.Err() != nil {
+			return
+		}
 		ve := asVertexError(attemptErr)
 		switch {
 		case ve != nil && ve.Kind == "auth":
 			isVerifyFail := strings.Contains(ve.Message, "Failed to verify action") ||
 				strings.Contains(ve.Message, "The caller does not have permission")
-			if isFirstAuth && isVerifyFail {
+			if isFirstAuth && isVerifyFail && chunkCount == 0 {
 				// 首次认证重试：token 不清空，同一 token 再打一次（匿名端点首帧预期 verify-fail）。
 				isFirstAuth = false
 				if err := sleepCtx(ctx, 500*time.Millisecond); err != nil {
@@ -166,7 +174,7 @@ retryLoop:
 			recaptchaToken = ""
 			isFirstAuth = true
 			lastError = ve
-			if contentYielded || attempt >= maxRetries {
+			if payloadYielded || attempt >= maxRetries {
 				break retryLoop
 			}
 			attempt++
@@ -176,7 +184,7 @@ retryLoop:
 
 		case ve != nil && ve.Kind == "ratelimit":
 			lastError = ve
-			if contentYielded || attempt >= maxRetries {
+			if payloadYielded || attempt >= maxRetries {
 				log.Printf("[Vertex] [StreamChat] (Attempt %d/%d) 节点 %s 触发 429 失败, 请求ID=%s, 代理=%s", attempt, maxRetries, model, reqID, nodeName)
 				break retryLoop
 			}
@@ -204,7 +212,7 @@ retryLoop:
 		case ve != nil:
 			lastError = ve
 			// 【关键改动】：如果是网络不通等内部错误，直接熔断并停止重试。
-			if ve.Kind == "internal" || !ve.IsRetryable() || contentYielded || attempt >= maxRetries {
+			if ve.Kind == "internal" || !ve.IsRetryable() || payloadYielded || attempt >= maxRetries {
 				log.Printf("[Vertex] [StreamChat] (Attempt %d/%d) 节点 %s 触发异常错误失败: [%s] %s, 请求ID=%s, 代理=%s", attempt, maxRetries, model, ve.Kind, ve.Message, reqID, nodeName)
 				break retryLoop
 			}
@@ -221,8 +229,10 @@ retryLoop:
 		}
 	}
 
-	// 所有重试耗尽且没发出过任何内容 → yield 一个 error chunk（末尾 yield error dict）。
-	if !contentYielded && lastError != nil {
+	// A transport failure after payload is still part of the public stream. Do
+	// not turn a truncated response into a normal EOF merely because some text
+	// was already emitted; callers can then avoid synthesizing STOP/completed.
+	if lastError != nil && ctx.Err() == nil {
 		yield(StreamChunk{Err: lastError})
 	}
 }
@@ -262,7 +272,10 @@ func (c *VertexAIClient) executeStreamingAttempt(ctx context.Context, sess *tran
 
 	sr, err := sess.DoStream(ctx, "POST", c.getBatchGraphqlURL(), header, reader)
 	if err != nil {
-		return NewInternalError("upstream request: " + err.Error())
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return NewUnavailableError("upstream request: " + err.Error())
 	}
 	defer sr.Close() // 提前停止或出错时立即中断上游 body。
 
@@ -274,7 +287,10 @@ func (c *VertexAIClient) executeStreamingAttempt(ctx context.Context, sess *tran
 			sr.Close()
 			errText += "\n[upstream error body truncated]"
 		} else if readErr != nil {
-			return NewInternalError("read upstream error response: " + readErr.Error())
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return NewUnavailableError("read upstream error response: " + readErr.Error())
 		}
 		if cfg.DebugMode() {
 			debugReq, _ := json.Marshal(newBody)
@@ -314,11 +330,16 @@ func (c *VertexAIClient) executeStreamingAttempt(ctx context.Context, sess *tran
 		sr.Close()
 	}
 
-	if errors.Is(scanErr, context.Canceled) {
-		return scanErr
+	if scanErr == nil {
+		return nil
 	}
-
-	return scanErr
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if vertexErr := asVertexError(scanErr); vertexErr != nil {
+		return vertexErr
+	}
+	return NewUnavailableError("read upstream stream: " + scanErr.Error())
 }
 
 // scanStream 跨 chunk 增量扫描花括号配对，逐个完整 JSON 对象回调 onObject（O(n)）。

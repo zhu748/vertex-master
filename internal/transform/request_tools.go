@@ -14,10 +14,21 @@ var toolKeys = map[string]bool{ //nolint:gochecknoglobals
 // convertTools 把 OpenAI tools（或 legacy functions）转为 functionDeclarations，写入
 // geminiPayload["tools"]。返回已声明的工具名集合（供 tool_choice 校验）。
 func convertTools(body, geminiPayload map[string]any) (map[string]bool, error) {
-	oaiTools, _ := body["tools"].([]any)
+	var oaiTools []any
+	if rawTools, exists := body["tools"]; exists && rawTools != nil {
+		var ok bool
+		oaiTools, ok = rawTools.([]any)
+		if !ok {
+			return nil, fmt.Errorf("tools must be an array")
+		}
+	}
 	// 兼容已废弃的顶层 functions 字段（无 tools 时回退）。
 	if len(oaiTools) == 0 {
-		if fns, ok := body["functions"].([]any); ok && len(fns) > 0 {
+		if rawFunctions, exists := body["functions"]; exists && rawFunctions != nil {
+			fns, ok := rawFunctions.([]any)
+			if !ok {
+				return nil, fmt.Errorf("functions must be an array")
+			}
 			oaiTools = make([]any, 0, len(fns))
 			for _, f := range fns {
 				oaiTools = append(oaiTools, map[string]any{"type": "function", "function": f})
@@ -30,20 +41,33 @@ func convertTools(body, geminiPayload map[string]any) (map[string]bool, error) {
 
 	declared := make(map[string]bool, len(oaiTools))
 	funcDecls := make([]any, 0, len(oaiTools))
-	for _, t := range oaiTools {
+	for toolIndex, t := range oaiTools {
 		f := extractOAIFunctionTool(t)
 		if f == nil {
-			continue
+			return nil, fmt.Errorf("tools[%d] must be a valid function tool", toolIndex)
 		}
-		decl := map[string]any{"name": f["name"]}
-		declared[toString(f["name"])] = true
+		name := toString(f["name"])
+		if declared[name] {
+			return nil, fmt.Errorf("duplicate tool function name %q", name)
+		}
+		decl := map[string]any{"name": name}
+		declared[name] = true
 		if isTruthy(f["description"]) {
 			decl["description"] = f["description"]
 		}
-		if params, ok := f["parameters"].(map[string]any); ok && len(params) > 0 {
-			// 一次递归同时完成白名单清洗和 Vertex 原生 Schema 转换，
-			// 避免发送前再为同一棵大型 schema 构造第二份中间树。
-			decl["parameters"] = cleanNativeFunctionParameters(params)
+		rawParams, hasParams := f["parameters"]
+		if hasParams && rawParams != nil {
+			params, ok := rawParams.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("tools[%d] parameters must be an object", toolIndex)
+			}
+			if len(params) == 0 {
+				decl["parameters"] = map[string]any{"type": "OBJECT", "properties": []any{}}
+			} else {
+				// 一次递归同时完成白名单清洗和 Vertex 原生 Schema 转换，
+				// 避免发送前再为同一棵大型 schema 构造第二份中间树。
+				decl["parameters"] = cleanNativeFunctionParameters(params)
+			}
 		} else {
 			// 缺省 parameters 时补默认空对象 schema，满足 Gemini functionDeclarations 要求。
 			decl["parameters"] = map[string]any{"type": "OBJECT", "properties": []any{}}
@@ -74,6 +98,8 @@ func convertToolChoice(body, geminiPayload map[string]any, declared map[string]b
 				return fmt.Errorf("tool_choice='required' requires at least one tool")
 			}
 			geminiPayload["toolConfig"] = map[string]any{"functionCallingConfig": map[string]any{"mode": "ANY"}}
+		default:
+			return fmt.Errorf("unsupported tool_choice value %q", v)
 		}
 	case map[string]any:
 		var fnName string
@@ -91,7 +117,11 @@ func convertToolChoice(body, geminiPayload map[string]any, declared map[string]b
 			geminiPayload["toolConfig"] = map[string]any{"functionCallingConfig": map[string]any{
 				"mode": "ANY", "allowedFunctionNames": []any{fnName},
 			}}
+			return nil
 		}
+		return fmt.Errorf("tool_choice object must reference a function name")
+	default:
+		return fmt.Errorf("tool_choice must be a string or object")
 	}
 	return nil
 }

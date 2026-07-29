@@ -227,6 +227,7 @@ func main() {
 			if s == syscall.SIGHUP {
 				config.InvalidateCache()
 				config.InvalidateModelsCache()
+				spool.SetMaxSpillBytes(int64(cfg.MaxSpillMB()) << 20)
 				log.Printf("[vproxy] 收到 SIGHUP：已清配置/模型缓存，下次读取即热重载")
 				continue
 			}

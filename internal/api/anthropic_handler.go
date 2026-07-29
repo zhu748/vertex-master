@@ -143,17 +143,27 @@ func anthropicToChatRequest(body map[string]any) (map[string]any, error) {
 		return nil, fmt.Errorf("messages must be a non-empty array")
 	}
 	messages := make([]any, 0, len(rawMessages)+1)
-	if system := anthropicText(body["system"]); system != "" {
-		messages = append(messages, map[string]any{"role": "system", "content": system})
+	if rawSystem, exists := body["system"]; exists && rawSystem != nil {
+		system, err := anthropicInstructionText(rawSystem)
+		if err != nil {
+			return nil, fmt.Errorf("system: %w", err)
+		}
+		if system != "" {
+			messages = append(messages, map[string]any{"role": "system", "content": system})
+		}
 	}
-	for _, raw := range rawMessages {
+	for messageIndex, raw := range rawMessages {
 		message, _ := raw.(map[string]any)
 		if message == nil {
-			continue
+			return nil, fmt.Errorf("messages[%d] must be an object", messageIndex)
 		}
 		role := stringValue(message["role"])
 		if role == "system" || role == "developer" {
-			if content := anthropicText(message["content"]); content != "" {
+			content, err := anthropicInstructionText(message["content"])
+			if err != nil {
+				return nil, fmt.Errorf("messages[%d]: %w", messageIndex, err)
+			}
+			if content != "" {
 				messages = append(messages, map[string]any{"role": "system", "content": content})
 			}
 			continue
@@ -164,7 +174,7 @@ func anthropicToChatRequest(body map[string]any) (map[string]any, error) {
 		var err error
 		messages, err = appendAnthropicMessageToChat(messages, role, message["content"])
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("messages[%d]: %w", messageIndex, err)
 		}
 	}
 	if len(messages) == 0 {
@@ -172,12 +182,19 @@ func anthropicToChatRequest(body map[string]any) (map[string]any, error) {
 	}
 	chat["messages"] = messages
 
-	if rawTools, ok := body["tools"].([]any); ok {
+	if rawToolsValue, exists := body["tools"]; exists && rawToolsValue != nil {
+		rawTools, ok := rawToolsValue.([]any)
+		if !ok {
+			return nil, fmt.Errorf("tools must be an array")
+		}
 		tools := make([]any, 0, len(rawTools))
-		for _, raw := range rawTools {
+		for toolIndex, raw := range rawTools {
 			tool, _ := raw.(map[string]any)
-			if tool == nil || stringValue(tool["name"]) == "" {
-				continue
+			if tool == nil {
+				return nil, fmt.Errorf("tools[%d] must be an object", toolIndex)
+			}
+			if stringValue(tool["name"]) == "" {
+				return nil, fmt.Errorf("tools[%d] is missing name", toolIndex)
 			}
 			fn := map[string]any{
 				"name": tool["name"], "description": tool["description"],
@@ -189,7 +206,11 @@ func anthropicToChatRequest(body map[string]any) (map[string]any, error) {
 			chat["tools"] = tools
 		}
 	}
-	if choice, ok := body["tool_choice"].(map[string]any); ok {
+	if rawChoice, exists := body["tool_choice"]; exists && rawChoice != nil {
+		choice, ok := rawChoice.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("tool_choice must be an object")
+		}
 		switch stringValue(choice["type"]) {
 		case "auto":
 			chat["tool_choice"] = "auto"
@@ -198,12 +219,47 @@ func anthropicToChatRequest(body map[string]any) (map[string]any, error) {
 		case "none":
 			chat["tool_choice"] = "none"
 		case "tool":
+			if stringValue(choice["name"]) == "" {
+				return nil, fmt.Errorf("tool_choice type 'tool' requires name")
+			}
 			chat["tool_choice"] = map[string]any{
 				"type": "function", "function": map[string]any{"name": choice["name"]},
 			}
+		default:
+			return nil, fmt.Errorf(
+				"unsupported tool_choice type %q",
+				stringValue(choice["type"]),
+			)
 		}
 	}
 	return chat, nil
+}
+
+func anthropicInstructionText(v any) (string, error) {
+	if text, ok := v.(string); ok {
+		return text, nil
+	}
+	blocks, ok := v.([]any)
+	if !ok {
+		return "", fmt.Errorf("content must be a string or text block array")
+	}
+	var inline [8]string
+	values := inline[:0]
+	for blockIndex, raw := range blocks {
+		block, ok := raw.(map[string]any)
+		if !ok {
+			return "", fmt.Errorf("content[%d] must be an object", blockIndex)
+		}
+		if typ := stringValue(block["type"]); typ != "text" {
+			return "", fmt.Errorf("content[%d] has unsupported type %q", blockIndex, typ)
+		}
+		text, ok := block["text"].(string)
+		if !ok {
+			return "", fmt.Errorf("content[%d].text must be a string", blockIndex)
+		}
+		values = append(values, text)
+	}
+	return strings.Join(values, "\n"), nil
 }
 
 func anthropicText(v any) string {
@@ -225,19 +281,46 @@ func appendAnthropicMessageToChat(result []any, role string, content any) ([]any
 	if text, ok := content.(string); ok {
 		return append(result, map[string]any{"role": role, "content": text}), nil
 	}
+	blocks, ok := content.([]any)
+	if !ok {
+		return nil, fmt.Errorf("content must be a string or array")
+	}
 	if role == "assistant" {
 		var text transform.StringAccumulator
 		toolCalls := []any{}
-		for _, raw := range anySlice(content) {
+		for blockIndex, raw := range blocks {
 			block, _ := raw.(map[string]any)
+			if block == nil {
+				return nil, fmt.Errorf("content[%d] must be an object", blockIndex)
+			}
 			switch stringValue(block["type"]) {
 			case "text":
-				text.WriteString(stringValue(block["text"]))
+				value, ok := block["text"].(string)
+				if !ok {
+					return nil, fmt.Errorf("content[%d].text must be a string", blockIndex)
+				}
+				text.WriteString(value)
 			case "tool_use":
+				if stringValue(block["id"]) == "" || stringValue(block["name"]) == "" {
+					return nil, fmt.Errorf(
+						"content[%d] tool_use requires id and name",
+						blockIndex,
+					)
+				}
 				toolCalls = append(toolCalls, map[string]any{
 					"id": block["id"], "type": "function",
 					"function": map[string]any{"name": block["name"], "arguments": jsonString(block["input"])},
 				})
+			case "thinking", "redacted_thinking":
+				// Extended-thinking history is provider-private context. Gemini
+				// cannot consume Anthropic signatures, so intentionally omit
+				// these known blocks while preserving adjacent visible/tool data.
+			default:
+				return nil, fmt.Errorf(
+					"content[%d] has unsupported assistant block type %q",
+					blockIndex,
+					stringValue(block["type"]),
+				)
 			}
 		}
 		msg := map[string]any{"role": "assistant", "content": text.String()}
@@ -257,28 +340,62 @@ func appendAnthropicMessageToChat(result []any, role string, content any) ([]any
 			regular = nil
 		}
 	}
-	for _, raw := range anySlice(content) {
+	for blockIndex, raw := range blocks {
 		block, _ := raw.(map[string]any)
 		if block == nil {
-			continue
+			return nil, fmt.Errorf("content[%d] must be an object", blockIndex)
 		}
 		switch stringValue(block["type"]) {
 		case "text":
-			regular = append(regular, map[string]any{"type": "text", "text": block["text"]})
+			text, ok := block["text"].(string)
+			if !ok {
+				return nil, fmt.Errorf("content[%d].text must be a string", blockIndex)
+			}
+			regular = append(regular, map[string]any{"type": "text", "text": text})
 		case "image":
 			source, _ := block["source"].(map[string]any)
+			if source == nil {
+				return nil, fmt.Errorf("content[%d].source must be an object", blockIndex)
+			}
 			switch stringValue(source["type"]) {
 			case "base64":
-				url := "data:" + stringValue(source["media_type"]) + ";base64," + stringValue(source["data"])
+				mediaType := stringValue(source["media_type"])
+				data := stringValue(source["data"])
+				if mediaType == "" || data == "" {
+					return nil, fmt.Errorf(
+						"content[%d] base64 image requires media_type and data",
+						blockIndex,
+					)
+				}
+				url := "data:" + mediaType + ";base64," + data
 				regular = append(regular, map[string]any{"type": "image_url", "image_url": map[string]any{"url": url}})
 			case "url":
-				regular = append(regular, map[string]any{"type": "image_url", "image_url": map[string]any{"url": source["url"]}})
+				url := stringValue(source["url"])
+				if url == "" {
+					return nil, fmt.Errorf("content[%d] URL image requires url", blockIndex)
+				}
+				regular = append(regular, map[string]any{"type": "image_url", "image_url": map[string]any{"url": url}})
+			default:
+				return nil, fmt.Errorf(
+					"content[%d] has unsupported image source type %q",
+					blockIndex,
+					stringValue(source["type"]),
+				)
 			}
 		case "tool_result":
+			if stringValue(block["tool_use_id"]) == "" {
+				return nil, fmt.Errorf("content[%d] tool_result requires tool_use_id", blockIndex)
+			}
 			flushRegular()
 			result = append(result, map[string]any{
 				"role": "tool", "tool_call_id": block["tool_use_id"], "content": anthropicToolResult(block["content"]),
 			})
+		default:
+			return nil, fmt.Errorf(
+				"content[%d] has unsupported user block type %q",
+				blockIndex,
+				stringValue(block["type"]),
+			)
 		}
 	}
 	flushRegular()
@@ -293,6 +410,9 @@ func anthropicUserTextContentCanPassThrough(content any) ([]any, bool) {
 	for _, raw := range blocks {
 		block, ok := raw.(map[string]any)
 		if !ok || stringValue(block["type"]) != "text" {
+			return nil, false
+		}
+		if _, ok := block["text"].(string); !ok {
 			return nil, false
 		}
 	}

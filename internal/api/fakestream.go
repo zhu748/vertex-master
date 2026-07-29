@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unicode/utf8"
 
 	"github.com/bsfdsagfadg/vertex/internal/jsonx"
@@ -40,12 +41,14 @@ func splitIntoRuneChunks(text string) []string {
 
 // sseWriter 是一个带 flush 的 SSE 行写出器；write 返回 false 表示客户端断开。
 type sseWriter struct {
-	w      http.ResponseWriter
-	flush  func()
-	failed atomic.Bool
+	w                    http.ResponseWriter
+	flush                func()
+	refreshWriteDeadline func()
+	failed               atomic.Bool
 }
 
 const maxPooledSSEBufferCapacity = 64 * 1024
+const sseWriteTimeout = 30 * time.Second
 
 var sseBufferPool = sync.Pool{ //nolint:gochecknoglobals
 	New: func() any { return new(bytes.Buffer) },
@@ -55,6 +58,9 @@ var sseBufferPool = sync.Pool{ //nolint:gochecknoglobals
 func (sw *sseWriter) write(line string) bool {
 	if sw == nil || sw.failed.Load() {
 		return false
+	}
+	if sw.refreshWriteDeadline != nil {
+		sw.refreshWriteDeadline()
 	}
 	if _, err := io.WriteString(sw.w, line); err != nil {
 		sw.failed.Store(true)
@@ -107,6 +113,9 @@ func (sw *sseWriter) writeData(payload any) bool {
 }
 
 func (sw *sseWriter) writeBuffer(buffer *bytes.Buffer) bool {
+	if sw.refreshWriteDeadline != nil {
+		sw.refreshWriteDeadline()
+	}
 	_, err := sw.w.Write(buffer.Bytes())
 	if buffer.Cap() <= maxPooledSSEBufferCapacity {
 		buffer.Reset()

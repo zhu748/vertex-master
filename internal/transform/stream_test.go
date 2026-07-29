@@ -299,3 +299,45 @@ func TestConvertRealtimeChunk_ToolCall(t *testing.T) {
 		t.Errorf("有工具调用应 finish_reason=tool_calls: %s", last)
 	}
 }
+
+func TestOpenAIStreamEncoderTracksToolCallsAcrossFrames(t *testing.T) {
+	encoder := NewOpenAIStreamEncoder("m", "r")
+	var events []string
+	emit := func(payload any) bool {
+		events = append(events, sseLine(payload))
+		return true
+	}
+
+	for index, name := range []string{"first_tool", "second_tool"} {
+		chunk := map[string]any{"candidates": []any{map[string]any{
+			"content": map[string]any{"parts": []any{map[string]any{
+				"functionCall": map[string]any{"name": name, "args": map[string]any{}},
+			}}, "role": "model"},
+		}}}
+		if _, ok := encoder.Emit(chunk, index == 0, emit); !ok {
+			t.Fatalf("tool frame %d emit failed", index)
+		}
+	}
+	finish := map[string]any{"candidates": []any{map[string]any{
+		"content":      map[string]any{"parts": []any{}, "role": "model"},
+		"finishReason": "STOP",
+	}}}
+	if _, ok := encoder.Emit(finish, false, emit); !ok {
+		t.Fatal("finish frame emit failed")
+	}
+
+	var toolEvents []string
+	for _, event := range events {
+		if strings.Contains(event, `"tool_calls":[`) {
+			toolEvents = append(toolEvents, event)
+		}
+	}
+	if len(toolEvents) != 2 ||
+		!strings.Contains(toolEvents[0], `"index":0`) ||
+		!strings.Contains(toolEvents[1], `"index":1`) {
+		t.Fatalf("跨帧工具索引必须连续: %v", toolEvents)
+	}
+	if !strings.Contains(events[len(events)-1], `"finish_reason":"tool_calls"`) {
+		t.Fatalf("STOP 独立末帧必须保留累计工具语义: %v", events)
+	}
+}

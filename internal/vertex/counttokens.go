@@ -58,6 +58,11 @@ func (c *VertexAIClient) countTokenSets(
 	model string,
 	contentSets ...[]any,
 ) ([]int, error) {
+	// Generation requests resolve aliases in BuildVertexVariables. CountTokens
+	// bypasses that path, so canonicalize here as well; otherwise an alias that
+	// generates successfully can fail only while usage is being completed.
+	model = c.cfg.ResolveModelName(model)
+
 	type pendingCount struct {
 		originalIndex int
 		contents      []any

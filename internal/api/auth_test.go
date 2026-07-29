@@ -463,3 +463,47 @@ func TestAPIKeyManagerRejectsLineInjection(t *testing.T) {
 		}
 	}
 }
+
+func TestAPIKeyManagerRejectsOversizedFieldsWithoutChangingState(t *testing.T) {
+	keysFile := filepath.Join(t.TempDir(), "api_keys.txt")
+	if err := os.WriteFile(keysFile, []byte("stable:stable-key:unchanged\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("VPROXY_API_KEYS", keysFile)
+	t.Setenv("VPROXY_API_KEY", "")
+	manager := NewAPIKeyManager()
+	if !manager.LoadKeys() {
+		t.Fatal("initial key snapshot did not load")
+	}
+	before, err := os.ReadFile(keysFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name        string
+		key         string
+		description string
+	}{
+		{name: strings.Repeat("名", maxAPIKeyNameRunes+1), key: "key"},
+		{name: "key", key: strings.Repeat("k", maxAPIKeyValueBytes+1)},
+		{name: "key", key: "value", description: strings.Repeat("述", maxAPIKeyDescRunes+1)},
+	}
+	for _, test := range tests {
+		if errAdd := manager.Add(test.name, test.key, test.description); errAdd == nil {
+			t.Fatalf("oversized API key field was accepted: name=%d key=%d description=%d",
+				len(test.name), len(test.key), len(test.description))
+		}
+	}
+
+	after, err := os.ReadFile(keysFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("rejected update changed the key file:\nbefore=%q\nafter=%q", before, after)
+	}
+	if !manager.ValidateKey("stable-key") || manager.Count() != 1 {
+		t.Fatal("rejected update changed the active key snapshot")
+	}
+}

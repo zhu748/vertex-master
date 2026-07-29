@@ -78,12 +78,12 @@
           <div class="card glass">
             <div class="toolbar">
               <div class="key-input-wrap"><label for="kName" class="sr-only">名称（如 alice）</label><input id="kName"
-                  placeholder="名称（如 alice）"><label for="kKey" class="sr-only">密钥（留空自动生成）</label><input id="kKey"
-                  placeholder="密钥（留空自动生成）"><button class="key-gen-btn" data-click-action="generateKey" title="随机生成">✨</button>
+                  maxlength="128" placeholder="名称（如 alice）"><label for="kKey" class="sr-only">密钥（留空自动生成）</label><input id="kKey"
+                  maxlength="8192" placeholder="密钥（留空自动生成）"><button class="key-gen-btn" data-click-action="generateKey" title="随机生成">✨</button>
               </div>
             </div>
             <div class="toolbar"><label for="kDesc" class="sr-only">描述</label><input id="kDesc"
-                placeholder="描述（可选）"><button class="btn" data-click-action="addKey">添加</button></div>
+                maxlength="1024" placeholder="描述（可选）"><button class="btn" data-click-action="addKey">添加</button></div>
             <div class="table-wrap">
               <table>
                 <thead>

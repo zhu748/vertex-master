@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/bsfdsagfadg/vertex/internal/config"
+	"github.com/bsfdsagfadg/vertex/internal/spool"
 )
 
 func TestAdminPutSettingsRejectsInvalidProxySettings(t *testing.T) {
@@ -53,6 +54,21 @@ func TestAdminPutSettingsRejectsInvalidProxySettings(t *testing.T) {
 			name:        "timeout below minimum",
 			body:        `{"settings":{"proxy_health_check_timeout_seconds":1}}`,
 			wantMessage: "proxy_health_check_timeout_seconds 必须在 2 到 60 之间",
+		},
+		{
+			name:        "retry amplification",
+			body:        `{"settings":{"max_retries":11}}`,
+			wantMessage: "max_retries 必须在 0 到 10 之间",
+		},
+		{
+			name:        "unbounded memory spool",
+			body:        `{"settings":{"max_spill_mb":0}}`,
+			wantMessage: "max_spill_mb 必须在 1 到 8192 之间",
+		},
+		{
+			name:        "candidate amplification",
+			body:        `{"settings":{"max_n":33}}`,
+			wantMessage: "max_n 必须在 1 到 32 之间",
 		},
 		{
 			name:        "failover below concurrency",
@@ -147,6 +163,31 @@ func TestAdminPutSettingsAcceptsValidProxySettings(t *testing.T) {
 		if got := raw[key]; got != want {
 			t.Errorf("%s 写盘值错误：got=%v want=%v", key, got, want)
 		}
+	}
+}
+
+func TestAdminPutSettingsUpdatesSpoolThresholdImmediately(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("VPROXY_CONFIG", path)
+	config.InvalidateCache()
+	t.Cleanup(config.InvalidateCache)
+	original := spool.MaxSpillBytes()
+	t.Cleanup(func() { spool.SetMaxSpillBytes(original) })
+
+	adm := newAdminSettingsTestHandler()
+	req := httptest.NewRequest(
+		http.MethodPut,
+		"/api/admin/settings",
+		bytes.NewBufferString(`{"settings":{"max_spill_mb":123}}`),
+	)
+	rec := httptest.NewRecorder()
+	adm.adminPutSettings(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("更新 max_spill_mb status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := spool.MaxSpillBytes(); got != 123<<20 {
+		t.Fatalf("spool threshold=%d, want %d", got, 123<<20)
 	}
 }
 

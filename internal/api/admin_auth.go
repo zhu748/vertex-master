@@ -324,13 +324,11 @@ func EnsureAdminPassword() {
 		log.Printf("[Admin] 写入管理员密码到 config.json 失败：%v", err)
 		return
 	}
-	bar := strings.Repeat("=", 60)
-	log.Printf("%s", bar)
-	log.Printf("[Admin] 首次启动，已自动生成管理员密码：")
-	log.Printf("[Admin]     密码: %s", pw)
-	log.Printf("[Admin]     访问: http://<host>:<port>/admin")
-	log.Printf("[Admin]     密码已写入 config/config.json，登录后可在面板修改")
-	log.Printf("%s", bar)
+	// 日志会持久化并可能被面板读取，不能把管理员凭据写进去。
+	log.Printf(
+		"[Admin] 首次启动已自动生成管理员密码并写入 %s；请从受保护的配置文件读取，登录后及时修改",
+		config.ConfigPath(),
+	)
 }
 
 func (adm *AdminHandler) adminLogin(w http.ResponseWriter, r *http.Request) {

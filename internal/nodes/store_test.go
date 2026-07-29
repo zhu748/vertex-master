@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/bsfdsagfadg/vertex/internal/config"
+	"github.com/bsfdsagfadg/vertex/internal/db"
 )
 
 var (
@@ -887,6 +888,46 @@ func TestEnableNode(t *testing.T) {
 	ok = EnableNode("nonexistent")
 	if ok {
 		t.Errorf("Expected EnableNode to return false for nonexistent node")
+	}
+}
+
+func TestNodeMutationsReportPersistenceFailureAndRollBack(t *testing.T) {
+	db.CloseDB()
+	if err := db.InitDB(filepath.Join(t.TempDir(), "nodes.db")); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(db.CloseDB)
+	resetState()
+	t.Cleanup(resetState)
+
+	const uri = "http://rollback.invalid:8080"
+	if err := MergeNodes([]Node{{
+		RawURI: uri, Name: "rollback", Disabled: true,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	database := db.CurrentDB()
+	if database == nil {
+		t.Fatal("test database not initialized")
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if enabled, err := EnableNodeWithError(uri); err == nil || enabled {
+		t.Fatalf("enable after DB close = (%v, %v), want persistence error", enabled, err)
+	}
+	loaded := LoadNodes()
+	if len(loaded) != 1 || !loaded[0].Disabled {
+		t.Fatalf("failed enable must preserve disabled state: %#v", loaded)
+	}
+
+	if deleted, err := DeleteNodeWithError(uri); err == nil || deleted {
+		t.Fatalf("delete after DB close = (%v, %v), want persistence error", deleted, err)
+	}
+	loaded = LoadNodes()
+	if len(loaded) != 1 || loaded[0].RawURI != uri {
+		t.Fatalf("failed delete must restore node: %#v", loaded)
 	}
 }
 

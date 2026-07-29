@@ -109,6 +109,13 @@ func newSSEWriter(w http.ResponseWriter, contentType string) *sseWriter {
 	if flusher != nil {
 		sw.flush = flusher.Flush
 	}
+	controller := http.NewResponseController(w)
+	sw.refreshWriteDeadline = func() {
+		// A sliding deadline protects the global upstream concurrency gate from
+		// authenticated clients that stop reading a long-lived stream. Real
+		// net/http writers support this; wrappers/tests may report unsupported.
+		_ = controller.SetWriteDeadline(time.Now().Add(sseWriteTimeout))
+	}
 	return sw
 }
 

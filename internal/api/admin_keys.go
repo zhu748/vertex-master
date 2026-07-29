@@ -70,6 +70,10 @@ func (adm *AdminHandler) adminAddKey(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, adminErr("描述不能包含换行符"))
 		return
 	}
+	if err := validateAPIKeyFields(name, key, description); err != nil {
+		writeJSON(w, http.StatusBadRequest, adminErr(err.Error()))
+		return
+	}
 	if err := adm.keys.Add(name, key, description); err != nil {
 		writeJSON(w, http.StatusInternalServerError, adminErr("写入密钥失败 (failed to write keys)"))
 		return

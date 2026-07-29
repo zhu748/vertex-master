@@ -317,15 +317,11 @@ func (g *GeminiHandler) geminiFakeStream(ctx context.Context, sw *sseWriter, mod
 		resp,
 		transform.AssistantPrefillFromPayload(body),
 	)
-	text := geminiResponseText(resp)
+	cleanGeminiFinishReason(resp)
+	cleanGeminiPromptFeedback(resp)
+	rewriteGeminiIDs(resp, generateVPSuffix())
 	out := completeProtocolUsageWithCountTokens(ctx, g.vc, model, body, outputFromGeminiChunk(resp))
-	chunks := splitIntoRuneChunks(text)
-	for i, piece := range chunks {
-		cand := map[string]any{"index": 0, "content": map[string]any{"role": "model", "parts": []any{map[string]any{"text": piece}}}}
-		if i == len(chunks)-1 {
-			cand["finishReason"] = "STOP"
-		}
-		chunk := map[string]any{"candidates": []any{cand}}
+	for _, chunk := range geminiFakeStreamFrames(resp) {
 		if !sw.writeData(chunk) {
 			return
 		}
@@ -337,6 +333,94 @@ func (g *GeminiHandler) geminiFakeStream(ctx context.Context, sw *sseWriter, mod
 		applyGeminiUsage(out, usageChunk)
 		_ = sw.writeData(usageChunk)
 	}
+}
+
+func geminiFakeStreamFrames(resp map[string]any) []map[string]any {
+	candidates, _ := resp["candidates"].([]any)
+	frames := make([]map[string]any, 0, fakeStreamTargetChunks)
+	for candidateIndex, rawCandidate := range candidates {
+		candidate, ok := rawCandidate.(map[string]any)
+		if !ok {
+			continue
+		}
+		content, _ := candidate["content"].(map[string]any)
+		role := stringValue(content["role"])
+		if role == "" {
+			role = "model"
+		}
+		start := len(frames)
+		for _, rawPart := range anySlice(content["parts"]) {
+			part, ok := rawPart.(map[string]any)
+			if !ok {
+				continue
+			}
+			text, hasText := part["text"].(string)
+			textChunks := splitIntoRuneChunks(text)
+			if !hasText || len(textChunks) == 0 {
+				frames = append(frames, geminiFakePartFrame(candidateIndex, role, part))
+				continue
+			}
+			for _, piece := range textChunks {
+				partChunk := make(map[string]any, len(part))
+				for key, value := range part {
+					partChunk[key] = value
+				}
+				partChunk["text"] = piece
+				frames = append(frames, geminiFakePartFrame(candidateIndex, role, partChunk))
+			}
+		}
+		if len(frames) == start {
+			frames = append(frames, map[string]any{"candidates": []any{map[string]any{
+				"index": candidateIndex,
+				"content": map[string]any{
+					"role": role, "parts": []any{},
+				},
+			}}})
+		}
+
+		finalCandidate := firstGeminiCandidate(frames[len(frames)-1])
+		for key, value := range candidate {
+			if key != "content" && key != "index" {
+				finalCandidate[key] = value
+			}
+		}
+		if originalIndex, exists := candidate["index"]; exists {
+			finalCandidate["index"] = originalIndex
+		}
+		for key, value := range content {
+			if key != "parts" && key != "role" {
+				finalCandidate["content"].(map[string]any)[key] = value
+			}
+		}
+	}
+
+	topMetadata := make(map[string]any, 5)
+	for _, key := range []string{
+		"createTime", "modelVersion", "responseId", "promptFeedback", "modelStatus",
+	} {
+		if value, exists := resp[key]; exists {
+			topMetadata[key] = value
+		}
+	}
+	if len(topMetadata) > 0 {
+		if len(frames) == 0 {
+			frames = append(frames, topMetadata)
+		} else {
+			for key, value := range topMetadata {
+				frames[len(frames)-1][key] = value
+			}
+		}
+	}
+	return frames
+}
+
+func geminiFakePartFrame(candidateIndex int, role string, part map[string]any) map[string]any {
+	return map[string]any{"candidates": []any{map[string]any{
+		"index": candidateIndex,
+		"content": map[string]any{
+			"role": role, "parts": []any{part},
+		},
+	}}}
 }
 
 func (g *GeminiHandler) handleCountTokens(w http.ResponseWriter, r *http.Request, model string) {

@@ -483,8 +483,8 @@ func TestToolCallNameResolution_PositionalFallback(t *testing.T) {
 	}
 }
 
-func TestEmptyToolCallGuard(t *testing.T) {
-	// 空 name 的 tool_call 应被跳过（守卫）。
+func TestEmptyToolCallRejected(t *testing.T) {
+	// 空 name 的 tool_call 不能静默消失，否则后续 tool_result 会与历史错位。
 	body := map[string]any{
 		"model": "m",
 		"messages": []any{
@@ -494,12 +494,82 @@ func TestEmptyToolCallGuard(t *testing.T) {
 			}},
 		},
 	}
-	_, gemini, _ := ConvertChatRequest(body, config.StaticProvider(config.DefaultConfig()))
-	contents := gemini["contents"].([]any)
-	for _, c := range contents {
-		if cm := c.(map[string]any); cm["role"] == "model" {
-			t.Errorf("空 name tool_call 应被跳过，不应产生 model content: %v", cm)
-		}
+	if _, _, err := ConvertChatRequest(
+		body,
+		config.StaticProvider(config.DefaultConfig()),
+	); err == nil {
+		t.Fatal("空 name tool_call 必须返回参数错误")
+	}
+}
+
+func TestConvertChatRequestRejectsInvalidControls(t *testing.T) {
+	tests := []struct {
+		name   string
+		update func(map[string]any)
+	}{
+		{
+			name: "non-array tools",
+			update: func(body map[string]any) {
+				body["tools"] = "drop-me"
+			},
+		},
+		{
+			name: "malformed tool",
+			update: func(body map[string]any) {
+				body["tools"] = []any{
+					map[string]any{"type": "function", "function": map[string]any{}},
+				}
+			},
+		},
+		{
+			name: "unknown tool choice",
+			update: func(body map[string]any) {
+				body["tool_choice"] = "sometimes"
+			},
+		},
+		{
+			name: "mixed stop array",
+			update: func(body map[string]any) {
+				body["stop"] = []any{"valid", float64(42)}
+			},
+		},
+		{
+			name: "non-object response format",
+			update: func(body map[string]any) {
+				body["response_format"] = "json"
+			},
+		},
+		{
+			name: "json schema missing schema",
+			update: func(body map[string]any) {
+				body["response_format"] = map[string]any{
+					"type":        "json_schema",
+					"json_schema": map[string]any{"name": "answer"},
+				}
+			},
+		},
+		{
+			name: "unknown response format",
+			update: func(body map[string]any) {
+				body["response_format"] = map[string]any{"type": "future_format"}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := map[string]any{
+				"model":    "m",
+				"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+			}
+			test.update(body)
+			if _, _, err := ConvertChatRequest(
+				body,
+				config.StaticProvider(config.DefaultConfig()),
+			); err == nil {
+				t.Fatal("无效控制字段必须返回参数错误")
+			}
+		})
 	}
 }
 

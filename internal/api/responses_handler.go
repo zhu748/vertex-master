@@ -169,10 +169,10 @@ func responsesToChatRequest(body map[string]any) (map[string]any, error) {
 			})
 			pendingToolCalls = nil
 		}
-		for _, raw := range value {
+		for itemIndex, raw := range value {
 			item, ok := raw.(map[string]any)
 			if !ok {
-				continue
+				return nil, fmt.Errorf("input[%d] must be an object", itemIndex)
 			}
 			typ := stringValue(item["type"])
 			switch typ {
@@ -182,6 +182,12 @@ func responsesToChatRequest(body map[string]any) (map[string]any, error) {
 					id = stringValue(item["id"])
 				}
 				name := stringValue(item["name"])
+				if id == "" {
+					return nil, fmt.Errorf("input[%d] function_call is missing call_id", itemIndex)
+				}
+				if name == "" {
+					return nil, fmt.Errorf("input[%d] function_call is missing name", itemIndex)
+				}
 				if namespace := stringValue(item["namespace"]); namespace != "" {
 					name = flattenResponsesToolName(namespace, name)
 				}
@@ -192,6 +198,18 @@ func responsesToChatRequest(body map[string]any) (map[string]any, error) {
 					},
 				})
 			case "function_call_output":
+				if stringValue(item["call_id"]) == "" {
+					return nil, fmt.Errorf(
+						"input[%d] function_call_output is missing call_id",
+						itemIndex,
+					)
+				}
+				if _, exists := item["output"]; !exists {
+					return nil, fmt.Errorf(
+						"input[%d] function_call_output is missing output",
+						itemIndex,
+					)
+				}
 				flushToolCalls()
 				messages = append(messages, map[string]any{
 					"role": "tool", "tool_call_id": item["call_id"], "content": jsonString(item["output"]),
@@ -203,9 +221,12 @@ func responsesToChatRequest(body map[string]any) (map[string]any, error) {
 				if role == "" {
 					role = "user"
 				}
+				if _, exists := item["content"]; !exists {
+					return nil, fmt.Errorf("input[%d] message is missing content", itemIndex)
+				}
 				content, err := responseContentToChat(item["content"])
 				if err != nil {
-					return nil, err
+					return nil, fmt.Errorf("input[%d]: %w", itemIndex, err)
 				}
 				if explicitRole == role && reusableResponsesMessage(item, content) {
 					// The decoded request is read-only for the remainder of the
@@ -218,6 +239,12 @@ func responsesToChatRequest(body map[string]any) (map[string]any, error) {
 			case "reasoning":
 				// Codex 会把上一轮 reasoning item 放回 input。Gemini 不接受该
 				// Responses 专用项，但它不应打断相邻的并行 function_call 分组。
+			default:
+				return nil, fmt.Errorf(
+					"input[%d] has unsupported item type %q",
+					itemIndex,
+					typ,
+				)
 			}
 		}
 		flushToolCalls()
@@ -268,10 +295,10 @@ func convertResponsesTools(raw any) ([]any, map[string]responsesNamespacedTool, 
 		return nil
 	}
 
-	for _, rawTool := range rawTools {
+	for toolIndex, rawTool := range rawTools {
 		tool, _ := rawTool.(map[string]any)
 		if tool == nil {
-			continue
+			return nil, nil, fmt.Errorf("tools[%d] must be an object", toolIndex)
 		}
 		switch typ := stringValue(tool["type"]); typ {
 		case "function":
@@ -286,10 +313,14 @@ func convertResponsesTools(raw any) ([]any, map[string]responsesNamespacedTool, 
 			// Codex 可能只发送 namespace 声明而不附带子工具（例如内置
 			// collaboration）。这种声明无法由 Gemini 调用，安全忽略即可。
 			nestedTools := anySlice(tool["tools"])
-			for _, rawNested := range nestedTools {
+			for nestedIndex, rawNested := range nestedTools {
 				nested, _ := rawNested.(map[string]any)
 				if nested == nil {
-					continue
+					return nil, nil, fmt.Errorf(
+						"tools[%d].tools[%d] must be an object",
+						toolIndex,
+						nestedIndex,
+					)
 				}
 				name := stringValue(nested["name"])
 				flatName := flattenResponsesToolName(namespace, name)
@@ -351,19 +382,26 @@ func responseContentToChat(v any) (any, error) {
 	if s, ok := v.(string); ok {
 		return s, nil
 	}
-	rawContent := anySlice(v)
+	rawContent, ok := v.([]any)
+	if !ok {
+		return nil, fmt.Errorf("message content must be a string or array")
+	}
 	if responsesTextContentCanPassThrough(rawContent) {
 		return rawContent, nil
 	}
 	content := make([]any, 0, len(rawContent))
-	for _, raw := range rawContent {
+	for contentIndex, raw := range rawContent {
 		item, _ := raw.(map[string]any)
 		if item == nil {
-			continue
+			return nil, fmt.Errorf("content[%d] must be an object", contentIndex)
 		}
 		switch stringValue(item["type"]) {
 		case "input_text", "output_text", "text":
-			content = append(content, map[string]any{"type": "text", "text": item["text"]})
+			text, ok := item["text"].(string)
+			if !ok {
+				return nil, fmt.Errorf("content[%d].text must be a string", contentIndex)
+			}
+			content = append(content, map[string]any{"type": "text", "text": text})
 		case "input_image":
 			url := stringValue(item["image_url"])
 			if url == "" {
@@ -373,7 +411,11 @@ func responseContentToChat(v any) (any, error) {
 				"type": "image_url", "image_url": map[string]any{"url": url, "detail": item["detail"]},
 			})
 		default:
-			return nil, fmt.Errorf("unsupported Responses content type %q", stringValue(item["type"]))
+			return nil, fmt.Errorf(
+				"content[%d] has unsupported Responses type %q",
+				contentIndex,
+				stringValue(item["type"]),
+			)
 		}
 	}
 	return content, nil
@@ -420,6 +462,9 @@ func responsesTextContentCanPassThrough(content []any) bool {
 		}
 		switch stringValue(item["type"]) {
 		case "input_text", "output_text", "text":
+			if _, ok := item["text"].(string); !ok {
+				return false
+			}
 		default:
 			return false
 		}
@@ -552,11 +597,14 @@ func fillResponsesResponse(
 
 func fillResponsesResult(response *responsesResponse, out protocolOutput, output []any) {
 	status := "completed"
-	if out.Finish == "length" {
+	incompleteReason := responsesIncompleteReason(out.Finish)
+	if incompleteReason != "" {
 		status = "incomplete"
 	}
 	if output == nil {
 		output = responseOutputItems(out)
+	} else {
+		setResponsesOutputItemStatus(output, responsesOutputItemStatus(out.Finish))
 	}
 	response.completedAt = time.Now().Unix()
 	response.CompletedAt = &response.completedAt
@@ -577,8 +625,41 @@ func fillResponsesResult(response *responsesResponse, out protocolOutput, output
 	}
 	response.Usage = &response.usage
 	if status == "incomplete" {
-		response.incompleteDetails.Reason = "max_output_tokens"
+		response.incompleteDetails.Reason = incompleteReason
 		response.IncompleteDetails = &response.incompleteDetails
+	}
+}
+
+func responsesIncompleteReason(finish string) string {
+	switch strings.ToLower(strings.TrimSpace(finish)) {
+	case "length", "max_tokens", "max_output_tokens":
+		return "max_output_tokens"
+	case "content_filter", "safety", "recitation", "prohibited_content", "blocklist", "spii":
+		return "content_filter"
+	default:
+		return ""
+	}
+}
+
+func responsesOutputItemStatus(finish string) string {
+	if responsesIncompleteReason(finish) != "" {
+		return "incomplete"
+	}
+	return "completed"
+}
+
+func setResponsesOutputItemStatus(output []any, status string) {
+	for _, rawItem := range output {
+		switch item := rawItem.(type) {
+		case *responsesCompletedTextMessageItem:
+			item.Status = status
+		case *responsesOutputTextMessageItem:
+			item.Status = status
+		case *responsesFunctionCallItem:
+			item.Status = status
+		case map[string]any:
+			item["status"] = status
+		}
 	}
 }
 
@@ -613,6 +694,7 @@ func cacheResponsesStaticJSON(value any) any {
 
 func responseOutputItems(out protocolOutput) []any {
 	textOutput := out.Text != "" || len(out.ToolCalls) == 0
+	status := responsesOutputItemStatus(out.Finish)
 	capacity := len(out.ToolCalls)
 	if textOutput {
 		capacity++
@@ -623,7 +705,7 @@ func responseOutputItems(out protocolOutput) []any {
 			Content: [1]responsesOutputTextPart{{
 				Annotations: []any{}, Logprobs: []any{}, Text: out.Text, Type: "output_text",
 			}},
-			ID: "msg_" + reqID24(), Role: "assistant", Status: "completed", Type: "message",
+			ID: "msg_" + reqID24(), Role: "assistant", Status: status, Type: "message",
 		})
 	}
 	for _, tc := range out.ToolCalls {
@@ -633,7 +715,7 @@ func responseOutputItems(out protocolOutput) []any {
 			ID:        "fc_" + reqID24(),
 			Name:      tc.Name,
 			Namespace: tc.Namespace,
-			Status:    "completed",
+			Status:    status,
 			Type:      "function_call",
 		})
 	}
@@ -1019,7 +1101,7 @@ func (s *responsesStreamState) emitTextBlockDone(text string) {
 			Content: events.itemContent[:],
 			ID:      s.textID,
 			Role:    "assistant",
-			Status:  "completed",
+			Status:  responsesOutputItemStatus(s.out.Finish),
 			Type:    "message",
 		},
 		OutputIndex:    s.outputIndex,
@@ -1163,7 +1245,8 @@ func (s *responsesStreamState) consume(chunk protocolOutput) {
 		s.emitFunctionCallItem("response.output_item.added", "in_progress", itemID, tc, "")
 		s.emitFunctionCallArguments("response.function_call_arguments.delta", itemID, tc.Arguments)
 		s.emitFunctionCallArguments("response.function_call_arguments.done", itemID, tc.Arguments)
-		s.emitFunctionCallItem("response.output_item.done", "completed", itemID, tc, tc.Arguments)
+		itemStatus := responsesOutputItemStatus(s.out.Finish)
+		s.emitFunctionCallItem("response.output_item.done", itemStatus, itemID, tc, tc.Arguments)
 		if s.streamFailed() {
 			return
 		}
@@ -1173,7 +1256,7 @@ func (s *responsesStreamState) consume(chunk protocolOutput) {
 			ID:        itemID,
 			Name:      tc.Name,
 			Namespace: tc.Namespace,
-			Status:    "completed",
+			Status:    itemStatus,
 			Type:      "function_call",
 		})
 		s.out.ToolCalls = append(s.out.ToolCalls, tc)
@@ -1195,7 +1278,7 @@ func (s *responsesStreamState) closeText() {
 		Content: [1]responsesOutputTextPart{{
 			Annotations: []any{}, Logprobs: []any{}, Text: text, Type: "output_text",
 		}},
-		ID: s.textID, Role: "assistant", Status: "completed", Type: "message",
+		ID: s.textID, Role: "assistant", Status: responsesOutputItemStatus(s.out.Finish), Type: "message",
 	})
 	s.outputIndex++
 	s.textOpen = false

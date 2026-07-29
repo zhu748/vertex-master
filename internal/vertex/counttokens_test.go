@@ -21,6 +21,19 @@ import (
 
 var benchmarkTokenCountCacheKey tokenCountCacheKey //nolint:gochecknoglobals
 
+type resolvingCountConfig struct {
+	config.ConfigProvider
+	alias  string
+	target string
+}
+
+func (c resolvingCountConfig) ResolveModelName(model string) string {
+	if model == c.alias {
+		return c.target
+	}
+	return model
+}
+
 func BenchmarkMakeTokenCountCacheKey(b *testing.B) {
 	benchmarks := []struct {
 		name     string
@@ -276,6 +289,47 @@ func TestCountTokensUsesUpstreamOperation(t *testing.T) {
 	variables, _ := received["variables"].(map[string]any)
 	if variables["recaptchaToken"] != "test-recaptcha-token" {
 		t.Fatalf("CountTokens 请求缺少 recaptchaToken: %#v", variables)
+	}
+}
+
+func TestCountTokensResolvesModelAliasBeforeCacheAndUpstream(t *testing.T) {
+	oldURL := batchGraphqlURL
+	t.Cleanup(func() { batchGraphqlURL = oldURL })
+
+	var receivedModel any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var request map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&request)
+		if variables, ok := request["variables"].(map[string]any); ok {
+			receivedModel = variables["model"]
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"results":[{"data":{"ui":{"countTokensV2":{"totalTokens":9}}}}]}]`))
+	}))
+	defer upstream.Close()
+	batchGraphqlURL = upstream.URL
+
+	base := config.DefaultConfig()
+	base.ParallelPoolEnabled = false
+	cfg := resolvingCountConfig{
+		ConfigProvider: config.StaticProvider(base),
+		alias:          "story-fast",
+		target:         "gemini-3.6-flash",
+	}
+	client := NewVertexAIClient(cfg)
+	client.SetTokenPool(recaptcha.NewTokenPoolCustom(func(string) (string, error) {
+		return "test-recaptcha-token", nil
+	}))
+
+	contents := []any{map[string]any{
+		"role": "user", "parts": []any{map[string]any{"text": "alias-token-test"}},
+	}}
+	if got := client.CountTokens(context.Background(), "story-fast", contents); got != 9 {
+		t.Fatalf("CountTokens=%d, want 9", got)
+	}
+	if receivedModel != "gemini-3.6-flash" {
+		t.Fatalf("CountTokens 上游模型=%v, want gemini-3.6-flash", receivedModel)
 	}
 }
 

@@ -435,7 +435,11 @@ func (adm *AdminHandler) adminEnableNode(w http.ResponseWriter, r *http.Request)
 	if !adm.decodeAdminBody(w, r, &body) {
 		return
 	}
-	ok := nodes.EnableNode(body.RawURI)
+	ok, err := nodes.EnableNodeWithError(body.RawURI)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, adminErr("启用节点失败: "+err.Error()))
+		return
+	}
 	log.Printf("[Admin] [EnableNode] 启用节点 %s: %v", nodes.GetNodeName(body.RawURI), ok)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": ok})
 }
@@ -456,9 +460,19 @@ func (adm *AdminHandler) adminUseNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if body.RawURI == "" {
-		_ = config.WriteSettings(map[string]any{"active_node_uri": "", "parallel_pool_enabled": true})
+		if err := config.WriteSettings(map[string]any{
+			"active_node_uri": "", "parallel_pool_enabled": true,
+		}); err != nil {
+			writeJSON(w, http.StatusInternalServerError, adminErr("切换并发池失败: "+err.Error()))
+			return
+		}
 	} else {
-		_ = config.WriteSettings(map[string]any{"active_node_uri": body.RawURI, "parallel_pool_enabled": false})
+		if err := config.WriteSettings(map[string]any{
+			"active_node_uri": body.RawURI, "parallel_pool_enabled": false,
+		}); err != nil {
+			writeJSON(w, http.StatusInternalServerError, adminErr("切换活动节点失败: "+err.Error()))
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -485,8 +499,12 @@ func (adm *AdminHandler) adminDeleteNode(w http.ResponseWriter, r *http.Request)
 	if !adm.decodeAdminBody(w, r, &body) {
 		return
 	}
-	nodes.DeleteNode(body.RawURI)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	deleted, err := nodes.DeleteNodeWithError(body.RawURI)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, adminErr("删除节点失败: "+err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": deleted})
 }
 
 func (adm *AdminHandler) adminBatchDisableNodes(w http.ResponseWriter, r *http.Request) {

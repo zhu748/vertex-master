@@ -144,7 +144,14 @@ func WriteSettings(updates map[string]any) error {
 	path := configPath()
 	raw := map[string]any{}
 	if data, err := os.ReadFile(path); err == nil {
-		_ = json.Unmarshal(data, &raw)
+		if err := json.Unmarshal(data, &raw); err != nil {
+			return fmt.Errorf("解析现有配置 %s: %w", path, err)
+		}
+		if raw == nil {
+			return fmt.Errorf("解析现有配置 %s: 顶层必须是 JSON 对象", path)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("读取现有配置 %s: %w", path, err)
 	}
 	for k, v := range updates {
 		raw[k] = v
@@ -152,6 +159,9 @@ func WriteSettings(updates map[string]any) error {
 
 	clampIntSetting(raw, "parallel_pool_size", 1, 20)
 	clampIntSetting(raw, "parallel_pool_delay_ms", 100, 10000)
+	clampIntSetting(raw, "max_retries", 0, 10)
+	clampIntSetting(raw, "max_spill_mb", 1, 8192)
+	clampIntSetting(raw, "max_n", 1, 32)
 	clampIntSetting(raw, "max_request_mb", 1, 1024)
 	clampIntSetting(raw, "max_concurrent_requests", 1, 1000)
 	clampIntSetting(raw, "proxy_failover_max_attempts", 1, 100)
@@ -317,6 +327,13 @@ func Load() AppConfig {
 			}
 			normalize("parallel_pool_size", &cfg.ParallelPoolSize, 1, 20, 5)
 			normalize("parallel_pool_delay_ms", &cfg.ParallelPoolDelayMs, 100, 10000, 1000)
+			if cfg.MaxRetries < 0 || cfg.MaxRetries > 10 {
+				original := cfg.MaxRetries
+				cfg.MaxRetries = min(max(cfg.MaxRetries, 0), 10)
+				recordNormalization("max_retries", original, cfg.MaxRetries)
+			}
+			normalize("max_spill_mb", &cfg.MaxSpillMB, 1, 8192, 2048)
+			normalize("max_n", &cfg.MaxN, 1, 32, 8)
 			normalize("max_request_mb", &cfg.MaxRequestMB, 1, 1024, 64)
 			normalize("max_concurrent_requests", &cfg.MaxConcurrentRequests, 1, 1000, 16)
 			normalize("proxy_failover_max_attempts", &cfg.ProxyFailoverMaxAttempts, 1, 100, 30)

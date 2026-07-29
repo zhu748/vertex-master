@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -176,26 +175,14 @@ func (c *ChatHandler) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 func (c *ChatHandler) streamChatCompletions(ctx context.Context, w http.ResponseWriter, model string, geminiPayload map[string]any) {
 	requestID := reqID24()
 
-	flusher, canFlush := w.(http.Flusher)
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
-	sw := &sseWriter{w: w}
-	if canFlush {
-		sw.flush = flusher.Flush
-	}
+	sw := newSSEWriter(w, "text/event-stream")
 	clientDisconnected := false
 
 	write := func(line string) bool {
-		if _, err := io.WriteString(w, line); err != nil {
+		if !sw.write(line) {
 			clientDisconnected = true
 			log.Printf("[Server] [Stream] 请求ID=%s 客户端已主动断开连接", requestID)
 			return false
-		}
-		if canFlush {
-			flusher.Flush()
 		}
 		return true
 	}
@@ -268,13 +255,7 @@ func (c *ChatHandler) streamChatCompletions(ctx context.Context, w http.Response
 	}
 
 	writeSilent := func(line string) bool {
-		if _, err := io.WriteString(w, line); err != nil {
-			return false
-		}
-		if canFlush {
-			flusher.Flush()
-		}
-		return true
+		return sw.write(line)
 	}
 
 	if streamErrWritten {
@@ -347,39 +328,21 @@ func (c *ChatHandler) oaiFakeStream(ctx context.Context, w http.ResponseWriter, 
 	)
 	out := outputFromOAI(oai)
 	out.Text = contentText
-	applyOAIUsage(completeProtocolUsageWithCountTokens(ctx, c.vc, model, geminiPayload, out), oai)
+	out = completeProtocolUsageWithCountTokens(ctx, c.vc, model, geminiPayload, out)
+	applyOAIUsage(out, oai)
+	finishReason := out.Finish
+	if finishReason == "" {
+		finishReason = "stop"
+	}
 
 	createdTS := time.Now().Unix()
-	chunks := splitIntoRuneChunks(contentText)
-	if len(chunks) == 0 {
+	deltas := syntheticOAIStreamDeltas(out)
+	for i, delta := range deltas {
 		base := streamChunkBase(model, requestID)
 		base["created"] = createdTS
-		base["choices"] = []any{map[string]any{
-			"index":         0,
-			"delta":         map[string]any{"role": "assistant", "content": ""},
-			"finish_reason": "stop",
-		}}
-		if !sw.write(sseEvent(base)) {
-			return
-		}
-		if !writeOAIStreamUsage(sw, oai, model, requestID, createdTS) {
-			return
-		}
-		_ = sw.write("data: [DONE]\n\n")
-		return
-	}
-	for i, piece := range chunks {
-		base := streamChunkBase(model, requestID)
-		base["created"] = createdTS
-		var delta map[string]any
-		if i == 0 {
-			delta = map[string]any{"role": "assistant", "content": piece}
-		} else {
-			delta = map[string]any{"content": piece}
-		}
 		choice := map[string]any{"index": 0, "delta": delta}
-		if i == len(chunks)-1 {
-			choice["finish_reason"] = "stop"
+		if i == len(deltas)-1 {
+			choice["finish_reason"] = finishReason
 		}
 		base["choices"] = []any{choice}
 		if !sw.write(sseEvent(base)) {
@@ -410,15 +373,33 @@ func (c *ChatHandler) oaiAggregateStream(ctx context.Context, w http.ResponseWri
 	)
 	out := outputFromOAI(oai)
 	out.Text = contentText
-	applyOAIUsage(completeProtocolUsageWithCountTokens(ctx, c.vc, model, geminiPayload, out), oai)
+	out = completeProtocolUsageWithCountTokens(ctx, c.vc, model, geminiPayload, out)
+	applyOAIUsage(out, oai)
+	finishReason := out.Finish
+	if finishReason == "" {
+		finishReason = "stop"
+	}
 
 	createdTS := time.Now().Unix()
 	base := streamChunkBase(model, requestID)
 	base["created"] = createdTS
 
+	delta := map[string]any{"role": "assistant"}
+	if out.Text != "" {
+		delta["content"] = out.Text
+	}
+	if out.Reasoning != "" {
+		delta["reasoning_content"] = out.Reasoning
+	}
+	if toolCalls := protocolToolCallsToStreamDelta(out.ToolCalls); len(toolCalls) > 0 {
+		delta["tool_calls"] = toolCalls
+	}
+	if len(delta) == 1 {
+		delta["content"] = ""
+	}
 	choice := map[string]any{
 		"index": 0,
-		"delta": map[string]any{"role": "assistant", "content": contentText},
+		"delta": delta,
 	}
 	base["choices"] = []any{choice}
 	if !sw.write(sseEvent(base)) {
@@ -431,7 +412,7 @@ func (c *ChatHandler) oaiAggregateStream(ctx context.Context, w http.ResponseWri
 	choiceEnd := map[string]any{
 		"index":         0,
 		"delta":         map[string]any{},
-		"finish_reason": "stop",
+		"finish_reason": finishReason,
 	}
 	baseEnd["choices"] = []any{choiceEnd}
 	if !sw.write(sseEvent(baseEnd)) {
@@ -441,6 +422,47 @@ func (c *ChatHandler) oaiAggregateStream(ctx context.Context, w http.ResponseWri
 		return
 	}
 	_ = sw.write("data: [DONE]\n\n")
+}
+
+func syntheticOAIStreamDeltas(out protocolOutput) []map[string]any {
+	deltas := make([]map[string]any, 0, fakeStreamTargetChunks*2+1)
+	for _, piece := range splitIntoRuneChunks(out.Reasoning) {
+		deltas = append(deltas, map[string]any{"reasoning_content": piece})
+	}
+	for _, piece := range splitIntoRuneChunks(out.Text) {
+		deltas = append(deltas, map[string]any{"content": piece})
+	}
+	if toolCalls := protocolToolCallsToStreamDelta(out.ToolCalls); len(toolCalls) > 0 {
+		deltas = append(deltas, map[string]any{"tool_calls": toolCalls})
+	}
+	if len(deltas) == 0 {
+		deltas = append(deltas, map[string]any{"content": ""})
+	}
+	deltas[0]["role"] = "assistant"
+	return deltas
+}
+
+func protocolToolCallsToStreamDelta(toolCalls []protocolToolCall) []any {
+	if len(toolCalls) == 0 {
+		return nil
+	}
+	deltas := make([]any, 0, len(toolCalls))
+	for index, toolCall := range toolCalls {
+		id := toolCall.ID
+		if id == "" {
+			id = "call_" + reqID24()
+		}
+		deltas = append(deltas, map[string]any{
+			"index": index,
+			"id":    id,
+			"type":  "function",
+			"function": map[string]any{
+				"name":      toolCall.Name,
+				"arguments": toolCall.Arguments,
+			},
+		})
+	}
+	return deltas
 }
 
 // writeOAIStreamUsage 按 OpenAI 流式协议写出独立 usage 块。choices 必须为空，

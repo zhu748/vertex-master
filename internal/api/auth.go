@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"unicode/utf8"
 )
 
 type apiKeySnapshot struct {
@@ -23,8 +24,12 @@ type APIKeyManager struct {
 }
 
 const (
-	environmentAPIKeyName = "environment"
-	examplePlaceholderKey = "sk-your-key-here"
+	environmentAPIKeyName  = "environment"
+	examplePlaceholderKey  = "sk-your-key-here"
+	maxAPIKeyNameRunes     = 128
+	maxAPIKeyValueBytes    = 8 << 10
+	maxAPIKeyDescRunes     = 1024
+	maxAPIKeyFileLineBytes = 64 << 10
 )
 
 // NewAPIKeyManager 构造管理器（密钥文件路径同 config 的解析策略）。
@@ -65,6 +70,7 @@ func (m *APIKeyManager) loadKeysLocked() bool {
 	if err == nil {
 		defer func() { _ = f.Close() }()
 		sc := bufio.NewScanner(f)
+		sc.Buffer(make([]byte, 4096), maxAPIKeyFileLineBytes)
 		for sc.Scan() {
 			line := strings.TrimSpace(sc.Text())
 			if line == "" || strings.HasPrefix(line, "#") {
@@ -184,6 +190,27 @@ func isPlaceholderAPIKey(key string) bool {
 	return strings.EqualFold(strings.TrimSpace(key), examplePlaceholderKey)
 }
 
+func validateAPIKeyFields(name, key, description string) error {
+	if name == "" || key == "" {
+		return fmt.Errorf("名称和密钥不能为空")
+	}
+	if strings.Contains(name, ":") || strings.Contains(key, ":") ||
+		strings.ContainsAny(name, "\r\n") || strings.ContainsAny(key, "\r\n") ||
+		strings.ContainsAny(description, "\r\n") {
+		return fmt.Errorf("名称和密钥不能包含冒号或换行符，描述不能包含换行符")
+	}
+	if utf8.RuneCountInString(name) > maxAPIKeyNameRunes {
+		return fmt.Errorf("名称不能超过 %d 个字符", maxAPIKeyNameRunes)
+	}
+	if len(key) > maxAPIKeyValueBytes {
+		return fmt.Errorf("密钥不能超过 %d 字节", maxAPIKeyValueBytes)
+	}
+	if utf8.RuneCountInString(description) > maxAPIKeyDescRunes {
+		return fmt.Errorf("描述不能超过 %d 个字符", maxAPIKeyDescRunes)
+	}
+	return nil
+}
+
 // readEntries 解析 api_keys.txt 为有序条目列表（跳过空行/注释/字段不足的行）。
 func (m *APIKeyManager) readEntries() ([]apiKeyEntry, error) {
 	f, err := os.Open(m.keysFile)
@@ -197,6 +224,7 @@ func (m *APIKeyManager) readEntries() ([]apiKeyEntry, error) {
 
 	var out []apiKeyEntry
 	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 4096), maxAPIKeyFileLineBytes)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -256,6 +284,20 @@ func (m *APIKeyManager) writeEntries(entries []apiKeyEntry) error {
 	return nil
 }
 
+func (m *APIKeyManager) publishEntriesSnapshot(entries []apiKeyEntry) {
+	keys := make(map[string]string, len(entries)+1)
+	for _, entry := range entries {
+		if entry.Key == "" || isPlaceholderAPIKey(entry.Key) {
+			continue
+		}
+		keys[entry.Key] = entry.Name
+	}
+	if envKey := strings.TrimSpace(os.Getenv("VPROXY_API_KEY")); envKey != "" {
+		keys[envKey] = environmentAPIKeyName
+	}
+	m.snapshot.Store(&apiKeySnapshot{keys: keys})
+}
+
 // List 返回文件密钥与环境变量托管密钥。环境变量密钥只用于生成服务端脱敏值，
 // 管理 API 不应将其明文返回给浏览器。
 func (m *APIKeyManager) List() ([]apiKeyEntry, error) {
@@ -291,13 +333,8 @@ func (m *APIKeyManager) Add(name, key, description string) error {
 	name = strings.TrimSpace(name)
 	key = strings.TrimSpace(key)
 	description = strings.TrimSpace(description)
-	if name == "" || key == "" {
-		return fmt.Errorf("API key name and value are required")
-	}
-	if strings.Contains(name, ":") || strings.Contains(key, ":") ||
-		strings.ContainsAny(name, "\r\n") || strings.ContainsAny(key, "\r\n") ||
-		strings.ContainsAny(description, "\r\n") {
-		return fmt.Errorf("API key fields contain unsupported delimiters")
+	if err := validateAPIKeyFields(name, key, description); err != nil {
+		return err
 	}
 	if isPlaceholderAPIKey(key) {
 		return fmt.Errorf("示例密钥不能作为有效 API Key")
@@ -318,7 +355,7 @@ func (m *APIKeyManager) Add(name, key, description string) error {
 	if errW := m.writeEntries(kept); errW != nil {
 		return errW
 	}
-	m.loadKeysLocked()
+	m.publishEntriesSnapshot(kept)
 	return nil
 }
 
@@ -343,6 +380,6 @@ func (m *APIKeyManager) Delete(name string) (bool, error) {
 	if errW := m.writeEntries(kept); errW != nil {
 		return false, errW
 	}
-	m.loadKeysLocked()
+	m.publishEntriesSnapshot(kept)
 	return true, nil
 }

@@ -429,6 +429,138 @@ func TestCompatibilityEndpoints(t *testing.T) {
 		}
 	})
 
+	t.Run("chat_fake_stream_preserves_length_finish_reason", func(t *testing.T) {
+		fx := newTestServer(t)
+		truncatedUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			_, _ = w.Write([]byte(
+				`[{"results":[{"data":{"ui":{"streamGenerateContentAnonymous":` +
+					`{"candidates":[{"content":{"parts":[{"text":"partial"}],"role":"model"},` +
+					`"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":2,` +
+					`"candidatesTokenCount":3,"totalTokenCount":5}}}}}]}]`,
+			))
+		}))
+		defer truncatedUpstream.Close()
+		vertex.SetBatchGraphqlURL(truncatedUpstream.URL)
+		t.Cleanup(func() {
+			vertex.SetBatchGraphqlURL(fx.mockUpstream.URL + "/batchGraphql?key=test&prettyPrint=false")
+		})
+
+		resp := doPost(t, fx.server.URL+"/v1/chat/completions", "sk-test-key", map[string]any{
+			"model": "fake-gemini-2.5-flash",
+			"messages": []any{map[string]any{
+				"role": "user", "content": "Write a long answer",
+			}},
+			"stream": true,
+		})
+		defer resp.Body.Close()
+		data, _ := io.ReadAll(resp.Body)
+		stream := string(data)
+		if !strings.Contains(stream, `"finish_reason":"length"`) {
+			t.Fatalf("假流式必须保留上游 MAX_TOKENS，got %s", stream)
+		}
+		if strings.Contains(stream, `"finish_reason":"stop"`) {
+			t.Fatalf("截断响应不得伪装为正常结束，got %s", stream)
+		}
+	})
+
+	t.Run("chat_fake_stream_preserves_tool_calls", func(t *testing.T) {
+		fx := newTestServer(t)
+		toolUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			_, _ = w.Write([]byte(
+				`[{"results":[{"data":{"ui":{"streamGenerateContentAnonymous":` +
+					`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"lookup",` +
+					`"args":{"q":"x"}}}],"role":"model"},"finishReason":"STOP"}],` +
+					`"usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":3,` +
+					`"totalTokenCount":5}}}}}]}]`,
+			))
+		}))
+		defer toolUpstream.Close()
+		vertex.SetBatchGraphqlURL(toolUpstream.URL)
+		t.Cleanup(func() {
+			vertex.SetBatchGraphqlURL(fx.mockUpstream.URL + "/batchGraphql?key=test&prettyPrint=false")
+		})
+
+		resp := doPost(t, fx.server.URL+"/v1/chat/completions", "sk-test-key", map[string]any{
+			"model": "fake-gemini-2.5-flash",
+			"messages": []any{map[string]any{
+				"role": "user", "content": "Use lookup",
+			}},
+			"tools": []any{map[string]any{
+				"type": "function",
+				"function": map[string]any{
+					"name": "lookup",
+					"parameters": map[string]any{
+						"type": "object",
+					},
+				},
+			}},
+			"stream": true,
+		})
+		defer resp.Body.Close()
+		data, _ := io.ReadAll(resp.Body)
+		stream := string(data)
+		for _, want := range []string{
+			`"tool_calls":[`,
+			`"name":"lookup"`,
+			`"arguments":"{\"q\":\"x\"}"`,
+			`"finish_reason":"tool_calls"`,
+		} {
+			if !strings.Contains(stream, want) {
+				t.Fatalf("假流式丢失工具语义 %q: %s", want, stream)
+			}
+		}
+		if strings.Contains(stream, `"finish_reason":"stop"`) {
+			t.Fatalf("工具响应不得伪装为普通文本结束: %s", stream)
+		}
+	})
+
+	t.Run("gemini_fake_stream_preserves_parts_and_finish_reason", func(t *testing.T) {
+		fx := newTestServer(t)
+		partsUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			_, _ = w.Write([]byte(
+				`[{"results":[{"data":{"ui":{"streamGenerateContentAnonymous":` +
+					`{"candidates":[{"content":{"parts":[{"text":"planning","thought":true,` +
+					`"thoughtSignature":"sig"},{"functionCall":{"name":"lookup","args":{"q":"x"}}}],` +
+					`"role":"model"},"finishReason":"MAX_TOKENS"}],"usageMetadata":` +
+					`{"promptTokenCount":2,"candidatesTokenCount":3,"totalTokenCount":5}}}}}]}]`,
+			))
+		}))
+		defer partsUpstream.Close()
+		vertex.SetBatchGraphqlURL(partsUpstream.URL)
+		t.Cleanup(func() {
+			vertex.SetBatchGraphqlURL(fx.mockUpstream.URL + "/batchGraphql?key=test&prettyPrint=false")
+		})
+
+		resp := doPost(
+			t,
+			fx.server.URL+"/v1beta/models/fake-gemini-2.5-flash:streamGenerateContent?alt=sse",
+			"sk-test-key",
+			map[string]any{"contents": []any{map[string]any{
+				"role": "user", "parts": []any{map[string]any{"text": "Use lookup"}},
+			}}},
+		)
+		defer resp.Body.Close()
+		data, _ := io.ReadAll(resp.Body)
+		stream := string(data)
+		for _, want := range []string{
+			`"thought":true`,
+			`"thoughtSignature":"sig"`,
+			`"functionCall"`,
+			`"name":"lookup"`,
+			`"finishReason":"MAX_TOKENS"`,
+		} {
+			if !strings.Contains(stream, want) {
+				t.Fatalf("Gemini 假流丢失响应部件 %q: %s", want, stream)
+			}
+		}
+		if strings.Contains(stream, `"finishReason":"STOP"`) {
+			t.Fatalf("Gemini 截断响应不得伪装为 STOP: %s", stream)
+		}
+	})
+
 	t.Run("anthropic_x_api_key", func(t *testing.T) {
 		fx := newTestServer(t)
 		resp := postWithHeader(t, fx.server.URL+"/v1/messages", "x-api-key", "sk-test-key", map[string]any{

@@ -229,6 +229,30 @@ func TestAdminAddKeyAcceptsKeyWithoutSKPrefix(t *testing.T) {
 	}
 }
 
+func TestAdminAddKeyRejectsOversizedKey(t *testing.T) {
+	t.Setenv("VPROXY_API_KEYS", filepath.Join(t.TempDir(), "api_keys.txt"))
+	t.Setenv("VPROXY_API_KEY", "")
+	keys := NewAPIKeyManager()
+	adm := &AdminHandler{handler: handler{keys: keys}} //nolint:exhaustruct
+	body, err := json.Marshal(map[string]string{
+		"name": "oversized",
+		"key":  strings.Repeat("k", maxAPIKeyValueBytes+1),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+
+	adm.adminAddKey(rec, httptest.NewRequest(http.MethodPost, "/api/admin/keys", bytes.NewReader(body)))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("oversized key status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if keys.Count() != 0 {
+		t.Fatal("rejected key must not enter the active snapshot")
+	}
+}
+
 func TestAdminGetKeysShowsMaskedEnvironmentKeyAndHidesPlaceholder(t *testing.T) {
 	keysFile := filepath.Join(t.TempDir(), "api_keys.txt")
 	if err := os.WriteFile(

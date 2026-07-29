@@ -614,11 +614,16 @@ func updateSingleNodeHealthUnsafe(uri string, h *NodeHealth) {
 }
 
 func updateSingleNodeDisabledUnsafe(uri string, disabled bool) {
+	_ = updateSingleNodeDisabledWithErrorUnsafe(uri, disabled)
+}
+
+func updateSingleNodeDisabledWithErrorUnsafe(uri string, disabled bool) error {
 	database := db.CurrentDB()
 	if database == nil {
-		return
+		return nil
 	}
-	_, _ = database.Exec("UPDATE nodes SET disabled = ? WHERE raw_uri = ?", disabled, uri)
+	_, err := database.Exec("UPDATE nodes SET disabled = ? WHERE raw_uri = ?", disabled, uri)
+	return err
 }
 
 type TestProgress struct {
@@ -1491,6 +1496,14 @@ func DeleteSubscriptionNodes(sourceID int64) (int, error) {
 }
 
 func DeleteNode(uri string) {
+	if _, err := DeleteNodeWithError(uri); err != nil {
+		log.Printf("[Nodes] 删除节点持久化失败，已回滚内存状态: %v", err)
+	}
+}
+
+// DeleteNodeWithError removes a node atomically from memory and persistence.
+// The bool reports whether a concrete node existed.
+func DeleteNodeWithError(uri string) (bool, error) {
 	mu.Lock()
 	ensureLoaded()
 	index, exists := nodeIndexByURI[uri]
@@ -1513,8 +1526,7 @@ func DeleteNode(uri string) {
 		}
 		restoreNodeRuntimeStateUnsafe(uri, detachedState)
 		mu.Unlock()
-		log.Printf("[Nodes] 删除节点持久化失败，已回滚内存状态: %v", err)
-		return
+		return false, err
 	}
 	if exists {
 		delete(nodeIndexByURI, uri)
@@ -1528,6 +1540,7 @@ func DeleteNode(uri string) {
 	if cb != nil {
 		cb(uri)
 	}
+	return exists, nil
 }
 
 func DedupNodes() int {
@@ -1946,20 +1959,33 @@ func nodeLabelAlreadySafe(name string, maxRunes int) bool {
 }
 
 func EnableNode(uri string) bool {
+	enabled, err := EnableNodeWithError(uri)
+	if err != nil {
+		log.Printf("[Nodes] 启用节点持久化失败，已回滚内存状态: %v", err)
+		return false
+	}
+	return enabled
+}
+
+// EnableNodeWithError enables a node only after its durable disabled flag can
+// be updated, preventing the admin API from reporting success on DB failure.
+func EnableNodeWithError(uri string) (bool, error) {
 	mu.Lock()
 	defer mu.Unlock()
 	ensureLoaded()
 	index, found := nodeIndexForUpdateUnsafe(uri)
 	if !found {
-		return false
+		return false, nil
+	}
+	if err := updateSingleNodeDisabledWithErrorUnsafe(uri, false); err != nil {
+		return false, err
 	}
 	nodeList[index].Disabled = false
 	if health, exists := healthMap[uri]; exists {
 		health.CooldownUntil = 0
 		updateSingleNodeHealthUnsafe(uri, health)
 	}
-	updateSingleNodeDisabledUnsafe(uri, false)
-	return true
+	return true, nil
 }
 
 type vmessIdentityString string

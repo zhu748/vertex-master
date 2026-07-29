@@ -1,6 +1,6 @@
 # Release 构建指南
 
-本项目使用 **GitHub Actions** 自动构建多平台二进制并发布 Release。本文档描述发布流程、版本号约定、本地构建方式以及产物清单。
+本项目使用 **GitHub Actions** 自动构建多平台二进制并发布 Release。正式产物和 Docker 镜像均只通过 GitHub Actions 构建；本文档描述发布流程、版本号约定以及产物清单。
 
 ## 发布流程（推荐：自动构建）
 
@@ -14,6 +14,7 @@ gofmt -l ./cmd ./internal
 
 # 静态检查
 go vet ./...
+go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
 
 # 全量测试（含 race 检测）
 go test ./... -count=1
@@ -54,7 +55,7 @@ git push origin v1.1.1
 
 推送 `v*` 标签后，`.github/workflows/release.yml` 会自动触发：
 
-1. **verify** job：跑 `actionlint` / `gofmt` / `go vet` / `go test` / `go test -race` / JS 语法检查
+1. **verify** job：确认发布提交已进入 `main`，并运行 `actionlint` / `gofmt` / `go vet` / `govulncheck` / `go test` / `go test -race` / JS 语法检查
 2. **build** job：交叉编译 9 个平台产物，生成 SHA256SUMS.txt，发布 GitHub Release
 
 在 **Actions** 页面查看进度：`https://github.com/<user>/vertex-master/actions`
@@ -71,11 +72,11 @@ git push origin v1.1.1
 - 如需创建草稿 Release，勾选 `publish` 并保持 `draft` 为勾选状态
 - 只有明确需要公开发布时，才同时勾选 `publish` 并取消勾选 `draft`
 
-手动发布会拒绝覆盖已有 Release；如果同名 tag 已存在，也必须与本次选择的构建提交完全一致。正式发布仍推荐通过推送新的 `v*` 标签自动触发。
+手动发布会拒绝覆盖已有 Release；如果同名 tag 已存在，也必须与本次选择的构建提交完全一致。发布提交必须已经进入 `main`；未勾选 `publish` 的试跑仍可选择其他分支。正式发布仍推荐通过推送新的 `v*` 标签自动触发。
 
-## 本地构建（不通过 Actions）
+## 本地复现（仅用于排查）
 
-如需在本地复现 release 产物：
+正式产物请使用上面的 Release Action。仅在排查交叉编译脚本时，才在本地复现二进制压缩包；不要在本地构建或发布 Docker 镜像：
 
 ```bash
 # Linux / macOS

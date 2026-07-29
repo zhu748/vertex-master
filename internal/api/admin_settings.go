@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/bsfdsagfadg/vertex/internal/config"
+	"github.com/bsfdsagfadg/vertex/internal/spool"
 )
 
 //nolint:gochecknoglobals // Constant-like map of allowed settings
@@ -224,6 +225,9 @@ func (adm *AdminHandler) adminPutSettings(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusInternalServerError, adminErr("写入配置失败 (failed to write config)"))
 		return
 	}
+	if maxSpillMB, ok := updates["max_spill_mb"].(int); ok {
+		spool.SetMaxSpillBytes(int64(maxSpillMB) << 20)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -240,6 +244,9 @@ func adminSettingInt(value any) (int, bool) {
 
 func validateAdminProxySetting(key string, value int) error {
 	bounds := map[string][2]int{
+		"max_retries":                         {0, 10},
+		"max_spill_mb":                        {1, 8192},
+		"max_n":                               {1, 32},
 		"parallel_pool_size":                  {1, 20},
 		"parallel_pool_delay_ms":              {100, 10000},
 		"max_request_mb":                      {1, 1024},

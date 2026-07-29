@@ -104,3 +104,191 @@ func TestAppendAnthropicMessagePreservesExistingMessages(t *testing.T) {
 		t.Fatalf("appended message=%#v", last)
 	}
 }
+
+func TestResponsesConversionRejectsItemsThatWouldLoseContext(t *testing.T) {
+	tests := []struct {
+		name string
+		body map[string]any
+	}{
+		{
+			name: "non-object input item",
+			body: map[string]any{"input": []any{
+				map[string]any{"type": "message", "role": "user", "content": "keep"},
+				"drop-me",
+			}},
+		},
+		{
+			name: "unknown input item",
+			body: map[string]any{"input": []any{
+				map[string]any{"type": "message", "role": "user", "content": "keep"},
+				map[string]any{"type": "future_item", "content": "drop-me"},
+			}},
+		},
+		{
+			name: "function call without identity",
+			body: map[string]any{"input": []any{
+				map[string]any{"type": "message", "role": "user", "content": "keep"},
+				map[string]any{"type": "function_call", "arguments": `{}`},
+			}},
+		},
+		{
+			name: "function output without call id",
+			body: map[string]any{"input": []any{
+				map[string]any{"type": "message", "role": "user", "content": "keep"},
+				map[string]any{"type": "function_call_output", "output": "drop-me"},
+			}},
+		},
+		{
+			name: "non-object content block",
+			body: map[string]any{"input": []any{
+				map[string]any{
+					"type": "message", "role": "user",
+					"content": []any{
+						map[string]any{"type": "input_text", "text": "keep"},
+						"drop-me",
+					},
+				},
+			}},
+		},
+		{
+			name: "non-object tool",
+			body: map[string]any{
+				"input": "keep",
+				"tools": []any{
+					map[string]any{"type": "function", "name": "valid"},
+					"drop-me",
+				},
+			},
+		},
+		{
+			name: "non-object namespace tool",
+			body: map[string]any{
+				"input": "keep",
+				"tools": []any{map[string]any{
+					"type": "namespace", "name": "demo",
+					"tools": []any{
+						map[string]any{"type": "function", "name": "valid"},
+						"drop-me",
+					},
+				}},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if converted, err := responsesToChatRequest(test.body); err == nil {
+				t.Fatalf("缺损上下文必须返回错误，got %#v", converted)
+			}
+		})
+	}
+}
+
+func TestAnthropicConversionRejectsBlocksThatWouldLoseContext(t *testing.T) {
+	validUser := map[string]any{"role": "user", "content": "keep"}
+	tests := []struct {
+		name string
+		body map[string]any
+	}{
+		{
+			name: "non-object message",
+			body: map[string]any{
+				"max_tokens": float64(64),
+				"messages":   []any{validUser, "drop-me"},
+			},
+		},
+		{
+			name: "unknown assistant block",
+			body: map[string]any{
+				"max_tokens": float64(64),
+				"messages": []any{
+					validUser,
+					map[string]any{"role": "assistant", "content": []any{
+						map[string]any{"type": "text", "text": "keep"},
+						map[string]any{"type": "future_block", "text": "drop-me"},
+					}},
+				},
+			},
+		},
+		{
+			name: "unknown user block",
+			body: map[string]any{
+				"max_tokens": float64(64),
+				"messages": []any{map[string]any{"role": "user", "content": []any{
+					map[string]any{"type": "text", "text": "keep"},
+					map[string]any{"type": "document", "source": map[string]any{}},
+				}}},
+			},
+		},
+		{
+			name: "unknown image source",
+			body: map[string]any{
+				"max_tokens": float64(64),
+				"messages": []any{map[string]any{"role": "user", "content": []any{
+					map[string]any{
+						"type": "image",
+						"source": map[string]any{
+							"type": "future_source", "data": "drop-me",
+						},
+					},
+				}}},
+			},
+		},
+		{
+			name: "tool result without id",
+			body: map[string]any{
+				"max_tokens": float64(64),
+				"messages": []any{map[string]any{"role": "user", "content": []any{
+					map[string]any{"type": "tool_result", "content": "drop-me"},
+				}}},
+			},
+		},
+		{
+			name: "non-object tool",
+			body: map[string]any{
+				"max_tokens": float64(64),
+				"messages":   []any{validUser},
+				"tools":      []any{map[string]any{"name": "valid"}, "drop-me"},
+			},
+		},
+		{
+			name: "unknown tool choice",
+			body: map[string]any{
+				"max_tokens": float64(64),
+				"messages":   []any{validUser},
+				"tool_choice": map[string]any{
+					"type": "future_choice",
+				},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if converted, err := anthropicToChatRequest(test.body); err == nil {
+				t.Fatalf("缺损上下文必须返回错误，got %#v", converted)
+			}
+		})
+	}
+}
+
+func TestAnthropicConversionIntentionallyIgnoresThinkingHistory(t *testing.T) {
+	converted, err := anthropicToChatRequest(map[string]any{
+		"max_tokens": float64(64),
+		"messages": []any{
+			map[string]any{"role": "user", "content": "continue"},
+			map[string]any{"role": "assistant", "content": []any{
+				map[string]any{"type": "thinking", "thinking": "private", "signature": "sig"},
+				map[string]any{"type": "text", "text": "visible"},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages := converted["messages"].([]any)
+	assistant := messages[len(messages)-1].(map[string]any)
+	if assistant["content"] != "visible" {
+		t.Fatalf("可见 assistant 上下文应保留: %#v", assistant)
+	}
+}
