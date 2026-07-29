@@ -3,6 +3,7 @@ package vertex
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -195,6 +196,26 @@ func TestParseCountTokensResponse(t *testing.T) {
 	}
 }
 
+func TestParseCountTokensResultDistinguishesZeroAndStructuredErrors(t *testing.T) {
+	count, found, err := parseCountTokensResult([]byte(
+		`[{"results":[{"data":{"ui":{"countTokensV2":{"totalTokens":0}}}}]}]`,
+	))
+	if err != nil || !found || count != 0 {
+		t.Fatalf("valid zero count: count=%d found=%v err=%v", count, found, err)
+	}
+
+	count, found, err = parseCountTokensResult([]byte(
+		`[{"results":[{"data":{"ui":{"countTokensV2":null}},"errors":[{` +
+			`"message":"Publisher model was not found","extensions":{"status":{"code":5,` +
+			`"message":"Publisher model was not found"}}}]}]}]`,
+	))
+	var vertexErr *VertexError
+	if count != 0 || found || !errors.As(err, &vertexErr) ||
+		vertexErr.Code != http.StatusNotFound || vertexErr.Kind != "notfound" {
+		t.Fatalf("structured error: count=%d found=%v err=%#v", count, found, err)
+	}
+}
+
 // ---- coerceTokenCount ----
 
 func TestCoerceTokenCount(t *testing.T) {
@@ -255,6 +276,34 @@ func TestCountTokensUsesUpstreamOperation(t *testing.T) {
 	variables, _ := received["variables"].(map[string]any)
 	if variables["recaptchaToken"] != "test-recaptcha-token" {
 		t.Fatalf("CountTokens 请求缺少 recaptchaToken: %#v", variables)
+	}
+}
+
+func TestCountTokensExactPropagatesStructuredUpstreamError(t *testing.T) {
+	oldURL := batchGraphqlURL
+	t.Cleanup(func() { batchGraphqlURL = oldURL })
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(
+			`[{"results":[{"data":{"ui":{"countTokensV2":null}},"errors":[{` +
+				`"message":"Publisher model was not found","extensions":{"status":{"code":5,` +
+				`"message":"Publisher model was not found"}}}]}]}]`,
+		))
+	}))
+	defer upstream.Close()
+	batchGraphqlURL = upstream.URL
+
+	client := NewVertexAIClient(config.StaticProvider(config.DefaultConfig()))
+	client.SetTokenPool(recaptcha.NewTokenPoolCustom(func(string) (string, error) {
+		return "test-recaptcha-token", nil
+	}))
+	count, err := client.CountTokensExact(context.Background(), "missing-model", []any{
+		map[string]any{"role": "user", "parts": []any{map[string]any{"text": "hello"}}},
+	})
+	var vertexErr *VertexError
+	if count != 0 || !errors.As(err, &vertexErr) || vertexErr.Code != http.StatusNotFound {
+		t.Fatalf("CountTokensExact count=%d err=%#v", count, err)
 	}
 }
 
@@ -400,6 +449,72 @@ func TestCountTokensSingleflightMergesConcurrentIdenticalRequests(t *testing.T) 
 	}
 	if stats = client.CountTokenStats(); stats.CacheHits != 1 || upstreamCalls.Load() != 1 {
 		t.Fatalf("cache hit not recorded: upstream=%d stats=%+v", upstreamCalls.Load(), stats)
+	}
+}
+
+func TestCountTokensExactSingleflightSharesStructuredError(t *testing.T) {
+	oldURL := batchGraphqlURL
+	t.Cleanup(func() { batchGraphqlURL = oldURL })
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var startOnce sync.Once
+	var upstreamCalls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls.Add(1)
+		startOnce.Do(func() { close(started) })
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(
+			`[{"results":[{"errors":[{"message":"model not found",` +
+				`"extensions":{"status":{"code":5,"message":"model not found"}}}]}]}]`,
+		))
+	}))
+	defer upstream.Close()
+	batchGraphqlURL = upstream.URL
+
+	client := NewVertexAIClient(config.StaticProvider(config.DefaultConfig()))
+	client.SetTokenPool(recaptcha.NewTokenPoolCustom(func(string) (string, error) {
+		return "singleflight-error-token", nil
+	}))
+	contents := []any{map[string]any{
+		"role": "user", "parts": []any{map[string]any{"text": "same failed request"}},
+	}}
+
+	const concurrency = 8
+	errs := make([]error, concurrency)
+	var wg sync.WaitGroup
+	for index := range errs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, errs[index] = client.CountTokensExact(context.Background(), "missing-model", contents)
+		}()
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("singleflight owner did not reach upstream")
+	}
+	waitForCountTokenSharedWaits(t, client, concurrency-1)
+	close(release)
+	wg.Wait()
+
+	for index, err := range errs {
+		var vertexErr *VertexError
+		if !errors.As(err, &vertexErr) || vertexErr.Code != http.StatusNotFound {
+			t.Fatalf("error[%d]=%#v, want VertexError 404", index, err)
+		}
+	}
+	stats := client.CountTokenStats()
+	if upstreamCalls.Load() != 1 || stats.UpstreamQueries != 1 || stats.HTTPRequests != 1 ||
+		stats.SharedWaits != concurrency-1 || stats.Failures != 1 ||
+		stats.CacheEntries != 0 || stats.InFlight != 0 {
+		t.Fatalf("unexpected failed singleflight stats: upstream=%d stats=%+v", upstreamCalls.Load(), stats)
 	}
 }
 

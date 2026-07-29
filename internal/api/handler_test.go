@@ -5,6 +5,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/bsfdsagfadg/vertex/internal/vertex"
 )
 
 func TestWriteJSONUsesUnescapedEncoding(t *testing.T) {
@@ -32,5 +34,28 @@ func TestWriteJSONSerializationFailureDoesNotCommitRequestedStatus(t *testing.T)
 	if body := recorder.Body.String(); !strings.Contains(body, `"code":500`) ||
 		!strings.Contains(body, "序列化失败") {
 		t.Fatalf("unexpected serialization error body=%q", body)
+	}
+}
+
+func TestPublicVertexErrorsRedactProjectIDsAndBoundUpstreamDetails(t *testing.T) {
+	upstreamErr := vertex.NewNotFoundError(
+		"Publisher model `projects/private-project-123/locations/global/models/missing` was not found",
+	)
+	upstreamErr.UpstreamResponse = `{"responseContext":{"token":"private-response-token"}}`
+
+	gemini := vertexErrorToGemini(upstreamErr)
+	geminiMessage := gemini["error"].(map[string]any)["message"].(string)
+	if strings.Contains(geminiMessage, "private-project-123") ||
+		strings.Contains(geminiMessage, "private-response-token") {
+		t.Fatalf("Gemini error leaked upstream identifiers: %q", geminiMessage)
+	}
+	if !strings.Contains(geminiMessage, "projects/<redacted>/locations/global/models/missing") {
+		t.Fatalf("Gemini error lost useful sanitized detail: %q", geminiMessage)
+	}
+
+	oai := vertexErrorToOAI(upstreamErr)
+	oaiMessage := oai["error"].(map[string]any)["message"].(string)
+	if strings.Contains(oaiMessage, "private-project-123") {
+		t.Fatalf("OpenAI error leaked upstream project ID: %q", oaiMessage)
 	}
 }

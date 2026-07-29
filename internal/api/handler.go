@@ -163,6 +163,7 @@ func withUpstreamDetail(friendly string, e *vertex.VertexError) string {
 	if detail == "" {
 		detail = strings.TrimSpace(e.UpstreamResponse)
 	}
+	detail = redactUpstreamProjectIDs(detail)
 	if detail == "" || strings.Contains(friendly, detail) {
 		return friendly
 	}
@@ -170,6 +171,37 @@ func withUpstreamDetail(friendly string, e *vertex.VertexError) string {
 		detail = string(r[:400]) + "…"
 	}
 	return friendly + "（上游原因：" + detail + "）"
+}
+
+func redactUpstreamProjectIDs(value string) string {
+	const prefix = "projects/"
+	if !strings.Contains(value, prefix) {
+		return value
+	}
+	var output strings.Builder
+	output.Grow(len(value))
+	remaining := value
+	for {
+		index := strings.Index(remaining, prefix)
+		if index < 0 {
+			output.WriteString(remaining)
+			return output.String()
+		}
+		output.WriteString(remaining[:index+len(prefix)])
+		tail := remaining[index+len(prefix):]
+		end := strings.IndexAny(tail, "/ \t\r\n`\"'")
+		if end < 0 {
+			output.WriteString("<redacted>")
+			return output.String()
+		}
+		if end == 0 {
+			output.WriteString(tail[:1])
+			remaining = tail[1:]
+			continue
+		}
+		output.WriteString("<redacted>")
+		remaining = tail[end:]
+	}
 }
 
 // toVertexError 把任意错误归一为 *vertex.VertexError 以便映射成对外响应。

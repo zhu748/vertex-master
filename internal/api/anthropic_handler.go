@@ -103,9 +103,12 @@ func (h *AnthropicHandler) handleCountTokens(w http.ResponseWriter, r *http.Requ
 		h.anthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"input_tokens": h.vc.CountTokens(r.Context(), model, protocolInputContents(payload)),
-	})
+	total, countErr := h.vc.CountTokensExact(r.Context(), model, protocolInputContents(payload))
+	if countErr != nil {
+		h.writeAnthropicVertexError(w, toVertexError(countErr))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"input_tokens": total})
 }
 
 func (h *AnthropicHandler) readAnthropicBody(w http.ResponseWriter, r *http.Request) (map[string]any, bool) {

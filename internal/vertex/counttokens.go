@@ -28,10 +28,36 @@ func (c *VertexAIClient) CountTokens(ctx context.Context, model string, contents
 	return counts[0]
 }
 
+// CountTokensExact 用于显式计数接口：与后台 usage 补齐不同，上游错误必须
+// 返回给调用方，避免把无效模型或权限错误伪装成成功的 0 token 响应。
+func (c *VertexAIClient) CountTokensExact(
+	ctx context.Context,
+	model string,
+	contents []any,
+) (int, error) {
+	counts, err := c.countTokenSets(ctx, model, contents)
+	if len(counts) == 0 {
+		return 0, err
+	}
+	return counts[0], err
+}
+
 // CountTokenSets 使用一个 reCAPTCHA token 和一个 TLS session，并行统计多组
 // contents。它用于同时补齐输入/输出 usage，避免为同一生成结果重复获取验证码。
 // 返回值与 contentSets 一一对应；空内容或查询失败的项保持为 0。
 func (c *VertexAIClient) CountTokenSets(ctx context.Context, model string, contentSets ...[]any) []int {
+	counts, err := c.countTokenSets(ctx, model, contentSets...)
+	if err != nil {
+		log.Printf("[Vertex] [CountTokens] 上游精确计数失败: 模型=%s, 请求ID=%s, 原因=%v", model, RequestIDFromContext(ctx), err)
+	}
+	return counts
+}
+
+func (c *VertexAIClient) countTokenSets(
+	ctx context.Context,
+	model string,
+	contentSets ...[]any,
+) ([]int, error) {
 	type pendingCount struct {
 		originalIndex int
 		contents      []any
@@ -41,6 +67,7 @@ func (c *VertexAIClient) CountTokenSets(ctx context.Context, model string, conte
 	}
 
 	counts := make([]int, len(contentSets))
+	var countErrors []error
 	upstream := make([]pendingCount, 0, len(contentSets))
 	waiting := make([]pendingCount, 0, len(contentSets))
 	for index, contents := range contentSets {
@@ -73,21 +100,25 @@ func (c *VertexAIClient) CountTokenSets(ctx context.Context, model string, conte
 			upstreamSets[index] = upstream[index].contents
 		}
 		c.countMetrics.upstreamQueries.Add(uint64(len(upstreamSets)))
-		upstreamCounts, err := c.countTokenSetsUpstream(ctx, model, upstreamSets)
-		if err != nil {
-			log.Printf("[Vertex] [CountTokens] 上游精确计数失败: 模型=%s, 请求ID=%s, 原因=%v", model, RequestIDFromContext(ctx), err)
-		}
+		upstreamCounts, upstreamErrors := c.countTokenSetsUpstream(ctx, model, upstreamSets)
 		for index, pending := range upstream {
 			count := 0
 			if index < len(upstreamCounts) {
 				count = upstreamCounts[index]
 			}
+			var countErr error
+			if index < len(upstreamErrors) {
+				countErr = upstreamErrors[index]
+			}
 			counts[pending.originalIndex] = count
-			if count <= 0 {
+			if countErr != nil {
 				c.countMetrics.failures.Add(1)
+				countErrors = append(countErrors, fmt.Errorf(
+					"content set %d: %w", pending.originalIndex, countErr,
+				))
 			}
 			if pending.tracked {
-				c.completeTokenCountFlight(pending.key, pending.flight, count)
+				c.completeTokenCountFlight(pending.key, pending.flight, count, countErr)
 			}
 		}
 	}
@@ -98,19 +129,25 @@ func (c *VertexAIClient) CountTokenSets(ctx context.Context, model string, conte
 		select {
 		case <-pending.flight.done:
 			counts[pending.originalIndex] = pending.flight.count
+			if pending.flight.err != nil {
+				countErrors = append(countErrors, fmt.Errorf(
+					"content set %d: %w", pending.originalIndex, pending.flight.err,
+				))
+			}
 		case <-ctx.Done():
-			return counts
+			return counts, ctx.Err()
 		}
 	}
-	return counts
+	return counts, errors.Join(countErrors...)
 }
 
 func (c *VertexAIClient) countTokenSetsUpstream(
 	ctx context.Context,
 	model string,
 	contentSets [][]any,
-) ([]int, error) {
+) ([]int, []error) {
 	counts := make([]int, len(contentSets))
+	requestErrors := make([]error, len(contentSets))
 	active := make([]int, 0, len(contentSets))
 	for index, contents := range contentSets {
 		if len(contents) > 0 {
@@ -118,7 +155,12 @@ func (c *VertexAIClient) countTokenSetsUpstream(
 		}
 	}
 	if len(active) == 0 {
-		return counts, nil
+		return counts, requestErrors
+	}
+	setActiveError := func(err error) {
+		for _, index := range active {
+			requestErrors[index] = err
+		}
 	}
 
 	proxyURI := c.cfg.ActiveNodeURI()
@@ -127,19 +169,21 @@ func (c *VertexAIClient) countTokenSetsUpstream(
 	}
 	recaptchaToken, err := c.pool.GetTokenWithProxyContext(ctx, proxyURI)
 	if err != nil {
-		return counts, fmt.Errorf("fetch recaptcha token: %w", err)
+		setActiveError(fmt.Errorf("fetch recaptcha token: %w", err))
+		return counts, requestErrors
 	}
 	if recaptchaToken == "" {
-		return counts, fmt.Errorf("empty recaptcha token")
+		setActiveError(fmt.Errorf("empty recaptcha token"))
+		return counts, requestErrors
 	}
 
 	sess, err := c.net.CreateSession(c.cfg.RequestTimeout(), proxyURI, RequestIDFromContext(ctx))
 	if err != nil {
-		return counts, fmt.Errorf("create session: %w", err)
+		setActiveError(fmt.Errorf("create session: %w", err))
+		return counts, requestErrors
 	}
 	defer sess.Close()
 
-	requestErrors := make([]error, len(contentSets))
 	var wg sync.WaitGroup
 	for _, index := range active {
 		wg.Add(1)
@@ -147,13 +191,10 @@ func (c *VertexAIClient) countTokenSetsUpstream(
 			defer wg.Done()
 			payload := buildCountTokensPayload(model, contentSets[index], recaptchaToken, c.cfg)
 			counts[index], requestErrors[index] = c.executeCountTokensRequest(ctx, sess, payload)
-			if requestErrors[index] != nil {
-				requestErrors[index] = fmt.Errorf("content set %d: %w", index, requestErrors[index])
-			}
 		}()
 	}
 	wg.Wait()
-	return counts, errors.Join(requestErrors...)
+	return counts, requestErrors
 }
 
 func (c *VertexAIClient) executeCountTokensRequest(
@@ -187,7 +228,8 @@ func (c *VertexAIClient) executeCountTokensRequest(
 			return 0, fmt.Errorf("upstream request: %w", requestErr)
 		}
 		if status == 200 {
-			if count := parseCountTokensResponse(raw); count > 0 {
+			count, found, responseErr := parseCountTokensResult(raw)
+			if found {
 				return count, nil
 			}
 			if attempt == 0 && stringsContainAny(
@@ -195,13 +237,19 @@ func (c *VertexAIClient) executeCountTokensRequest(
 			) {
 				continue
 			}
+			if responseErr != nil {
+				return 0, responseErr
+			}
 			return 0, fmt.Errorf("upstream response did not contain totalTokens")
 		}
 		if attempt == 0 && (status == 401 || status == 403 ||
 			stringsContainAny(string(raw), "Failed to verify action", "The caller does not have permission")) {
 			continue
 		}
-		return 0, fmt.Errorf("upstream returned HTTP %d", status)
+		if parsed := parseErrorResponse(string(raw)); parsed != nil {
+			return 0, parsed
+		}
+		return 0, raiseForStatus(status, "", fmt.Sprintf("upstream returned HTTP %d", status), nil, string(raw))
 	}
 	return 0, fmt.Errorf("recaptcha verification failed")
 }
@@ -263,9 +311,17 @@ func countTokensHeaders() transport.Header {
 // 上游可能是单对象或数组；逐层 results → data.ui.countTokensV2 / data.countTokensV2 / data.countTokens，
 // 命中 totalTokens 即返回。任何错误/缺字段返回 0。
 func parseCountTokensResponse(raw []byte) int {
+	count, found, _ := parseCountTokensResult(raw)
+	if !found {
+		return 0
+	}
+	return count
+}
+
+func parseCountTokensResult(raw []byte) (int, bool, error) {
 	var parsed any
 	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return 0
+		return 0, false, fmt.Errorf("decode upstream CountTokens response: %w", err)
 	}
 	var items []any
 	switch v := parsed.(type) {
@@ -274,16 +330,19 @@ func parseCountTokensResponse(raw []byte) int {
 	case map[string]any:
 		items = []any{v}
 	default:
-		return 0
+		return 0, false, nil
 	}
 
+	var responseErr error
 	for _, entryRaw := range items {
 		entry, ok := entryRaw.(map[string]any)
 		if !ok {
 			continue
 		}
-		// entry 级别 errors → 跳过。
-		if _, hasErr := entry["errors"]; hasErr {
+		if parsedErr := parseErrorResponse(entry); parsedErr != nil {
+			if responseErr == nil {
+				responseErr = parsedErr
+			}
 			continue
 		}
 		results, _ := entry["results"].([]any)
@@ -292,7 +351,10 @@ func parseCountTokensResponse(raw []byte) int {
 			if !ok {
 				continue
 			}
-			if _, hasErr := result["errors"]; hasErr {
+			if parsedErr := parseErrorResponse(result); parsedErr != nil {
+				if responseErr == nil {
+					responseErr = parsedErr
+				}
 				continue
 			}
 			data, ok := result["data"].(map[string]any)
@@ -313,26 +375,38 @@ func parseCountTokensResponse(raw []byte) int {
 				}
 			}
 			if countData != nil {
-				if tt, ok := countData["totalTokens"]; ok {
-					return coerceTokenCount(tt)
+				if tt, exists := countData["totalTokens"]; exists {
+					if count, valid := tokenCountValue(tt); valid {
+						return count, true, nil
+					}
 				}
 			}
 		}
 	}
-	return 0
+	return 0, false, responseErr
 }
 
 // coerceTokenCount 把 totalTokens（数字或数字字符串）转 int。
 func coerceTokenCount(v any) int {
+	count, _ := tokenCountValue(v)
+	return count
+}
+
+func tokenCountValue(v any) (int, bool) {
+	var count int
 	switch n := v.(type) {
 	case float64:
-		return int(n)
+		count = int(n)
 	case int:
-		return n
+		count = n
 	case string:
 		if x, err := strconv.Atoi(n); err == nil {
-			return x
+			count = x
+		} else {
+			return 0, false
 		}
+	default:
+		return 0, false
 	}
-	return 0
+	return count, count >= 0
 }

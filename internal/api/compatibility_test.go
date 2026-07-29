@@ -1057,6 +1057,63 @@ func TestCompatibilityEndpoints(t *testing.T) {
 	})
 }
 
+func TestExplicitCountTokenEndpointsPropagateUpstreamErrors(t *testing.T) {
+	fixture := newTestServer(t)
+	errorUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_, _ = w.Write([]byte(
+			`[{"results":[{"data":{"ui":{"countTokensV2":null}},"errors":[{` +
+				`"message":"Publisher model was not found","extensions":{"status":{"code":5,` +
+				`"message":"Publisher model was not found"}}}]}]}]`,
+		))
+	}))
+	defer errorUpstream.Close()
+	vertex.SetBatchGraphqlURL(errorUpstream.URL)
+
+	tests := []struct {
+		name         string
+		path         string
+		header       string
+		wantContains string
+		body         map[string]any
+	}{
+		{
+			name: "anthropic",
+			path: "/v1/messages/count_tokens", header: "x-api-key",
+			wantContains: `"type":"not_found_error"`,
+			body: map[string]any{
+				"model": "missing-model", "messages": []any{
+					map[string]any{"role": "user", "content": "hello"},
+				},
+			},
+		},
+		{
+			name: "gemini",
+			path: "/v1beta/models/missing-model:countTokens", header: "x-goog-api-key",
+			wantContains: "Publisher model was not found",
+			body: map[string]any{"contents": []any{map[string]any{
+				"role": "user", "parts": []any{map[string]any{"text": "hello"}},
+			}}},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := postWithHeader(
+				t, fixture.server.URL+test.path, test.header, "sk-test-key", test.body,
+			)
+			defer response.Body.Close()
+			raw, err := io.ReadAll(response.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if response.StatusCode != http.StatusNotFound ||
+				!strings.Contains(string(raw), test.wantContains) {
+				t.Fatalf("status=%d body=%s", response.StatusCode, raw)
+			}
+		})
+	}
+}
+
 func assertGemini36PrefillVariables(t *testing.T, variables map[string]any) {
 	t.Helper()
 	if stringValue(variables["model"]) != "gemini-3.6-flash" {

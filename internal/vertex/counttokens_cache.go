@@ -32,6 +32,7 @@ type tokenCountCacheEntry struct {
 type tokenCountFlight struct {
 	done  chan struct{}
 	count int
+	err   error
 }
 
 type tokenCountMetrics struct {
@@ -269,6 +270,7 @@ func (c *VertexAIClient) completeTokenCountFlight(
 	key tokenCountCacheKey,
 	flight *tokenCountFlight,
 	count int,
+	err error,
 ) {
 	c.countCacheMu.Lock()
 	defer c.countCacheMu.Unlock()
@@ -279,6 +281,7 @@ func (c *VertexAIClient) completeTokenCountFlight(
 		c.storeTokenCountCacheLocked(key, count, time.Now())
 	}
 	flight.count = count
+	flight.err = err
 	delete(c.countFlights, key)
 	close(flight.done)
 }

@@ -352,7 +352,12 @@ func (g *GeminiHandler) handleCountTokens(w http.ResponseWriter, r *http.Request
 		countPayload = reqObj
 	}
 
-	total := g.vc.CountTokens(r.Context(), actualModel, protocolInputContents(countPayload))
+	total, countErr := g.vc.CountTokensExact(r.Context(), actualModel, protocolInputContents(countPayload))
+	if countErr != nil {
+		ve := toVertexError(countErr)
+		writeJSON(w, ve.Code, vertexErrorToGemini(ve))
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"totalTokens": total})
 }
 
@@ -439,13 +444,7 @@ func cleanGeminiPromptFeedback(data map[string]any) {
 }
 
 func vertexErrorToGemini(e *vertex.VertexError) map[string]any {
-	msg := vertex.FriendlyErrorMessage(e)
-	if e.Message != "" {
-		msg += " | Raw: " + e.Message
-	}
-	if e.UpstreamResponse != "" {
-		msg += " | Upstream: " + e.UpstreamResponse
-	}
+	msg := withUpstreamDetail(vertex.FriendlyErrorMessage(e), e)
 	return map[string]any{"error": map[string]any{
 		"code": e.Code, "message": msg, "status": geminiStatusOf(e),
 	}}
