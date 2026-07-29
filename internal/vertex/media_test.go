@@ -2,8 +2,79 @@ package vertex
 
 import (
 	"encoding/base64"
+	"strings"
 	"testing"
 )
+
+var benchmarkAudioData AudioData   //nolint:gochecknoglobals
+var benchmarkImageData []ImageData //nolint:gochecknoglobals
+
+func BenchmarkExtractAudioResponseSixteenSegments(b *testing.B) {
+	segment := make([]byte, 64<<10)
+	for index := range segment {
+		segment[index] = byte(index)
+	}
+	encoded := base64.StdEncoding.EncodeToString(segment)
+	parts := make([]any, 16)
+	for index := range parts {
+		parts[index] = map[string]any{"inlineData": map[string]any{
+			"data": encoded, "mimeType": "audio/L16;rate=24000",
+		}}
+	}
+	result := makeResult(parts)
+	b.ReportAllocs()
+	b.SetBytes(16 * int64(len(segment)))
+	for range b.N {
+		benchmarkAudioData = extractAudioResponse(result)
+		if len(benchmarkAudioData.Raw) == 0 {
+			b.Fatal("audio extraction returned no data")
+		}
+	}
+}
+
+func BenchmarkExtractImageResponse(b *testing.B) {
+	b.Run("sixteen_inline_with_text", func(b *testing.B) {
+		encoded := strings.Repeat("A", 64<<10)
+		text := strings.Repeat("description ", 256)
+		parts := make([]any, 0, 32)
+		for range 16 {
+			parts = append(parts,
+				map[string]any{"text": text},
+				map[string]any{"inlineData": map[string]any{
+					"data": encoded, "mimeType": "image/png",
+				}},
+			)
+		}
+		result := makeResult(parts)
+		b.ReportAllocs()
+		for range b.N {
+			benchmarkImageData = extractImageResponse(result)
+			if len(benchmarkImageData) != 16 {
+				b.Fatalf("image extraction returned %d items", len(benchmarkImageData))
+			}
+		}
+	})
+
+	b.Run("markdown_one_mib_split", func(b *testing.B) {
+		markdown := "![Generated Image](data:image/png;base64," + strings.Repeat("A", 1<<20) + ")"
+		const segments = 16
+		segmentSize := len(markdown) / segments
+		parts := make([]any, 0, segments)
+		for start := 0; start < len(markdown); start += segmentSize {
+			end := min(start+segmentSize, len(markdown))
+			parts = append(parts, map[string]any{"text": markdown[start:end]})
+		}
+		result := makeResult(parts)
+		b.ReportAllocs()
+		b.SetBytes(int64(len(markdown)))
+		for range b.N {
+			benchmarkImageData = extractImageResponse(result)
+			if len(benchmarkImageData) != 1 {
+				b.Fatalf("markdown image extraction returned %d items", len(benchmarkImageData))
+			}
+		}
+	})
+}
 
 // makeResult 构造一个最小 Gemini 响应：candidates[0].content.parts = parts。
 func makeResult(parts []any) map[string]any {
@@ -56,6 +127,16 @@ func TestExtractImageResponseInlineDataSkipsEmptyData(t *testing.T) {
 	}
 }
 
+func TestExtractImageResponseEmptyInlineDataKeepsPriority(t *testing.T) {
+	result := makeResult([]any{
+		map[string]any{"text": "![Generated Image](data:image/png;base64,EEEE)"},
+		map[string]any{"inlineData": map[string]any{"data": ""}},
+	})
+	if imgs := extractImageResponse(result); len(imgs) != 0 {
+		t.Fatalf("存在 inlineData 时不应退回 markdown 图片，实际 %+v", imgs)
+	}
+}
+
 func TestExtractImageResponseMarkdownFallback(t *testing.T) {
 	// 无 inlineData，全文以 markdown data-URI 开头 → 退化抠取。
 	md := "![Generated Image](data:image/png;base64,EEEE)"
@@ -105,13 +186,13 @@ func TestExtractAudioResponseConcatenatesAllSegments(t *testing.T) {
 	})
 
 	audio := extractAudioResponse(result)
-	if audio.Data == "" {
+	if len(audio.Raw) == 0 {
 		t.Fatalf("应返回拼接音频")
 	}
-	decoded, err := base64.StdEncoding.DecodeString(audio.Data)
-	if err != nil {
-		t.Fatalf("结果 base64 解码失败: %v", err)
+	if audio.Data != "" {
+		t.Fatalf("正常提取路径不应重新编码整段 Base64")
 	}
+	decoded := audio.Raw
 	wantLen := len(seg1) + len(seg2) + len(seg3) // 12
 	if len(decoded) != wantLen {
 		t.Fatalf("🔴 拼接长度应为 3 段之和 %d（守护「只取首段=截断」回归），实际 %d", wantLen, len(decoded))
@@ -140,7 +221,7 @@ func TestExtractAudioResponseMimeFromFirstValid(t *testing.T) {
 	if audio.MimeType != "audio/L16;rate=24000" {
 		t.Errorf("首个有效段无 mime 时应默认 audio/L16;rate=24000，实际 %q", audio.MimeType)
 	}
-	decoded, _ := base64.StdEncoding.DecodeString(audio.Data)
+	decoded := audio.Raw
 	if len(decoded) != 4 {
 		t.Errorf("应拼接两段共 4 字节，实际 %d", len(decoded))
 	}
@@ -153,7 +234,7 @@ func TestExtractAudioResponseSkipsNonAudio(t *testing.T) {
 		map[string]any{"inlineData": map[string]any{"data": enc([]byte{4, 5}), "mimeType": "audio/L16"}},
 	})
 	audio := extractAudioResponse(result)
-	decoded, _ := base64.StdEncoding.DecodeString(audio.Data)
+	decoded := audio.Raw
 	if len(decoded) != 2 {
 		t.Errorf("非 audio/* 段应跳过，应只拼 2 字节，实际 %d", len(decoded))
 	}
@@ -162,12 +243,25 @@ func TestExtractAudioResponseSkipsNonAudio(t *testing.T) {
 	}
 }
 
+func TestExtractAudioResponsePreservesLooseBase64Compatibility(t *testing.T) {
+	result := makeResult([]any{
+		map[string]any{"inlineData": map[string]any{"data": "-_-_", "mimeType": "audio/L16"}},
+		map[string]any{"inlineData": map[string]any{"data": "@@@@", "mimeType": "audio/L16"}},
+		map[string]any{"inlineData": map[string]any{"data": "aGVsbG8", "mimeType": "audio/L16"}},
+	})
+	audio := extractAudioResponse(result)
+	want := append(mustStdDecode("+/+/"), []byte("hello")...)
+	if string(audio.Raw) != string(want) {
+		t.Fatalf("宽松 Base64 拼接=%v，期望 %v", audio.Raw, want)
+	}
+}
+
 func TestExtractAudioResponseEmpty(t *testing.T) {
 	result := makeResult([]any{
 		map[string]any{"text": "no audio here"},
 	})
 	audio := extractAudioResponse(result)
-	if audio.Data != "" || audio.MimeType != "" {
+	if len(audio.Raw) != 0 || audio.Data != "" || audio.MimeType != "" {
 		t.Errorf("无音频应返回空 AudioData，实际 %+v", audio)
 	}
 }

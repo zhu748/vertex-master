@@ -2,7 +2,7 @@ package vertex
 
 import (
 	"context"
-	"sort"
+	"fmt"
 	"strings"
 
 	"github.com/bsfdsagfadg/vertex/internal/nodes"
@@ -131,18 +131,27 @@ func isUnspecifiedBlockReason(reason string) bool {
 }
 
 func pickBestResult(results []candidateResult) (candidateResult, error) {
-	sort.Slice(results, func(i, j int) bool {
-		fi := candidateFinish(results[i].resp)
-		fj := candidateFinish(results[j].resp)
-		if fi == "MAX_TOKENS" && fj != "MAX_TOKENS" {
-			return true
+	if len(results) == 0 {
+		return candidateResult{}, fmt.Errorf("no candidate fallback results")
+	}
+	best := results[0]
+	bestMaxTokens := candidateFinish(best.resp) == "MAX_TOKENS"
+	bestLength := responseContentLength(best.resp)
+	for index := 1; index < len(results); index++ {
+		candidate := results[index]
+		candidateMaxTokens := candidateFinish(candidate.resp) == "MAX_TOKENS"
+		if bestMaxTokens && !candidateMaxTokens {
+			continue
 		}
-		if fj == "MAX_TOKENS" && fi != "MAX_TOKENS" {
-			return false
+		candidateLength := responseContentLength(candidate.resp)
+		if (!bestMaxTokens && candidateMaxTokens) ||
+			(candidateMaxTokens == bestMaxTokens && candidateLength > bestLength) {
+			best = candidate
+			bestMaxTokens = candidateMaxTokens
+			bestLength = candidateLength
 		}
-		return responseContentLength(results[i].resp) > responseContentLength(results[j].resp)
-	})
-	return results[0], nil
+	}
+	return best, nil
 }
 
 func responseContentLength(resp map[string]any) int {

@@ -34,6 +34,10 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version-file: .golangci-lint-version
       - name: Check formatting
         run: test -z "$(gofmt -l ./cmd ./internal)"
       - name: Check JavaScript syntax

@@ -13,28 +13,61 @@ func TestServerExposesBuildInfo(t *testing.T) {
 	}
 	server.SetBuildInfo("v1.2.10", "abc1234", "2026-07-27T15:00:00Z")
 
+	recorder := httptest.NewRecorder()
+	server.handleRoot(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d", recorder.Code)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(recorder.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body["version"] != "v1.2.10" || body["build_commit"] != "abc1234" ||
+		body["build_time"] != "2026-07-27T15:00:00Z" {
+		t.Fatalf("build info not exposed: %#v", body)
+	}
+}
+
+func TestHealthDoesNotExposeOperationalDetails(t *testing.T) {
+	server := &Server{
+		mw: &middleware{keys: NewAPIKeyManager()},
+	}
+	server.SetBuildInfo("v1.2.10", "abc1234", "2026-07-27T15:00:00Z")
+
+	recorder := httptest.NewRecorder()
+	server.handleHealth(recorder, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d", recorder.Code)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(recorder.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body["status"] != "healthy" || body["version"] != "v1.2.10" {
+		t.Fatalf("health response missing public status: %#v", body)
+	}
+	for _, field := range []string{"api_keys_loaded", "build_commit", "build_time"} {
+		if _, exposed := body[field]; exposed {
+			t.Fatalf("health response exposed %q: %#v", field, body)
+		}
+	}
+}
+
+func TestHealthMethods(t *testing.T) {
+	server := &Server{mw: &middleware{keys: NewAPIKeyManager()}}
 	for _, test := range []struct {
-		name    string
-		handler http.HandlerFunc
+		method string
+		status int
 	}{
-		{name: "root", handler: server.handleRoot},
-		{name: "health", handler: server.handleHealth},
+		{method: http.MethodGet, status: http.StatusOK},
+		{method: http.MethodHead, status: http.StatusOK},
+		{method: http.MethodPost, status: http.StatusMethodNotAllowed},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			recorder := httptest.NewRecorder()
-			test.handler(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
-			if recorder.Code != http.StatusOK {
-				t.Fatalf("status=%d", recorder.Code)
-			}
-			var body map[string]any
-			if err := json.NewDecoder(recorder.Body).Decode(&body); err != nil {
-				t.Fatal(err)
-			}
-			if body["version"] != "v1.2.10" || body["build_commit"] != "abc1234" ||
-				body["build_time"] != "2026-07-27T15:00:00Z" {
-				t.Fatalf("build info not exposed: %#v", body)
-			}
-		})
+		recorder := httptest.NewRecorder()
+		server.handleHealth(recorder, httptest.NewRequest(test.method, "/healthz", nil))
+		if recorder.Code != test.status {
+			t.Errorf("%s status=%d, want %d", test.method, recorder.Code, test.status)
+		}
 	}
 }
 

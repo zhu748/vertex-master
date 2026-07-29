@@ -3,11 +3,12 @@ package api
 import (
 	"encoding/base64"
 	"encoding/binary"
-	"encoding/json"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
+
+	"github.com/bsfdsagfadg/vertex/internal/vertex"
 )
 
 type AudioHandler struct {
@@ -55,8 +56,8 @@ func (a *AudioHandler) handleAudioSpeech(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	var body map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	body, err := decodeJSONObject(r.Body)
+	if err != nil {
 		if isRequestBodyTooLarge(err) {
 			oaiError(w, http.StatusRequestEntityTooLarge, "请求体过大 (request body too large)", "invalid_request_error")
 			return
@@ -97,27 +98,38 @@ func (a *AudioHandler) handleAudioSpeech(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if audio.Data == "" {
+	if len(audio.Raw) == 0 && audio.Data == "" {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{
 			"message": "上游未返回音频数据 (no audio returned)", "type": "server_error", "code": 502}})
 		return
 	}
-	raw, err := base64.StdEncoding.DecodeString(audio.Data)
+	raw, err := audioResponseRaw(audio)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{
 			"message": "音频解码失败 (audio decode failed)", "type": "server_error", "code": 502}})
 		return
 	}
 
-	out := raw
-	if fmtInfo.wrapWAV {
-		sampleRate := ttsParsePCMRate(audio.MimeType)
-		out = append(ttsWAVHeader(len(raw), sampleRate), raw...)
-	}
+	writeTTSAudio(w, raw, audio.MimeType, fmtInfo)
+}
 
-	w.Header().Set("Content-Type", fmtInfo.contentType)
+func audioResponseRaw(audio vertex.AudioData) ([]byte, error) {
+	if len(audio.Raw) > 0 {
+		return audio.Raw, nil
+	}
+	return base64.StdEncoding.DecodeString(audio.Data) //nolint:wrapcheck
+}
+
+func writeTTSAudio(w http.ResponseWriter, raw []byte, mimeType string, format ttsFormat) {
+	w.Header().Set("Content-Type", format.contentType)
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(out)
+	if format.wrapWAV {
+		header := ttsWAVHeader(len(raw), ttsParsePCMRate(mimeType))
+		if _, err := w.Write(header); err != nil {
+			return
+		}
+	}
+	_, _ = w.Write(raw)
 }
 
 func ttsResolveVoice(voice any) string {

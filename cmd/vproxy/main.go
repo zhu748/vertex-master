@@ -27,7 +27,7 @@ import (
 	"github.com/bsfdsagfadg/vertex/internal/logger"
 	"github.com/bsfdsagfadg/vertex/internal/nodes"
 	"github.com/bsfdsagfadg/vertex/internal/spool"
-	"github.com/bsfdsagfadg/vertex/internal/telemetry"
+	"github.com/bsfdsagfadg/vertex/internal/statefile"
 	"github.com/bsfdsagfadg/vertex/internal/transport"
 	"github.com/bsfdsagfadg/vertex/internal/vertex"
 )
@@ -115,12 +115,16 @@ func main() {
 	dailyLogger := logger.NewDailyLogger(logDir)
 	defer func() { _ = dailyLogger.Close() }()
 
-	// ---- 状态文件迁移（提前执行，无输出） ----
+	// ---- 状态文件迁移 ----
 	stateDir := filepath.Join(config.ConfigDir(), "state")
-	telemetry.MigrateStateFile("config/.instance_id", filepath.Join(stateDir, ".instance_id"))
-	telemetry.MigrateStateFile("config/.telemetry_state", filepath.Join(stateDir, ".telemetry_state"))
-	telemetry.MigrateStateFile("config/.rules_agreed", filepath.Join(stateDir, ".rules_agreed"))
-	telemetry.MigrateStateFile("config/agreed-rules-docker.txt", filepath.Join(stateDir, "agreed-rules-docker.txt"))
+	for _, migration := range [][2]string{
+		{"config/.rules_agreed", filepath.Join(stateDir, ".rules_agreed")},
+		{"config/agreed-rules-docker.txt", filepath.Join(stateDir, "agreed-rules-docker.txt")},
+	} {
+		if err := statefile.Migrate(migration[0], migration[1]); err != nil {
+			log.Printf("[State] 迁移旧状态文件失败: %v", err)
+		}
+	}
 
 	// ---- 规则同意检查 ----
 	curHash := rulesHash()
@@ -156,7 +160,7 @@ func main() {
 			fmt.Println(rulesText)
 			fmt.Println()
 			if hasOldAgreement() {
-				fmt.Println("  ⚠️  规则已更新（含遥测披露等内容），需要您重新确认。")
+				fmt.Println("  ⚠️  规则已更新，需要您重新确认。")
 				fmt.Println()
 			}
 			fmt.Print("  请输入 yes 同意以上规则（输入其他内容退出）：")
@@ -204,12 +208,6 @@ func main() {
 	stopProxySubscriptionScheduler := api.StartProxySubscriptionScheduler(vc, cfg)
 	stopProxyHealthScheduler := api.StartProxyHealthScheduler(vc, cfg)
 
-	telemetryEnabled := true
-	if cfg.TelemetryEnabled() != nil {
-		telemetryEnabled = *cfg.TelemetryEnabled()
-	}
-	telemetry.Start(version, runtime.GOOS+"/"+runtime.GOARCH, telemetryEnabled)
-
 	srv := api.NewServer(vc, keys, cfg)
 	srv.SetBuildInfo(version, buildCommit, buildTime)
 	//nolint:exhaustruct
@@ -251,7 +249,6 @@ func main() {
 			}
 			flushCancel()
 			transport.StopAllProxies()
-			telemetry.Stop()
 			close(shutdownDone)
 			return
 		}

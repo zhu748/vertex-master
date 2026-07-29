@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -10,9 +11,50 @@ import (
 	"testing"
 )
 
+var benchmarkReadAllLimitResult []byte //nolint:gochecknoglobals
+
+func BenchmarkReadAllLimit(b *testing.B) {
+	payload := bytes.Repeat([]byte("response-body-"), 1<<14)
+	for _, benchmark := range []struct {
+		name     string
+		sizeHint int64
+	}{
+		{name: "unknown_length", sizeHint: -1},
+		{name: "known_length", sizeHint: int64(len(payload))},
+	} {
+		b.Run(benchmark.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.SetBytes(int64(len(payload)))
+			for range b.N {
+				data, err := readAllLimitWithHint(
+					bytes.NewReader(payload), 4<<20, benchmark.sizeHint,
+				)
+				if err != nil || len(data) != len(payload) {
+					b.Fatalf("len=%d err=%v", len(data), err)
+				}
+				benchmarkReadAllLimitResult = data
+			}
+		})
+	}
+}
+
 type readTrackingCloser struct {
 	reads  int
 	closes int
+}
+
+type dataThenErrorReader struct {
+	data []byte
+	err  error
+}
+
+func (r *dataThenErrorReader) Read(p []byte) (int, error) {
+	if len(r.data) == 0 {
+		return 0, r.err
+	}
+	n := copy(p, r.data)
+	r.data = r.data[n:]
+	return n, nil
 }
 
 func (r *readTrackingCloser) Read([]byte) (int, error) {
@@ -42,6 +84,24 @@ func TestReadAllLimit(t *testing.T) {
 	data, err = ReadAllLimit(strings.NewReader("unlimited"), 0)
 	if err != nil || string(data) != "unlimited" {
 		t.Fatalf("unlimited read: data=%q err=%v", data, err)
+	}
+}
+
+func TestReadAllLimitWithHintHandlesExactWrongAndOversizedLengths(t *testing.T) {
+	for _, hint := range []int64{2, 9, 100} {
+		data, err := readAllLimitWithHint(strings.NewReader("123456789"), 16, hint)
+		if err != nil || string(data) != "123456789" {
+			t.Fatalf("hint=%d data=%q err=%v", hint, data, err)
+		}
+	}
+	data, err := readAllLimitWithHint(strings.NewReader("123456789"), 5, 9)
+	if !errors.Is(err, ErrResponseBodyTooLarge) || string(data) != "12345" {
+		t.Fatalf("oversized hinted read: data=%q err=%v", data, err)
+	}
+	sentinel := errors.New("terminal read error")
+	data, err = readAllLimitWithHint(&dataThenErrorReader{data: []byte("prefix"), err: sentinel}, 0, 6)
+	if !errors.Is(err, sentinel) || string(data) != "prefix" {
+		t.Fatalf("unlimited hinted read error: data=%q err=%v", data, err)
 	}
 }
 

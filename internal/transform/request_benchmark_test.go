@@ -14,12 +14,6 @@ var benchmarkConvertedPayload map[string]any //nolint:gochecknoglobals
 func BenchmarkConvertChatRequest(b *testing.B) {
 	cfg := config.StaticProvider(config.DefaultConfig())
 	text := strings.Repeat("x", 128)
-	properties := make(map[string]any, 64)
-	for index := range 64 {
-		properties["field_"+strconv.Itoa(index)] = map[string]any{
-			"type": "string", "description": text, "additionalProperties": false,
-		}
-	}
 	messages := make([]any, 16)
 	for index := range messages {
 		role := "user"
@@ -45,18 +39,7 @@ func BenchmarkConvertChatRequest(b *testing.B) {
 		},
 		{
 			name: "large_tool_schema",
-			body: map[string]any{
-				"model":    "gemini-3.1-flash",
-				"messages": []any{map[string]any{"role": "user", "content": text}},
-				"tools": []any{map[string]any{
-					"type": "function",
-					"function": map[string]any{
-						"name": "lookup", "parameters": map[string]any{
-							"type": "object", "properties": properties,
-						},
-					},
-				}},
-			},
+			body: largeToolSchemaBenchmarkBody(text),
 		},
 	} {
 		b.Run(test.name, func(b *testing.B) {
@@ -75,24 +58,7 @@ func BenchmarkConvertChatRequest(b *testing.B) {
 
 func BenchmarkBuildVertexVariablesLargeToolSchema(b *testing.B) {
 	cfg := config.StaticProvider(config.DefaultConfig())
-	properties := make(map[string]any, 64)
-	for index := range 64 {
-		properties["field_"+strconv.Itoa(index)] = map[string]any{
-			"type": "string", "description": strings.Repeat("x", 128),
-		}
-	}
-	body := map[string]any{
-		"model":    "gemini-3.1-flash",
-		"messages": []any{map[string]any{"role": "user", "content": "question"}},
-		"tools": []any{map[string]any{
-			"type": "function",
-			"function": map[string]any{
-				"name": "lookup", "parameters": map[string]any{
-					"type": "object", "properties": properties,
-				},
-			},
-		}},
-	}
+	body := largeToolSchemaBenchmarkBody("question")
 	_, payload, err := ConvertChatRequest(body, cfg)
 	if err != nil {
 		b.Fatal(err)
@@ -102,4 +68,40 @@ func BenchmarkBuildVertexVariablesLargeToolSchema(b *testing.B) {
 	for range b.N {
 		benchmarkConvertedPayload = BuildVertexVariables("gemini-3.1-flash", payload, cfg)
 	}
+}
+
+func BenchmarkConvertAndBuildVertexVariablesLargeToolSchema(b *testing.B) {
+	cfg := config.StaticProvider(config.DefaultConfig())
+	body := largeToolSchemaBenchmarkBody("question")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		model, payload, err := ConvertChatRequest(body, cfg)
+		if err != nil {
+			b.Fatal(err)
+		}
+		benchmarkConvertedPayload = BuildVertexVariables(model, payload, cfg)
+	}
+}
+
+func largeToolSchemaBenchmarkBody(message string) map[string]any {
+	properties := make(map[string]any, 64)
+	for index := range 64 {
+		properties["field_"+strconv.Itoa(index)] = map[string]any{
+			"type": "string", "description": strings.Repeat("x", 128),
+		}
+	}
+	body := map[string]any{
+		"model":    "gemini-3.1-flash",
+		"messages": []any{map[string]any{"role": "user", "content": message}},
+		"tools": []any{map[string]any{
+			"type": "function",
+			"function": map[string]any{
+				"name": "lookup", "parameters": map[string]any{
+					"type": "object", "properties": properties,
+				},
+			},
+		}},
+	}
+	return body
 }

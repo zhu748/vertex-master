@@ -337,6 +337,33 @@ func TestParseCanonicalTextStreamChunkRejectsExtendedShapes(t *testing.T) {
 	}
 }
 
+func TestTakeCanonicalFinishReason(t *testing.T) {
+	for _, reason := range canonicalFinishReasons {
+		raw := append(append([]byte(nil), reason.encoded...), []byte(`,tail`)...)
+		got, rest, ok := takeCanonicalFinishReason(raw)
+		if !ok || got != reason.value || string(rest) != `,tail` {
+			t.Fatalf("reason %q: got=%q rest=%q ok=%v", reason.value, got, rest, ok)
+		}
+	}
+
+	got, rest, ok := takeCanonicalFinishReason([]byte(`"NEW_REASON",tail`))
+	if !ok || got != "NEW_REASON" || string(rest) != `,tail` {
+		t.Fatalf("unknown reason: got=%q rest=%q ok=%v", got, rest, ok)
+	}
+}
+
+func TestKnownCanonicalFinishReasonDoesNotAllocate(t *testing.T) {
+	raw := []byte(`"FINISH_REASON_UNSPECIFIED",tail`)
+	if allocations := testing.AllocsPerRun(100, func() {
+		value, rest, ok := takeCanonicalFinishReason(raw)
+		if !ok || value != "FINISH_REASON_UNSPECIFIED" || len(rest) != len(`,tail`) {
+			t.Fatal("known finish reason was not parsed")
+		}
+	}); allocations != 0 {
+		t.Fatalf("known finish reason allocated %.1f times", allocations)
+	}
+}
+
 func TestScanStream_MultiChunkBraceScan(t *testing.T) {
 	// 多个连在一起的对象（模拟上游一个网络 chunk 里塞了多帧），增量花括号扫描要逐个拆开。
 	// usageMetadata 可能在 STOP 后单独到达，必须继续读取，不能把统计帧丢掉。

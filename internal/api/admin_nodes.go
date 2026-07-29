@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,6 +17,7 @@ import (
 	"github.com/bsfdsagfadg/vertex/internal/config"
 	"github.com/bsfdsagfadg/vertex/internal/netx"
 	"github.com/bsfdsagfadg/vertex/internal/nodes"
+	"github.com/bsfdsagfadg/vertex/internal/recaptcha"
 	"github.com/bsfdsagfadg/vertex/internal/transport"
 )
 
@@ -30,100 +30,74 @@ var (
 )
 
 func (adm *AdminHandler) adminGetNodes(w http.ResponseWriter, r *http.Request) {
-	list := nodes.LoadNodes()
-	health := nodes.LoadHealth()
-	var enabledCount, disabledCount int
-	for _, n := range list {
-		if n.Disabled {
-			disabledCount++
-		} else {
-			enabledCount++
-		}
-	}
-
-	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("query")))
-	nodeType := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("type")))
-	status := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("status")))
-	source := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("source")))
-	filtered := make([]nodes.Node, 0, len(list))
-	for _, node := range list {
+	queryValues := r.URL.Query()
+	query := strings.ToLower(strings.TrimSpace(queryValues.Get("query")))
+	nodeType := strings.ToLower(strings.TrimSpace(queryValues.Get("type")))
+	status := strings.ToLower(strings.TrimSpace(queryValues.Get("status")))
+	source := strings.ToLower(strings.TrimSpace(queryValues.Get("source")))
+	urisOnly := queryValues.Get("uris_only") == "true"
+	match := func(node nodes.Node, nodeHealth *nodes.NodeHealth) bool {
 		if query != "" && !strings.Contains(strings.ToLower(node.Name), query) &&
 			!strings.Contains(strings.ToLower(node.RawURI), query) &&
 			!strings.Contains(strings.ToLower(node.Type), query) {
-			continue
+			return false
 		}
 		if nodeType != "" && nodeType != "all" && !strings.EqualFold(node.Type, nodeType) {
-			continue
+			return false
 		}
 		if source == "manual" && node.SourceID != 0 {
-			continue
+			return false
 		}
 		if source == "subscription" && node.SubscriptionSourceCount == 0 {
-			continue
+			return false
 		}
-		if !nodeMatchesAdminStatus(node, health[node.RawURI], status) {
-			continue
-		}
-		filtered = append(filtered, node)
+		return nodeMatchesAdminStatus(node, nodeHealth, status)
 	}
 
-	if r.URL.Query().Get("uris_only") == "true" {
-		uris := make([]string, 0, len(filtered))
-		for _, node := range filtered {
-			uris = append(uris, node.RawURI)
-		}
+	if urisOnly {
+		filteredURIs := nodes.LoadFilteredNodeURIs(match)
 		writeJSON(w, http.StatusOK, map[string]any{
-			"uris":  uris,
-			"total": len(filtered),
+			"uris":  filteredURIs,
+			"total": len(filteredURIs),
 		})
 		return
 	}
 
-	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
-	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
+	page, _ := strconv.Atoi(queryValues.Get("page"))
+	pageSize, _ := strconv.Atoi(queryValues.Get("page_size"))
 	if page < 1 {
 		page = 1
 	}
-	if pageSize < 1 {
-		pageSize = len(filtered)
-		if pageSize == 0 {
-			pageSize = 1
-		}
-	} else if pageSize > 200 {
+	if pageSize > 200 {
 		pageSize = 200
 	}
-	totalPages := max(1, (len(filtered)+pageSize-1)/pageSize)
-	if page > totalPages {
-		page = totalPages
-	}
-	start := min((page-1)*pageSize, len(filtered))
-	end := min(start+pageSize, len(filtered))
-	pageNodes := filtered[start:end]
-	pageHealth := make(map[string]*nodes.NodeHealth, len(pageNodes))
-	for _, node := range pageNodes {
-		if item := health[node.RawURI]; item != nil {
-			pageHealth[node.RawURI] = item
+	snapshot := nodes.LoadNodePoolPageSnapshot(time.Now(), page, pageSize, match)
+	pageNodes := snapshot.Nodes
+	pageHealth := make(map[string]nodes.NodeHealth, len(pageNodes))
+	for index, node := range pageNodes {
+		if snapshot.HasHealth[index] {
+			pageHealth[node.RawURI] = snapshot.Health[index]
 		}
 	}
 
 	sp := nodes.GetStickyPool()
-	poolStats := nodes.GetNodePoolStats(time.Now())
+	poolStats := snapshot.Stats
 	healthCycleEstimateMinutes := 0
-	if adm.cfg.ProxyHealthCheckEnabled() && enabledCount > 0 {
+	if adm.cfg.ProxyHealthCheckEnabled() && poolStats.Enabled > 0 {
 		batchSize := max(1, adm.cfg.ProxyHealthCheckBatchSize())
-		rounds := (enabledCount + batchSize - 1) / batchSize
+		rounds := (poolStats.Enabled + batchSize - 1) / batchSize
 		healthCycleEstimateMinutes = rounds * max(1, adm.cfg.ProxyHealthCheckIntervalMinutes())
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"nodes":                         pageNodes,
 		"health":                        pageHealth,
-		"total":                         len(filtered),
-		"overall_total":                 len(list),
-		"page":                          page,
-		"page_size":                     pageSize,
-		"total_pages":                   totalPages,
-		"enabled_count":                 enabledCount,
-		"disabled_count":                disabledCount,
+		"total":                         snapshot.TotalMatches,
+		"overall_total":                 poolStats.Total,
+		"page":                          snapshot.Page,
+		"page_size":                     snapshot.PageSize,
+		"total_pages":                   snapshot.TotalPages,
+		"enabled_count":                 poolStats.Enabled,
+		"disabled_count":                poolStats.Disabled,
 		"sticky_pool_available":         sp.AvailableCount(),
 		"sticky_pool_in_use":            sp.StaleCount(),
 		"sticky_node_priority":          adm.cfg.StickyNodePriority(),
@@ -450,7 +424,8 @@ func testProxyNodeWithRecaptcha(
 		return err
 	}
 	defer session.Close()
-	return fetchRecaptchaTokenWithSess(ctx, session)
+	_, err = recaptcha.FetchTokenWithSession(ctx, session)
+	return err
 }
 
 func (adm *AdminHandler) adminEnableNode(w http.ResponseWriter, r *http.Request) {
@@ -463,76 +438,6 @@ func (adm *AdminHandler) adminEnableNode(w http.ResponseWriter, r *http.Request)
 	ok := nodes.EnableNode(body.RawURI)
 	log.Printf("[Admin] [EnableNode] 启用节点 %s: %v", nodes.GetNodeName(body.RawURI), ok)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": ok})
-}
-
-func fetchRecaptchaTokenWithSess(ctx context.Context, sess *transport.Session) error {
-	const (
-		recaptchaBase = "https://www.google.com"
-		siteKey       = "6LdCjtspAAAAAMcV4TGdWLJqRTEk1TfpdLqEnKdj"
-		recaptchaCo   = "aHR0cHM6Ly9jb25zb2xlLmNsb3VkLmdvb2dsZS5jb206NDQz"
-		recaptchaHl   = "zh-CN"
-		recaptchaV    = "jdMmXeCQEkPbnFDy9T04NbgJ"
-		recaptchaVh   = "6581054572"
-		randomCharset = "abcdefghijklmnopqrstuvwxyz0123456789"
-		responseMax   = 4 << 20
-	)
-	var (
-		tokenRe = regexp.MustCompile(`id="recaptcha-token"[^>]*value="([^"]+)"`)
-		rrespRe = regexp.MustCompile(`rresp","(.*?)"`)
-	)
-
-	b := make([]byte, 10)
-	for i := range b {
-		b[i] = randomCharset[time.Now().UnixNano()%int64(len(randomCharset))]
-	}
-	cb := string(b)
-
-	anchorURL := fmt.Sprintf(
-		"%s/recaptcha/enterprise/anchor?ar=1&k=%s&co=%s&hl=%s&v=%s&size=invisible&anchor-ms=20000&execute-ms=15000&cb=%s",
-		recaptchaBase, siteKey, recaptchaCo, recaptchaHl, recaptchaV, cb,
-	)
-
-	_, anchorBody, err := sess.DoAndReadLimit(
-		ctx, "GET", anchorURL, transport.AnchorHeaders(), nil, responseMax,
-	)
-	if err != nil {
-		return fmt.Errorf("GET anchor 失败: %w", err)
-	}
-	m := tokenRe.FindSubmatch(anchorBody)
-	if m == nil {
-		return fmt.Errorf("从 anchor HTML 解析 recaptcha-token 失败")
-	}
-	baseToken := string(m[1])
-
-	form := url.Values{
-		"v":      {recaptchaV},
-		"reason": {"q"},
-		"k":      {siteKey},
-		"c":      {baseToken},
-		"co":     {recaptchaCo},
-		"hl":     {recaptchaHl},
-		"size":   {"invisible"},
-		"vh":     {recaptchaVh},
-		"chr":    {""},
-		"bg":     {""},
-	}
-	reloadURL := recaptchaBase + "/recaptcha/enterprise/reload?k=" + siteKey
-	header := transport.XHRHeaders(
-		"application/x-www-form-urlencoded;charset=UTF-8", "*/*",
-		recaptchaBase, anchorURL, "same-origin",
-	)
-
-	_, reloadBody, err := sess.DoAndReadLimit(
-		ctx, "POST", reloadURL, header, strings.NewReader(form.Encode()), responseMax,
-	)
-	if err != nil {
-		return fmt.Errorf("POST reload 失败: %w", err)
-	}
-	rm := rrespRe.FindSubmatch(reloadBody)
-	if rm == nil {
-		return fmt.Errorf("从 reload 响应解析 rresp 失败")
-	}
-	return nil
 }
 
 func (adm *AdminHandler) adminDedupNodes(w http.ResponseWriter, _ *http.Request) {

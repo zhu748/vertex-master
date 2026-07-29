@@ -2,8 +2,6 @@ package vertex
 
 import (
 	"context"
-
-	"github.com/bsfdsagfadg/vertex/internal/transform"
 )
 
 type ChatCompleter interface {
@@ -13,9 +11,15 @@ type ChatCompleter interface {
 }
 
 type ImageGenerator interface {
-	CompleteChatImage(ctx context.Context, model string, geminiPayload map[string]any) ([]transform.InlineImage, error)
+	CompleteChatImage(ctx context.Context, model string, geminiPayload map[string]any) ([]ImageData, error)
 }
 
 type AudioGenerator interface {
 	CompleteChatAudio(ctx context.Context, model string, geminiPayload map[string]any) (AudioData, error)
 }
+
+var (
+	_ ChatCompleter  = (*VertexAIClient)(nil)
+	_ ImageGenerator = (*VertexAIClient)(nil)
+	_ AudioGenerator = (*VertexAIClient)(nil)
+)

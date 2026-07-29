@@ -14,32 +14,27 @@ import (
 // 本文件实现假流式：模型名带 "假流式-"/"fake-" 前缀时，先完整非流式生成、再切片按 SSE 推。
 // OpenAI 端点与 Gemini 端点（use_fake 分支）共用此机制。
 
-// splitIntoRuneChunks 把文本切成若干分片用于假流式推送，分片数约为 8。
+const fakeStreamTargetChunks = 8
+
+// splitIntoRuneChunks 把文本切成若干分片用于假流式推送，分片数不超过 8。
 //
 // 必须按 rune（完整字符）切分，不能按字节：多字节 UTF-8 字符（如汉字、emoji）若在字节
 // 边界被截断，半个字符经 JSON 序列化会被替换成 U+FFFD（），客户端收到的就是乱码。
 // 空文本返回 nil。
 func splitIntoRuneChunks(text string) []string {
-	runeCount := utf8.RuneCountInString(text)
-	if runeCount == 0 {
+	if text == "" {
 		return nil
 	}
-	chunkSize := 1
-	if cs := runeCount / 8; cs > 1 {
-		chunkSize = cs
-	}
-	chunks := make([]string, 0, (runeCount+chunkSize-1)/chunkSize)
-	start := 0
-	runesInChunk := 0
-	for index := range text {
-		if index > start && runesInChunk >= chunkSize {
-			chunks = append(chunks, text[start:index])
-			start = index
-			runesInChunk = 0
+	chunkBytes := (len(text)-1)/fakeStreamTargetChunks + 1
+	chunks := make([]string, 0, fakeStreamTargetChunks)
+	for start := 0; start < len(text); {
+		end := min(start+chunkBytes, len(text))
+		for end < len(text) && !utf8.RuneStart(text[end]) {
+			end++
 		}
-		runesInChunk++
+		chunks = append(chunks, text[start:end])
+		start = end
 	}
-	chunks = append(chunks, text[start:])
 	return chunks
 }
 

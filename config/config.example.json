@@ -17,6 +17,5 @@
   "proxy_health_check_interval_minutes": 15,
   "proxy_health_check_batch_size": 50,
   "proxy_health_check_concurrency": 5,
-  "proxy_health_check_timeout_seconds": 8,
-  "telemetry_enabled": false
+  "proxy_health_check_timeout_seconds": 8
 }

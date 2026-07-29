@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"crypto/rand"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -68,21 +67,18 @@ func (g *GeminiHandler) requirePost(w http.ResponseWriter, r *http.Request, fn f
 }
 
 func (g *GeminiHandler) readGeminiBody(w http.ResponseWriter, r *http.Request) (map[string]any, bool) {
-	var body map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	body, err := decodeJSONObject(r.Body)
+	if err != nil {
 		if isRequestBodyTooLarge(err) {
 			g.geminiError(w, http.StatusRequestEntityTooLarge, "请求体过大 (request body too large)", "RESOURCE_EXHAUSTED")
 			return nil, false
 		}
-		if _, ok := err.(*json.SyntaxError); ok && strings.Contains(err.Error(), "invalid UTF-8") {
+		if strings.Contains(err.Error(), "invalid UTF-8") {
 			g.geminiError(w, http.StatusBadRequest, "请求体编码错误，需为 UTF-8 (request body must be UTF-8 encoded)", "INVALID_ARGUMENT")
 			return nil, false
 		}
 		g.geminiError(w, http.StatusBadRequest, "请求格式错误，JSON 解析失败 (invalid JSON)", "INVALID_ARGUMENT")
 		return nil, false
-	}
-	if body == nil {
-		body = make(map[string]any)
 	}
 	return body, true
 }
@@ -498,7 +494,30 @@ func geminiSafetyChunk(e *vertex.VertexError) map[string]any {
 }
 
 func geminiResponseText(resp map[string]any) string {
+	textLength := 0
+	maximumInt := int(^uint(0) >> 1)
+	visitGeminiResponseText(resp, func(text string) {
+		if textLength < 0 {
+			return
+		}
+		if len(text) > maximumInt-textLength {
+			textLength = -1
+			return
+		}
+		textLength += len(text)
+	})
+
 	var sb strings.Builder
+	if textLength > 0 {
+		sb.Grow(textLength)
+	}
+	visitGeminiResponseText(resp, func(text string) {
+		sb.WriteString(text)
+	})
+	return sb.String()
+}
+
+func visitGeminiResponseText(resp map[string]any, visit func(string)) {
 	cands, _ := resp["candidates"].([]any)
 	for _, cRaw := range cands {
 		c, ok := cRaw.(map[string]any)
@@ -519,11 +538,10 @@ func geminiResponseText(resp map[string]any) string {
 				continue
 			}
 			if t, ok3 := p["text"].(string); ok3 {
-				sb.WriteString(t)
+				visit(t)
 			}
 		}
 	}
-	return sb.String()
 }
 
 func isTruthyAny(v any) bool { return jsonx.Truthy(v) }

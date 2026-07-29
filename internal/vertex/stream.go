@@ -542,6 +542,23 @@ var canonicalFinishReasonPrefix = []byte(`,"finishReason":`) //nolint:gochecknog
 var canonicalCandidateIndexZero = []byte(`,"index":0`)       //nolint:gochecknoglobals
 var canonicalTextChunkSuffix = []byte(`}]}`)                 //nolint:gochecknoglobals
 
+var canonicalFinishReasons = [...]struct { //nolint:gochecknoglobals
+	encoded []byte
+	value   string
+}{
+	{[]byte(`"FINISH_REASON_UNSPECIFIED"`), "FINISH_REASON_UNSPECIFIED"},
+	{[]byte(`"STOP"`), "STOP"},
+	{[]byte(`"MAX_TOKENS"`), "MAX_TOKENS"},
+	{[]byte(`"SAFETY"`), "SAFETY"},
+	{[]byte(`"RECITATION"`), "RECITATION"},
+	{[]byte(`"LANGUAGE"`), "LANGUAGE"},
+	{[]byte(`"BLOCKLIST"`), "BLOCKLIST"},
+	{[]byte(`"PROHIBITED_CONTENT"`), "PROHIBITED_CONTENT"},
+	{[]byte(`"SPII"`), "SPII"},
+	{[]byte(`"MALFORMED_FUNCTION_CALL"`), "MALFORMED_FUNCTION_CALL"},
+	{[]byte(`"OTHER"`), "OTHER"},
+}
+
 // processStreamingJSON 对匿名 batchGraphql 的常见单结果外壳走严格快路径：外壳
 // 完全匹配时只解码内部 Gemini 对象。结构、字段顺序、错误或多结果有任何变化时，
 // 回退完整动态解析，保持兼容性和错误语义。
@@ -616,7 +633,7 @@ func parseCanonicalTextStreamChunk(raw []byte) (map[string]any, bool) {
 	hasFinishReason := false
 	if bytes.HasPrefix(rest, canonicalFinishReasonPrefix) {
 		rest = rest[len(canonicalFinishReasonPrefix):]
-		finishReason, rest, ok = takeCanonicalJSONString(rest)
+		finishReason, rest, ok = takeCanonicalFinishReason(rest)
 		if !ok {
 			return nil, false
 		}
@@ -645,6 +662,17 @@ func parseCanonicalTextStreamChunk(raw []byte) (map[string]any, bool) {
 		candidate["index"] = float64(0)
 	}
 	return map[string]any{"candidates": []any{candidate}}, true
+}
+
+// takeCanonicalFinishReason 对协议中已知枚举返回共享字符串，避免每个流式帧
+// 都从扫描缓冲区复制相同值。未知枚举仍走通用字符串解析以保持向前兼容。
+func takeCanonicalFinishReason(raw []byte) (string, []byte, bool) {
+	for _, reason := range canonicalFinishReasons {
+		if bytes.HasPrefix(raw, reason.encoded) {
+			return reason.value, raw[len(reason.encoded):], true
+		}
+	}
+	return takeCanonicalJSONString(raw)
 }
 
 func takeCanonicalJSONString(raw []byte) (string, []byte, bool) {

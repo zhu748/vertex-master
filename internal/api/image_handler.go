@@ -3,22 +3,39 @@ package api
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"io"
 	"log"
 	"mime"
 	"mime/multipart"
 	"net/http"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/bsfdsagfadg/vertex/internal/jsonx"
 	"github.com/bsfdsagfadg/vertex/internal/transform"
 )
 
 type ImageHandler struct {
 	handler
+}
+
+type imageResponseItem struct {
+	B64JSON string `json:"b64_json,omitempty"`
+	URL     string `json:"url,omitempty"`
+}
+
+type imageResponse struct {
+	Created int64               `json:"created"`
+	Data    []imageResponseItem `json:"data"`
+}
+
+func writeImageResponse(w http.ResponseWriter, created int64, data []imageResponseItem) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = jsonx.EncodeNoTrailingNewline(w, imageResponse{Created: created, Data: data})
 }
 
 func (img *ImageHandler) handleImageGenerations(w http.ResponseWriter, r *http.Request) {
@@ -77,18 +94,18 @@ func (img *ImageHandler) handleImageGenerations(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	data := make([]any, 0, len(images))
+	data := make([]imageResponseItem, 0, len(images))
 	for _, img := range images {
 		if img.B64JSON == "" {
 			continue
 		}
 		if respFmt == "url" {
-			data = append(data, map[string]any{"url": "data:image/png;base64," + img.B64JSON})
+			data = append(data, imageResponseItem{URL: "data:image/png;base64," + img.B64JSON})
 		} else {
-			data = append(data, map[string]any{"b64_json": img.B64JSON})
+			data = append(data, imageResponseItem{B64JSON: img.B64JSON})
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"created": time.Now().Unix(), "data": data})
+	writeImageResponse(w, time.Now().Unix(), data)
 }
 
 func (img *ImageHandler) handleImageEdits(w http.ResponseWriter, r *http.Request) {
@@ -187,7 +204,7 @@ func (img *ImageHandler) handleImageVariations(w http.ResponseWriter, r *http.Re
 
 func (img *ImageHandler) runOAIImageRequest(ctx context.Context, w http.ResponseWriter, model string, geminiPayload map[string]any, n int, responseFormat string) {
 	wantURL := responseFormat == "url"
-	items := make([]any, 0, n)
+	items := make([]imageResponseItem, 0, n)
 	for i := 0; i < n; i++ {
 		log.Printf("[Server] [runOAIImageRequest] 开始获取图片 (第 %d/%d 张)", i+1, n)
 		images, vErr := img.vc.CompleteChatImage(ctx, model, geminiPayload)
@@ -205,9 +222,9 @@ func (img *ImageHandler) runOAIImageRequest(ctx context.Context, w http.Response
 				if mimeType == "" {
 					mimeType = "image/png"
 				}
-				items = append(items, map[string]any{"url": "data:" + mimeType + ";base64," + img.B64JSON})
+				items = append(items, imageResponseItem{URL: "data:" + mimeType + ";base64," + img.B64JSON})
 			} else {
-				items = append(items, map[string]any{"b64_json": img.B64JSON})
+				items = append(items, imageResponseItem{B64JSON: img.B64JSON})
 			}
 		}
 		if len(items) >= n {
@@ -223,7 +240,7 @@ func (img *ImageHandler) runOAIImageRequest(ctx context.Context, w http.Response
 	if len(items) > n {
 		items = items[:n]
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"created": time.Now().Unix(), "data": items})
+	writeImageResponse(w, time.Now().Unix(), items)
 }
 
 func (img *ImageHandler) oaiBadRequest(w http.ResponseWriter, message string) {
@@ -232,8 +249,8 @@ func (img *ImageHandler) oaiBadRequest(w http.ResponseWriter, message string) {
 }
 
 func (img *ImageHandler) readJSONObject(w http.ResponseWriter, r *http.Request) (map[string]any, bool) {
-	var body map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	body, err := decodeJSONObject(r.Body)
+	if err != nil {
 		if isRequestBodyTooLarge(err) {
 			oaiError(w, http.StatusRequestEntityTooLarge, "请求体过大 (request body too large)", "invalid_request_error")
 			return nil, false
@@ -261,14 +278,61 @@ func formUploads(r *http.Request, key string) []*multipart.FileHeader {
 	if r.MultipartForm == nil {
 		return nil
 	}
-	var out []*multipart.FileHeader
+	direct := r.MultipartForm.File[key]
+	array := r.MultipartForm.File[key+"[]"]
 	prefix := key + "["
-	for k, fhs := range r.MultipartForm.File {
-		if k == key || k == key+"[]" || strings.HasPrefix(k, prefix) {
-			out = append(out, fhs...)
+	var indexedKeys []string
+	for field, headers := range r.MultipartForm.File {
+		if field != key+"[]" && strings.HasPrefix(field, prefix) && len(headers) > 0 {
+			indexedKeys = append(indexedKeys, field)
 		}
 	}
+
+	groups := 0
+	if len(direct) > 0 {
+		groups++
+	}
+	if len(array) > 0 {
+		groups++
+	}
+	groups += len(indexedKeys)
+	if groups == 0 {
+		return nil
+	}
+	if groups == 1 {
+		switch {
+		case len(direct) > 0:
+			return direct
+		case len(array) > 0:
+			return array
+		default:
+			return r.MultipartForm.File[indexedKeys[0]]
+		}
+	}
+
+	sort.Slice(indexedKeys, func(left, right int) bool {
+		return indexedUploadFieldLess(indexedKeys[left], indexedKeys[right], prefix)
+	})
+	total := len(direct) + len(array)
+	for _, field := range indexedKeys {
+		total += len(r.MultipartForm.File[field])
+	}
+	out := make([]*multipart.FileHeader, 0, total)
+	out = append(out, direct...)
+	out = append(out, array...)
+	for _, field := range indexedKeys {
+		out = append(out, r.MultipartForm.File[field]...)
+	}
 	return out
+}
+
+func indexedUploadFieldLess(left, right, prefix string) bool {
+	leftIndex, leftErr := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(left, prefix), "]"))
+	rightIndex, rightErr := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(right, prefix), "]"))
+	if leftErr == nil && rightErr == nil && leftIndex != rightIndex {
+		return leftIndex < rightIndex
+	}
+	return left < right
 }
 
 func uploadToInlineImage(fh *multipart.FileHeader) (transform.InlineImage, error) {
@@ -279,6 +343,11 @@ func uploadToInlineImage(fh *multipart.FileHeader) (transform.InlineImage, error
 	defer func() { _ = f.Close() }()
 
 	var buf strings.Builder
+	maximumInt := int64(^uint(0) >> 1)
+	maximumSourceSize := (maximumInt/4)*3 - 2
+	if fh.Size > 0 && fh.Size <= maximumSourceSize {
+		buf.Grow(base64.StdEncoding.EncodedLen(int(fh.Size)))
+	}
 	enc := base64.NewEncoder(base64.StdEncoding, &buf)
 	written, err := io.Copy(enc, f)
 	if err != nil {

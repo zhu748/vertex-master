@@ -3,6 +3,7 @@ package vertex
 import (
 	"context"
 	"encoding/base64"
+	"slices"
 	"strings"
 )
 
@@ -14,7 +15,10 @@ type ImageData struct {
 
 // AudioData 是抽出的整段音频（base64 + mime）。
 type AudioData struct {
-	Data     string // 整段音频的 base64（多段 PCM 已拼接）
+	// Raw 是已按顺序拼接的音频字节，正常提取路径直接填充它，避免 API 层
+	// 再执行整段 Base64 编解码。Data 仅保留给旧调用方构造的兼容值。
+	Raw      []byte
+	Data     string
 	MimeType string
 }
 
@@ -44,30 +48,50 @@ func (c *VertexAIClient) CompleteChatAudio(ctx context.Context, model string, ge
 func extractImageResponse(result map[string]any) []ImageData {
 	allParts := firstCandidateParts(result)
 
-	var fullText strings.Builder
-	var inlineImages []map[string]any
+	inlineImageCount := 0
+	hasInlineData := false
+	fullTextLength := 0
 	for _, pRaw := range allParts {
 		p, ok := pRaw.(map[string]any)
 		if !ok {
 			continue
 		}
-		if t, ok := p["text"]; ok {
-			fullText.WriteString(toStr(t))
+		if text := toStr(p["text"]); fullTextLength >= 0 {
+			maximumInt := int(^uint(0) >> 1)
+			if len(text) > maximumInt-fullTextLength {
+				fullTextLength = -1
+			} else {
+				fullTextLength += len(text)
+			}
 		}
-		if id, ok := p["inlineData"].(map[string]any); ok {
-			inlineImages = append(inlineImages, id)
+		if inline, ok := p["inlineData"].(map[string]any); ok {
+			hasInlineData = true
+			if toStr(inline["data"]) != "" {
+				inlineImageCount++
+			}
 		}
 	}
 
 	// ① inlineData 格式
-	if len(inlineImages) > 0 {
-		var out []ImageData
-		for _, img := range inlineImages {
-			data := toStr(img["data"])
+	if hasInlineData {
+		if inlineImageCount == 0 {
+			return nil
+		}
+		out := make([]ImageData, 0, inlineImageCount)
+		for _, pRaw := range allParts {
+			part, ok := pRaw.(map[string]any)
+			if !ok {
+				continue
+			}
+			inline, ok := part["inlineData"].(map[string]any)
+			if !ok {
+				continue
+			}
+			data := toStr(inline["data"])
 			if data == "" {
 				continue
 			}
-			mime := toStr(img["mimeType"])
+			mime := toStr(inline["mimeType"])
 			if mime == "" {
 				mime = "image/png"
 			}
@@ -77,6 +101,15 @@ func extractImageResponse(result map[string]any) []ImageData {
 	}
 
 	// ② markdown 退化格式
+	var fullText strings.Builder
+	if fullTextLength > 0 {
+		fullText.Grow(fullTextLength)
+	}
+	for _, pRaw := range allParts {
+		if part, ok := pRaw.(map[string]any); ok {
+			fullText.WriteString(toStr(part["text"]))
+		}
+	}
 	text := fullText.String()
 	if strings.HasPrefix(text, "![Generated Image](data:") {
 		startIdx := strings.Index(text, "(")
@@ -101,47 +134,92 @@ func extractImageResponse(result map[string]any) []ImageData {
 func extractAudioResponse(result map[string]any) AudioData {
 	allParts := firstCandidateParts(result)
 
-	var raw []byte
+	decodedCapacity := 0
+	maximumInt := int(^uint(0) >> 1)
+	for _, part := range allParts {
+		data, _, ok := audioInlineSegment(part)
+		if !ok {
+			continue
+		}
+		segmentCapacity := base64.StdEncoding.DecodedLen(len(data))
+		if segmentCapacity > maximumInt-decodedCapacity {
+			return AudioData{}
+		}
+		decodedCapacity += segmentCapacity
+	}
+
+	raw := make([]byte, 0, decodedCapacity)
 	mime := ""
 	for _, pRaw := range allParts {
-		p, ok := pRaw.(map[string]any)
+		data, segmentMime, ok := audioInlineSegment(pRaw)
 		if !ok {
-			continue
-		}
-		inline, ok := p["inlineData"].(map[string]any)
-		if !ok {
-			continue
-		}
-		data := toStr(inline["data"])
-		if data == "" {
-			continue
-		}
-		m := toStr(inline["mimeType"])
-		// 仅接受 audio/* 或无 mime 的段（按既定条件）。
-		if m != "" && !strings.HasPrefix(m, "audio/") {
 			continue
 		}
 		if mime == "" {
-			if m != "" {
-				mime = m
+			if segmentMime != "" {
+				mime = segmentMime
 			} else {
 				mime = "audio/L16;rate=24000"
 			}
 		}
-		decoded, err := decodeBase64Loose(data)
+		var err error
+		raw, err = appendBase64Loose(raw, data)
 		if err != nil {
 			continue // 单段解码失败跳过
 		}
-		raw = append(raw, decoded...)
 	}
 
 	if len(raw) > 0 {
 		if mime == "" {
 			mime = "audio/L16;rate=24000"
 		}
-		return AudioData{Data: base64.StdEncoding.EncodeToString(raw), MimeType: mime}
+		return AudioData{Raw: raw, MimeType: mime}
 	}
 	return AudioData{}
+}
+
+func audioInlineSegment(raw any) (data, mime string, ok bool) {
+	part, ok := raw.(map[string]any)
+	if !ok {
+		return "", "", false
+	}
+	inline, ok := part["inlineData"].(map[string]any)
+	if !ok {
+		return "", "", false
+	}
+	data = toStr(inline["data"])
+	if data == "" {
+		return "", "", false
+	}
+	mime = toStr(inline["mimeType"])
+	// 仅接受 audio/* 或无 mime 的段（按既定条件）。
+	if mime != "" && !strings.HasPrefix(mime, "audio/") {
+		return "", "", false
+	}
+	return data, mime, true
+}
+
+func appendBase64Loose(dst []byte, encoded string) ([]byte, error) {
+	start := len(dst)
+	decodedCapacity := base64.StdEncoding.DecodedLen(len(encoded))
+	dst = slices.Grow(dst, decodedCapacity)
+	dst = dst[:start+decodedCapacity]
+	written, err := base64.StdEncoding.Decode(dst[start:], []byte(encoded))
+	if err == nil {
+		return dst[:start+written], nil
+	}
+	dst = dst[:start]
+
+	// URL-safe 字符替换 + 补 padding，与 decodeBase64Loose 的兼容语义一致。
+	normalized := strings.ReplaceAll(strings.ReplaceAll(encoded, "-", "+"), "_", "/")
+	if pad := len(normalized) % 4; pad != 0 {
+		normalized += strings.Repeat("=", 4-pad)
+	}
+	decoded, fallbackErr := base64.StdEncoding.DecodeString(normalized)
+	if fallbackErr != nil {
+		return dst, fallbackErr //nolint:wrapcheck
+	}
+	return append(dst, decoded...), nil
 }
 
 // firstCandidateParts 取 result.candidates[0].content.parts（无则空切片）。

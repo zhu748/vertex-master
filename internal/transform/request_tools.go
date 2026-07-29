@@ -41,12 +41,12 @@ func convertTools(body, geminiPayload map[string]any) (map[string]bool, error) {
 			decl["description"] = f["description"]
 		}
 		if params, ok := f["parameters"].(map[string]any); ok && len(params) > 0 {
-			// 对 parameters 递归白名单清洗，剔除 Gemini 不支持的 schema 字段。
-			// 清洗器本身按层创建新 map/slice，不会修改客户端传入的 schema。
-			decl["parameters"] = cleanFunctionParameters(params)
+			// 一次递归同时完成白名单清洗和 Vertex 原生 Schema 转换，
+			// 避免发送前再为同一棵大型 schema 构造第二份中间树。
+			decl["parameters"] = cleanNativeFunctionParameters(params)
 		} else {
 			// 缺省 parameters 时补默认空对象 schema，满足 Gemini functionDeclarations 要求。
-			decl["parameters"] = map[string]any{"type": "object", "properties": map[string]any{}}
+			decl["parameters"] = map[string]any{"type": "OBJECT", "properties": []any{}}
 		}
 		funcDecls = append(funcDecls, decl)
 	}
@@ -100,6 +100,9 @@ func convertToolChoice(body, geminiPayload map[string]any, declared map[string]b
 // 先 camelCase 化，再把裸 FunctionDeclaration 聚合进一个 functionDeclarations Tool，
 // 其余携带 tool_keys 的条目（内置工具/已包好的 Tool）原样保留，二者可同时存在。
 func normalizeToolsFormat(tools any) []any {
+	if native, ok := canonicalNativeTools(tools); ok {
+		return native
+	}
 	converted := convertToolsFormat(tools)
 
 	if cm, ok := converted.(map[string]any); ok {
@@ -143,6 +146,46 @@ func normalizeToolsFormat(tools any) []any {
 		normalized = append([]any{map[string]any{"functionDeclarations": funcDecls}}, normalized...)
 	}
 	return normalized
+}
+
+// canonicalNativeTools recognizes the detached tool shape produced by
+// convertTools and equivalent native Gemini input. Returning the original
+// read-only slice avoids recursively rebuilding every schema on each attempt.
+func canonicalNativeTools(tools any) ([]any, bool) {
+	list, ok := tools.([]any)
+	if !ok || len(list) == 0 {
+		return nil, false
+	}
+	for _, rawTool := range list {
+		tool, ok := rawTool.(map[string]any)
+		if !ok || len(tool) != 1 {
+			return nil, false
+		}
+		rawDeclarations, ok := tool["functionDeclarations"]
+		if !ok {
+			return nil, false
+		}
+		declarations, ok := rawDeclarations.([]any)
+		if !ok || len(declarations) == 0 {
+			return nil, false
+		}
+		for _, rawDeclaration := range declarations {
+			declaration, ok := rawDeclaration.(map[string]any)
+			name, nameOK := declaration["name"].(string)
+			if !ok || !nameOK || name == "" {
+				return nil, false
+			}
+			for key, value := range declaration {
+				if key != "name" && key != "description" && key != "parameters" {
+					return nil, false
+				}
+				if key == "parameters" && !canonicalNativeSchema(value) {
+					return nil, false
+				}
+			}
+		}
+	}
+	return list, true
 }
 
 // convertToolsFormat 递归把工具结构转为 camelCase。

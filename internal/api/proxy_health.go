@@ -31,7 +31,8 @@ type ProxyHealthSchedulerStatus struct {
 
 var (
 	proxyHealthStatusMu sync.RWMutex //nolint:gochecknoglobals
-	proxyHealthStatus   ProxyHealthSchedulerStatus
+	//nolint:gochecknoglobals // Process-wide scheduler status guarded by proxyHealthStatusMu.
+	proxyHealthStatus ProxyHealthSchedulerStatus
 )
 
 func GetProxyHealthSchedulerStatus() ProxyHealthSchedulerStatus {

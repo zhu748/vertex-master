@@ -165,8 +165,8 @@ func TestProxyLifecycleClosesResourcesOutsideCacheLock(t *testing.T) {
 			lockAcquired := make(chan struct{})
 			go func() {
 				proxyMutex.Lock()
-				proxyMutex.Unlock()
 				close(lockAcquired)
+				proxyMutex.Unlock()
 			}()
 			select {
 			case <-lockAcquired:

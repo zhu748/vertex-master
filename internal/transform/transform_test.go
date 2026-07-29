@@ -42,11 +42,34 @@ func TestCamelToSnake(t *testing.T) {
 }
 
 func TestNormalizeBase64(t *testing.T) {
-	if got := NormalizeBase64("data:image/png;base64,AAAA"); got != "AAAA" {
-		t.Errorf("data URI 剥离失败: %q", got)
+	for _, test := range []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "data URI", input: "data:image/png;base64,AAAA", want: "AAAA"},
+		{name: "URL-safe and padding", input: "a-b_c", want: "a+b/c==="},
+		{name: "standard unchanged", input: "ABcd+/09", want: "ABcd+/09"},
+		{name: "whitespace", input: "  YQ  ", want: "YQ=="},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := NormalizeBase64(test.input); got != test.want {
+				t.Errorf("NormalizeBase64(%q)=%q, want %q", test.input, got, test.want)
+			}
+		})
 	}
-	if got := NormalizeBase64("a-b_c"); got != "a+b/c===" {
-		t.Errorf("URL-safe+padding: %q, want a+b/c===", got)
+}
+
+func TestExtractTextFromInstructionPreservesDynamicTextValues(t *testing.T) {
+	instruction := map[string]any{"parts": []any{
+		map[string]any{"text": "alpha"},
+		"ignored",
+		map[string]any{"text": 123},
+		map[string]any{"other": "ignored"},
+		map[string]any{"text": "omega"},
+	}}
+	if got := extractTextFromInstruction(instruction); got != "alpha123omega" {
+		t.Fatalf("extractTextFromInstruction()=%q, want %q", got, "alpha123omega")
 	}
 }
 

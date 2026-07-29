@@ -3,10 +3,10 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/bsfdsagfadg/vertex/internal/jsonx"
 	"github.com/bsfdsagfadg/vertex/internal/transform"
@@ -266,16 +266,116 @@ func applyGeminiUsage(out protocolOutput, response map[string]any) {
 	}
 }
 
-func decodeJSONObject(r io.Reader) (map[string]any, error) {
-	var body map[string]any
-	decoder := json.NewDecoder(r)
-	if err := decoder.Decode(&body); err != nil {
-		return nil, err
+type invalidUTF8Error struct{}
+
+func (invalidUTF8Error) Error() string { return "invalid UTF-8 in request body" }
+
+type trailingJSONValueError struct {
+	cause error
+}
+
+func (e trailingJSONValueError) Error() string {
+	if e.cause == nil {
+		return "request body must contain exactly one JSON value"
+	}
+	return "request body must contain exactly one JSON value: " + e.cause.Error()
+}
+
+func (e trailingJSONValueError) Unwrap() error { return e.cause }
+
+type utf8ValidatingReader struct {
+	reader       io.Reader
+	sequence     [utf8.UTFMax]byte
+	sequenceLen  int
+	sequenceWant int
+}
+
+func (r *utf8ValidatingReader) Read(buffer []byte) (int, error) {
+	read, err := r.reader.Read(buffer)
+	data := buffer[:read]
+	if r.sequenceLen > 0 {
+		needed := r.sequenceWant - r.sequenceLen
+		take := min(needed, len(data))
+		for _, value := range data[:take] {
+			if value&0xc0 != 0x80 {
+				return 0, invalidUTF8Error{}
+			}
+		}
+		copy(r.sequence[r.sequenceLen:], data[:take])
+		r.sequenceLen += take
+		data = data[take:]
+		if r.sequenceLen == r.sequenceWant {
+			if !utf8.Valid(r.sequence[:r.sequenceLen]) {
+				return 0, invalidUTF8Error{}
+			}
+			r.sequenceLen = 0
+			r.sequenceWant = 0
+		}
+	}
+	if r.sequenceLen == 0 && len(data) > 0 && !utf8.Valid(data) {
+		if !r.keepIncompleteSuffix(data) {
+			return 0, invalidUTF8Error{}
+		}
+	}
+	if err == io.EOF && r.sequenceLen != 0 {
+		return 0, invalidUTF8Error{}
+	}
+	return read, err
+}
+
+func (r *utf8ValidatingReader) keepIncompleteSuffix(data []byte) bool {
+	maximum := min(utf8.UTFMax-1, len(data))
+	for suffixLen := 1; suffixLen <= maximum; suffixLen++ {
+		start := len(data) - suffixLen
+		want := utf8SequenceSize(data[start])
+		if want <= suffixLen {
+			continue
+		}
+		continuations := true
+		for _, value := range data[start+1:] {
+			if value&0xc0 != 0x80 {
+				continuations = false
+				break
+			}
+		}
+		if continuations && utf8.Valid(data[:start]) {
+			copy(r.sequence[:], data[start:])
+			r.sequenceLen = suffixLen
+			r.sequenceWant = want
+			return true
+		}
+	}
+	return false
+}
+
+func utf8SequenceSize(first byte) int {
+	switch {
+	case first >= 0xc2 && first <= 0xdf:
+		return 2
+	case first >= 0xe0 && first <= 0xef:
+		return 3
+	case first >= 0xf0 && first <= 0xf4:
+		return 4
+	default:
+		return 0
+	}
+}
+
+func decodeJSONValue(reader io.Reader, target any) error {
+	validated := &utf8ValidatingReader{reader: reader}
+	decoder := json.NewDecoder(validated)
+	if err := decoder.Decode(target); err != nil {
+		return err
 	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		if err == nil {
-			return nil, fmt.Errorf("request body must contain exactly one JSON value")
-		}
+		return trailingJSONValueError{cause: err}
+	}
+	return nil
+}
+
+func decodeJSONObject(reader io.Reader) (map[string]any, error) {
+	var body map[string]any
+	if err := decodeJSONValue(reader, &body); err != nil {
 		return nil, err
 	}
 	if body == nil {
@@ -293,7 +393,11 @@ func outputFromOAI(resp map[string]any) protocolOutput {
 		message, _ := choice["message"].(map[string]any)
 		out.Text, _ = message["content"].(string)
 		out.Reasoning, _ = message["reasoning_content"].(string)
-		for _, raw := range anySlice(message["tool_calls"]) {
+		toolCalls := anySlice(message["tool_calls"])
+		if len(toolCalls) > 0 {
+			out.ToolCalls = make([]protocolToolCall, 0, len(toolCalls))
+		}
+		for _, raw := range toolCalls {
 			tc, _ := raw.(map[string]any)
 			fn, _ := tc["function"].(map[string]any)
 			id := stringValue(tc["id"])
@@ -343,12 +447,24 @@ func outputFromGeminiChunkWithUsage(
 		out.Output = protocolIntValue(candidate["tokenCount"])
 		out.Finish = stringValue(candidate["finishReason"])
 		content, _ := candidate["content"].(map[string]any)
-		for _, raw := range anySlice(content["parts"]) {
+		parts := anySlice(content["parts"])
+		for partIndex, raw := range parts {
 			part, _ := raw.(map[string]any)
 			if part == nil {
 				continue
 			}
 			if fc, ok := part["functionCall"].(map[string]any); ok && stringValue(fc["name"]) != "" {
+				if out.ToolCalls == nil {
+					toolCallCount := 1
+					for _, remainingRaw := range parts[partIndex+1:] {
+						remainingPart, _ := remainingRaw.(map[string]any)
+						remainingCall, _ := remainingPart["functionCall"].(map[string]any)
+						if stringValue(remainingCall["name"]) != "" {
+							toolCallCount++
+						}
+					}
+					out.ToolCalls = make([]protocolToolCall, 0, toolCallCount)
+				}
 				id := stringValue(fc["id"])
 				if id == "" {
 					id = "call_" + reqID24()

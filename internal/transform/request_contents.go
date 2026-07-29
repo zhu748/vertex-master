@@ -337,7 +337,27 @@ func extractTextFromInstruction(instruction any) string {
 	}
 	if m, ok := instruction.(map[string]any); ok {
 		if parts, ok := m["parts"].([]any); ok {
+			textLength := 0
+			maximumInt := int(^uint(0) >> 1)
+			for _, p := range parts {
+				pm, ok := p.(map[string]any)
+				if !ok {
+					continue
+				}
+				text, ok := pm["text"].(string)
+				if !ok {
+					continue
+				}
+				if len(text) > maximumInt-textLength {
+					textLength = 0
+					break
+				}
+				textLength += len(text)
+			}
 			var sb strings.Builder
+			if textLength > 0 {
+				sb.Grow(textLength)
+			}
 			for _, p := range parts {
 				if pm, ok := p.(map[string]any); ok {
 					if t, ok := pm["text"]; ok {

@@ -12,6 +12,8 @@ var encodedSkipThoughtSentinel = base64.StdEncoding.EncodeToString( //nolint:goc
 	[]byte(skipThoughtSentinel),
 )
 
+var base64URLReplacer = strings.NewReplacer("-", "+", "_", "/") //nolint:gochecknoglobals
+
 // NormalizeBase64 规范化 base64：剥离 data URI 前缀、URL-safe 字符还原、补 padding。
 func NormalizeBase64(data string) string {
 	value := strings.TrimSpace(data)
@@ -20,9 +22,19 @@ func NormalizeBase64(data string) string {
 			value = value[idx+1:]
 		}
 	}
-	value = strings.NewReplacer("-", "+", "_", "/").Replace(value)
-	if pad := len(value) % 4; pad != 0 {
-		value += strings.Repeat("=", 4-pad)
+	padding := 0
+	if remainder := len(value) % 4; remainder != 0 {
+		padding = 4 - remainder
+	}
+	if strings.IndexByte(value, '-') < 0 && strings.IndexByte(value, '_') < 0 {
+		if padding == 0 {
+			return value
+		}
+		return value + strings.Repeat("=", padding)
+	}
+	value = base64URLReplacer.Replace(value)
+	if padding > 0 {
+		value += strings.Repeat("=", padding)
 	}
 	return value
 }

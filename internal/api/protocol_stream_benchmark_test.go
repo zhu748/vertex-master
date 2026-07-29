@@ -139,6 +139,46 @@ func BenchmarkOutputFromGeminiChunkParts(b *testing.B) {
 	}
 }
 
+func BenchmarkOutputToolCalls(b *testing.B) {
+	geminiParts := make([]any, 16)
+	oaiToolCalls := make([]any, 16)
+	for index := range geminiParts {
+		geminiParts[index] = map[string]any{"functionCall": map[string]any{
+			"id": "call_benchmark", "name": "lookup", "args": map[string]any{"query": "benchmark"},
+		}}
+		oaiToolCalls[index] = map[string]any{
+			"id": "call_benchmark", "function": map[string]any{
+				"name": "lookup", "arguments": `{"query":"benchmark"}`,
+			},
+		}
+	}
+	geminiChunk := map[string]any{"candidates": []any{map[string]any{
+		"content": map[string]any{"parts": geminiParts},
+	}}}
+	oaiResponse := map[string]any{"choices": []any{map[string]any{
+		"message": map[string]any{"tool_calls": oaiToolCalls},
+	}}}
+
+	b.Run("gemini_sixteen", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			benchmarkProtocolOutputResult = outputFromGeminiChunk(geminiChunk)
+			if len(benchmarkProtocolOutputResult.ToolCalls) != len(geminiParts) {
+				b.Fatal("unexpected Gemini tool count")
+			}
+		}
+	})
+	b.Run("openai_sixteen", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			benchmarkProtocolOutputResult = outputFromOAI(oaiResponse)
+			if len(benchmarkProtocolOutputResult.ToolCalls) != len(oaiToolCalls) {
+				b.Fatal("unexpected OpenAI tool count")
+			}
+		}
+	})
+}
+
 func BenchmarkSSEWriterWrite(b *testing.B) {
 	sw := &sseWriter{w: benchmarkResponseWriter{}}
 	line := strings.Repeat("x", 1024)
@@ -355,6 +395,24 @@ func BenchmarkAnthropicToolCallStreamState(b *testing.B) {
 		state.consume(chunk)
 		if len(state.out.ToolCalls) != 1 || state.index != 1 {
 			b.Fatal("unexpected Anthropic tool stream state")
+		}
+	}
+}
+
+func BenchmarkAnthropicMultiToolCallStreamState(b *testing.B) {
+	toolCalls := make([]protocolToolCall, 16)
+	for index := range toolCalls {
+		toolCalls[index] = protocolToolCall{
+			ID: "toolu_benchmark", Name: "lookup", Arguments: `{"query":"benchmark"}`,
+		}
+	}
+	chunk := protocolOutput{ToolCalls: toolCalls}
+	b.ReportAllocs()
+	for range b.N {
+		state := anthropicStreamState{sw: &sseWriter{w: benchmarkResponseWriter{}}}
+		state.consume(chunk)
+		if len(state.out.ToolCalls) != len(toolCalls) || state.index != len(toolCalls) {
+			b.Fatal("unexpected Anthropic multi-tool stream state")
 		}
 	}
 }

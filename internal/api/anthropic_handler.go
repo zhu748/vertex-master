@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -829,6 +830,9 @@ func (s *anthropicStreamState) consume(chunk protocolOutput) {
 		if !s.connected() {
 			return
 		}
+	}
+	if len(chunk.ToolCalls) > 0 {
+		s.out.ToolCalls = slices.Grow(s.out.ToolCalls, len(chunk.ToolCalls))
 	}
 	for _, tc := range chunk.ToolCalls {
 		if !s.connected() {

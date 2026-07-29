@@ -198,7 +198,8 @@ func responsesToChatRequest(body map[string]any) (map[string]any, error) {
 				})
 			case "message", "":
 				flushToolCalls()
-				role := stringValue(item["role"])
+				explicitRole := stringValue(item["role"])
+				role := explicitRole
 				if role == "" {
 					role = "user"
 				}
@@ -212,7 +213,14 @@ func responsesToChatRequest(body map[string]any) (map[string]any, error) {
 						return nil, err
 					}
 				}
-				messages = append(messages, map[string]any{"role": role, "content": content})
+				if explicitRole == role && reusableResponsesMessage(item, content) {
+					// The decoded request is read-only for the remainder of the
+					// handler. Reuse the canonical map instead of allocating an
+					// equivalent Chat message for every history item.
+					messages = append(messages, item)
+				} else {
+					messages = append(messages, map[string]any{"role": role, "content": content})
+				}
 			case "reasoning":
 				// Codex 会把上一轮 reasoning item 放回 input。Gemini 不接受该
 				// Responses 专用项，但它不应打断相邻的并行 function_call 分组。
@@ -375,6 +383,36 @@ func responseContentToChat(v any) (any, error) {
 		}
 	}
 	return content, nil
+}
+
+func reusableResponsesMessage(item map[string]any, convertedContent any) bool {
+	if len(item) < 2 || len(item) > 3 {
+		return false
+	}
+	if stringValue(item["role"]) == "" {
+		return false
+	}
+	if typ := stringValue(item["type"]); typ != "" && typ != "message" {
+		return false
+	}
+	for key := range item {
+		if key != "type" && key != "role" && key != "content" {
+			return false
+		}
+	}
+	switch original := item["content"].(type) {
+	case string:
+		converted, ok := convertedContent.(string)
+		return ok && converted == original
+	case []any:
+		converted, ok := convertedContent.([]any)
+		if !ok || len(converted) != len(original) {
+			return false
+		}
+		return len(original) == 0 || &converted[0] == &original[0]
+	default:
+		return false
+	}
 }
 
 func responsesTextContentCanPassThrough(content []any) bool {

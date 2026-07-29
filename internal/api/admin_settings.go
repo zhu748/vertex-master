@@ -17,7 +17,6 @@ var adminAllowedSettings = map[string]bool{
 	"drop_max_tokens": true, "proxy_url": true,
 	"request_timeout":       true,
 	"parallel_pool_enabled": true, "parallel_pool_size": true,
-	"telemetry_enabled":                   true,
 	"parallel_pool_delay_dynamic":         true,
 	"parallel_pool_delay_ms":              true,
 	"proxy_failover_max_attempts":         true,
@@ -61,10 +60,6 @@ func environmentManagedAdminSettings() map[string]string {
 }
 
 func (adm *AdminHandler) adminGetSettings(w http.ResponseWriter, _ *http.Request) {
-	telEnabled := true
-	if adm.cfg.TelemetryEnabled() != nil {
-		telEnabled = *adm.cfg.TelemetryEnabled()
-	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"managed_fields": environmentManagedAdminSettings(),
 		"settings": map[string]any{
@@ -75,7 +70,6 @@ func (adm *AdminHandler) adminGetSettings(w http.ResponseWriter, _ *http.Request
 			"max_n":                   adm.cfg.MaxN(),
 			"aggregate_stream":        adm.cfg.AggregateStream(),
 			"drop_max_tokens":         adm.cfg.DropMaxTokens(),
-			"telemetry_enabled":       telEnabled,
 			"request_timeout":         adm.cfg.RequestTimeout(),
 			"proxy_url":               adm.cfg.ProxyURL(), "parallel_pool_enabled": adm.cfg.ParallelPoolEnabled(), "parallel_pool_size": adm.cfg.ParallelPoolSize(), "active_node_uri": adm.cfg.ActiveNodeURI(),
 			"parallel_pool_delay_dynamic":         adm.cfg.ParallelPoolDelayDynamic(),
@@ -144,7 +138,7 @@ func (adm *AdminHandler) adminPutSettings(w http.ResponseWriter, r *http.Request
 			}
 			updates[k] = val
 			continue
-		case "aggregate_stream", "drop_max_tokens", "telemetry_enabled",
+		case "aggregate_stream", "drop_max_tokens",
 			"parallel_pool_enabled", "parallel_pool_delay_dynamic",
 			"proxy_health_check_enabled", "sticky_node_priority",
 			"parallel_pool_retry_enabled", "debug_mode", "auto_refresh_logs":

@@ -30,6 +30,72 @@ func Encode(writer io.Writer, value any) error {
 	return nil
 }
 
+// EncodeNoTrailingNewline writes the same bytes as Marshal directly to writer,
+// without retaining a second complete encoding buffer. It is intended for
+// controlled wire types whose JSON serialization cannot fail after an HTTP
+// status has been committed. Unlike Encode, the final newline is withheld.
+func EncodeNoTrailingNewline(writer io.Writer, value any) error {
+	trimmed := trailingNewlineWriter{writer: writer}
+	if err := Encode(&trimmed, value); err != nil {
+		return err
+	}
+	if err := trimmed.finish(); err != nil {
+		return fmt.Errorf("写出 JSON: %w", err)
+	}
+	return nil
+}
+
+type trailingNewlineWriter struct {
+	writer  io.Writer
+	pending [1]byte
+	hasByte bool
+}
+
+func (w *trailingNewlineWriter) Write(data []byte) (int, error) {
+	if len(data) == 0 {
+		return 0, nil
+	}
+	if w.hasByte {
+		written, err := w.writer.Write(w.pending[:])
+		if written != 1 {
+			if err == nil {
+				err = io.ErrShortWrite
+			}
+			return 0, err
+		}
+		if err != nil {
+			return 0, err
+		}
+		w.hasByte = false
+	}
+	if len(data) > 1 {
+		written, err := w.writer.Write(data[:len(data)-1])
+		if written != len(data)-1 {
+			if err == nil {
+				err = io.ErrShortWrite
+			}
+			return written, err
+		}
+		if err != nil {
+			return written, err
+		}
+	}
+	w.pending[0] = data[len(data)-1]
+	w.hasByte = true
+	return len(data), nil
+}
+
+func (w *trailingNewlineWriter) finish() error {
+	if !w.hasByte || w.pending[0] == '\n' {
+		return nil
+	}
+	written, err := w.writer.Write(w.pending[:])
+	if written != 1 && err == nil {
+		return io.ErrShortWrite
+	}
+	return err
+}
+
 // Marshal 序列化为 JSON，不做 HTML 转义、不转义非 ASCII。
 func Marshal(v any) ([]byte, error) {
 	buf, view, err := encodeToMarshalBuffer(v)
@@ -51,6 +117,21 @@ func MarshalString(v any) (string, error) {
 	encoded := string(view)
 	releaseMarshalBuffer(buf)
 	return encoded, nil
+}
+
+// MarshalView serializes v and passes a read-only view of the pooled encoding
+// buffer to consume. The view is valid only for the duration of consume and
+// must not be retained. Unlike Marshal, this avoids copying the complete JSON
+// payload when the consumer can finish synchronously, such as an HTTP Write.
+// consume is called only after serialization succeeds.
+func MarshalView(v any, consume func([]byte)) error {
+	buf, view, err := encodeToMarshalBuffer(v)
+	if err != nil {
+		return err
+	}
+	defer releaseMarshalBuffer(buf)
+	consume(view)
+	return nil
 }
 
 func encodeToMarshalBuffer(v any) (*bytes.Buffer, []byte, error) {

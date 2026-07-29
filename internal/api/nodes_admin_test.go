@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -14,6 +15,59 @@ import (
 	"github.com/bsfdsagfadg/vertex/internal/nodes"
 	"github.com/bsfdsagfadg/vertex/internal/transport"
 )
+
+var benchmarkAdminNodesResponseSize int //nolint:gochecknoglobals
+
+func BenchmarkAdminGetNodesLargePoolPage(b *testing.B) {
+	benchmarkAdminGetNodesLargePool(b, "admin-page-benchmark", "&page=1&page_size=50")
+}
+
+func BenchmarkAdminGetNodesLargePoolURIsOnly(b *testing.B) {
+	benchmarkAdminGetNodesLargePool(b, "admin-uris-benchmark", "&status=healthy&uris_only=true")
+}
+
+func benchmarkAdminGetNodesLargePool(b *testing.B, prefix, querySuffix string) {
+	b.Helper()
+	const nodeCount = 5000
+	list := make([]nodes.Node, nodeCount)
+	uris := make([]string, nodeCount)
+	for index := range list {
+		uri := fmt.Sprintf("http://%s-%d.invalid:8080", prefix, index)
+		uris[index] = uri
+		list[index] = nodes.Node{
+			Type: "http", Name: fmt.Sprintf("%s-%d", prefix, index), RawURI: uri,
+		}
+	}
+	if err := nodes.MergeNodes(list); err != nil {
+		b.Fatal(err)
+	}
+	for _, uri := range uris {
+		nodes.RecordTest(uri, true, 25, "")
+	}
+	b.Cleanup(func() {
+		if err := nodes.BatchDeleteNodes(uris); err != nil {
+			b.Errorf("cleanup benchmark nodes: %v", err)
+		}
+	})
+
+	cfg := config.StaticProvider(config.DefaultConfig())
+	adm := &AdminHandler{handler: handler{cfg: cfg}} //nolint:exhaustruct
+	request := httptest.NewRequest(
+		http.MethodGet,
+		"/api/admin/nodes?query="+prefix+querySuffix,
+		nil,
+	)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		recorder := httptest.NewRecorder()
+		adm.adminGetNodes(recorder, request)
+		if recorder.Code != http.StatusOK {
+			b.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+		}
+		benchmarkAdminNodesResponseSize = recorder.Body.Len()
+	}
+}
 
 func TestReadLimitedSubscriptionBody(t *testing.T) {
 	data, err := readLimitedSubscriptionBody(strings.NewReader("proxy-list"), -1)
@@ -166,10 +220,12 @@ func TestAdminGetNodesPaginationAndFilters(t *testing.T) {
 	const prefix = "admin-pagination-filter-test"
 	firstURI := "http://127.0.0.1:49101#" + prefix + "-first"
 	secondURI := "socks5://127.0.0.1:49102#" + prefix + "-second"
-	nodes.MergeNodes([]nodes.Node{
+	if err := nodes.MergeNodes([]nodes.Node{
 		{Type: "http", Name: prefix + "-first", RawURI: firstURI},                     //nolint:exhaustruct
 		{Type: "socks5", Name: prefix + "-second", RawURI: secondURI, Disabled: true}, //nolint:exhaustruct
-	})
+	}); err != nil {
+		t.Fatalf("MergeNodes() error = %v", err)
+	}
 	t.Cleanup(func() {
 		nodes.DeleteNode(firstURI)
 		nodes.DeleteNode(secondURI)

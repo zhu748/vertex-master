@@ -1,11 +1,78 @@
 package api
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/binary"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/bsfdsagfadg/vertex/internal/vertex"
 )
+
+type audioBenchmarkWriter struct {
+	header http.Header
+}
+
+func (w *audioBenchmarkWriter) Header() http.Header          { return w.header }
+func (*audioBenchmarkWriter) WriteHeader(int)                {}
+func (*audioBenchmarkWriter) Write(data []byte) (int, error) { return len(data), nil }
+
+func TestAudioResponseRawPrefersExtractedBytes(t *testing.T) {
+	raw := []byte{1, 2, 3, 4}
+	got, err := audioResponseRaw(vertex.AudioData{Raw: raw, Data: "not-base64"})
+	if err != nil || !bytes.Equal(got, raw) {
+		t.Fatalf("raw audio: got=%v err=%v", got, err)
+	}
+
+	encoded := base64.StdEncoding.EncodeToString(raw)
+	got, err = audioResponseRaw(vertex.AudioData{Data: encoded})
+	if err != nil || !bytes.Equal(got, raw) {
+		t.Fatalf("legacy base64 audio: got=%v err=%v", got, err)
+	}
+}
+
+func TestWriteTTSAudioPreservesWAVBytes(t *testing.T) {
+	raw := []byte{1, 2, 3, 4, 5, 6}
+	recorder := httptest.NewRecorder()
+	writeTTSAudio(recorder, raw, "audio/L16;rate=16000", ttsFormat{"audio/wav", true})
+	want := append(ttsWAVHeader(len(raw), 16000), raw...)
+	if recorder.Code != 200 || recorder.Header().Get("Content-Type") != "audio/wav" ||
+		!bytes.Equal(recorder.Body.Bytes(), want) {
+		t.Fatalf("WAV response: status=%d header=%v body=%v", recorder.Code, recorder.Header(), recorder.Body.Bytes())
+	}
+}
+
+func BenchmarkWriteTTSAudioOneMiB(b *testing.B) {
+	raw := bytes.Repeat([]byte{0x7f}, 1<<20)
+	encoded := base64.StdEncoding.EncodeToString(raw)
+	b.Run("direct_raw", func(b *testing.B) {
+		writer := &audioBenchmarkWriter{header: make(http.Header)}
+		b.ReportAllocs()
+		b.SetBytes(int64(len(raw)))
+		for range b.N {
+			writeTTSAudio(writer, raw, "audio/L16;rate=24000", ttsFormat{"audio/wav", true})
+		}
+	})
+	b.Run("legacy_decode_and_copy", func(b *testing.B) {
+		writer := &audioBenchmarkWriter{header: make(http.Header)}
+		b.ReportAllocs()
+		b.SetBytes(int64(len(raw)))
+		for range b.N {
+			decoded, err := base64.StdEncoding.DecodeString(encoded)
+			if err != nil {
+				b.Fatal(err)
+			}
+			output := append(ttsWAVHeader(len(decoded), 24000), decoded...)
+			if _, err := writer.Write(output); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
 
 // ---- ttsWAVHeader：字节级断言 RIFF/WAVE 头结构 ----
 

@@ -2,6 +2,7 @@ package transform
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -771,6 +772,81 @@ func TestToNativeSchema(t *testing.T) {
 	}
 	if p0["value"].(map[string]any)["type"] != "STRING" {
 		t.Errorf("嵌套 type 应大写: %v", p0["value"])
+	}
+}
+
+func TestCleanNativeFunctionParametersFusesCleaningWithoutMutatingInput(t *testing.T) {
+	schema := map[string]any{
+		"type":  []any{"null", "array"},
+		"title": "removed",
+		"anyOf": []any{map[string]any{"type": "string"}},
+		"items": map[string]any{
+			"type":      "object",
+			"maxLength": float64(8),
+			"properties": map[string]any{
+				"enabled": map[string]any{"type": "boolean", "$ref": "removed"},
+			},
+		},
+	}
+	before, err := json.Marshal(schema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	native := cleanNativeFunctionParameters(schema).(map[string]any)
+	after, err := json.Marshal(schema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("fused schema conversion mutated input:\nbefore=%s\nafter=%s", before, after)
+	}
+	if native["type"] != "ARRAY" || native["title"] != nil || native["anyOf"] != nil {
+		t.Fatalf("top-level native schema=%#v", native)
+	}
+	items := native["items"].(map[string]any)
+	if items["type"] != "OBJECT" || items["maxLength"] != "8" {
+		t.Fatalf("native items=%#v", items)
+	}
+	properties := items["properties"].([]any)
+	if len(properties) != 1 {
+		t.Fatalf("native properties=%#v", properties)
+	}
+	property := properties[0].(map[string]any)
+	value := property["value"].(map[string]any)
+	if property["key"] != "enabled" || value["type"] != "BOOLEAN" || value["$ref"] != nil {
+		t.Fatalf("native property=%#v", property)
+	}
+}
+
+func TestCanonicalNativeToolsPassThroughOnlyNativeFunctionDeclarations(t *testing.T) {
+	native := []any{map[string]any{"functionDeclarations": []any{map[string]any{
+		"name": "lookup",
+		"parameters": map[string]any{
+			"type": "OBJECT",
+			"properties": []any{map[string]any{
+				"key": "query", "value": map[string]any{"type": "STRING"},
+			}},
+		},
+	}}}}
+	got, ok := canonicalNativeTools(native)
+	if !ok || len(got) != 1 || &got[0] != &native[0] {
+		t.Fatalf("canonical native tools did not pass through: ok=%v got=%#v", ok, got)
+	}
+
+	standard := []any{map[string]any{"functionDeclarations": []any{map[string]any{
+		"name": "lookup",
+		"parameters": map[string]any{
+			"type": "object", "properties": map[string]any{},
+		},
+	}}}}
+	if got, ok := canonicalNativeTools(standard); ok || got != nil {
+		t.Fatalf("standard schema unexpectedly passed native fast path: %#v", got)
+	}
+	withExtraField := []any{map[string]any{"functionDeclarations": []any{map[string]any{
+		"name": "lookup", "parameters": map[string]any{"type": "OBJECT"}, "unexpected": true,
+	}}}}
+	if got, ok := canonicalNativeTools(withExtraField); ok || got != nil {
+		t.Fatalf("extended declaration unexpectedly passed native fast path: %#v", got)
 	}
 }
 

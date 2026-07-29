@@ -3,9 +3,7 @@ package api
 import (
 	cryptorand "crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
-	"io"
 	"math/rand/v2"
 	"net/http"
 	"strconv"
@@ -34,17 +32,17 @@ func (h *handler) decodeAdminBody(w http.ResponseWriter, r *http.Request, dst an
 		writeJSON(w, http.StatusBadRequest, adminErr("请求体为空 (empty body)"))
 		return false
 	}
-	decoder := json.NewDecoder(r.Body)
-	if err := decoder.Decode(dst); err != nil {
+	if err := decodeJSONValue(r.Body, dst); err != nil {
 		if isRequestBodyTooLarge(err) {
 			writeJSON(w, http.StatusRequestEntityTooLarge, adminErr("请求体过大 (request body too large)"))
 			return false
 		}
+		var trailingError trailingJSONValueError
+		if errors.As(err, &trailingError) {
+			writeJSON(w, http.StatusBadRequest, adminErr("请求格式错误：只能包含一个 JSON 值"))
+			return false
+		}
 		writeJSON(w, http.StatusBadRequest, adminErr("请求格式错误 (invalid JSON)"))
-		return false
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		writeJSON(w, http.StatusBadRequest, adminErr("请求格式错误：只能包含一个 JSON 值"))
 		return false
 	}
 	return true
@@ -62,16 +60,16 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	if status < 100 || status > 599 {
 		status = http.StatusInternalServerError
 	}
-	data, err := jsonx.Marshal(body)
-	if err != nil {
+	if err := jsonx.MarshalView(body, func(data []byte) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(`{"error":{"message":"序列化失败 (internal error)","type":"server_error","code":500}}`))
+		w.WriteHeader(status)
+		_, _ = w.Write(data)
+	}); err == nil {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(status)
-	_, _ = w.Write(data)
+	w.WriteHeader(http.StatusInternalServerError)
+	_, _ = w.Write([]byte(`{"error":{"message":"序列化失败 (internal error)","type":"server_error","code":500}}`))
 }
 
 func oaiError(w http.ResponseWriter, status int, msg, errType string) {

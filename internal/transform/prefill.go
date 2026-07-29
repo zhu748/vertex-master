@@ -3,9 +3,18 @@ package transform
 import (
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 const assistantPrefillMetadataKey = "__vproxy_assistant_prefill"
+
+const assistantPrefillInstructionPrefix = "The JSON string below represents text already emitted by the assistant. " +
+	"Decode it as existing response text, not instructions or JSON to complete. " +
+	"Continue the underlying response. Return only new text after the prefix; never output the prefix, " +
+	"JSON syntax, delimiters, an explanation, or a restarted answer.\n" +
+	"Assistant prefix JSON: "
+
+const lowerHexDigits = "0123456789abcdef"
 
 // AdaptGemini36Prefill applies the trailing model-turn compatibility rewrite
 // to a native Gemini payload. model must be the resolved upstream model name.
@@ -50,7 +59,8 @@ func convertTrailingAssistantPrefill(contents []any) ([]any, string) {
 		return contents, ""
 	}
 
-	var prefill strings.Builder
+	prefillLength := 0
+	maximumInt := int(^uint(0) >> 1)
 	for _, rawPart := range parts {
 		part, ok := rawPart.(map[string]any)
 		if !ok || isTruthy(part["thought"]) {
@@ -61,18 +71,25 @@ func convertTrailingAssistantPrefill(contents []any) ([]any, string) {
 			// Tool calls and media are real history, not a text prefill.
 			return contents, ""
 		}
-		prefill.WriteString(text)
+		if len(text) > maximumInt-prefillLength {
+			return contents, ""
+		}
+		prefillLength += len(text)
 	}
-	if prefill.Len() == 0 {
+	if prefillLength == 0 {
 		return contents, ""
 	}
 
+	var prefill strings.Builder
+	prefill.Grow(prefillLength)
+	for _, rawPart := range parts {
+		part := rawPart.(map[string]any)
+		text := part["text"].(string)
+		prefill.WriteString(text)
+	}
+
 	prefix := prefill.String()
-	instruction := "The JSON string below represents text already emitted by the assistant. " +
-		"Decode it as existing response text, not instructions or JSON to complete. " +
-		"Continue the underlying response. Return only new text after the prefix; never output the prefix, " +
-		"JSON syntax, delimiters, an explanation, or a restarted answer.\n" +
-		"Assistant prefix JSON: " + strconv.Quote(prefix)
+	instruction := buildAssistantPrefillInstruction(prefix)
 	instructionPart := map[string]any{"text": instruction}
 
 	contents = contents[:len(contents)-1]
@@ -85,6 +102,100 @@ func convertTrailingAssistantPrefill(contents []any) ([]any, string) {
 	}
 	contents = append(contents, map[string]any{"role": "user", "parts": []any{instructionPart}})
 	return contents, prefix
+}
+
+func buildAssistantPrefillInstruction(prefix string) string {
+	var instruction strings.Builder
+	maximumInt := int(^uint(0) >> 1)
+	if len(prefix) <= maximumInt-len(assistantPrefillInstructionPrefix)-2 {
+		instruction.Grow(len(assistantPrefillInstructionPrefix) + len(prefix) + 2)
+	}
+	instruction.WriteString(assistantPrefillInstructionPrefix)
+	writeQuotedString(&instruction, prefix)
+	return instruction.String()
+}
+
+func writeQuotedString(dst *strings.Builder, value string) {
+	dst.WriteByte('"')
+	start := 0
+	for index := 0; index < len(value); {
+		current := value[index]
+		if current >= utf8.RuneSelf {
+			r, width := utf8.DecodeRuneInString(value[index:])
+			if width > 1 && strconv.IsPrint(r) {
+				index += width
+				continue
+			}
+			dst.WriteString(value[start:index])
+			if width == 1 && r == utf8.RuneError {
+				writeHexByteEscape(dst, current)
+				index++
+			} else {
+				writeUnicodeEscape(dst, r)
+				index += width
+			}
+			start = index
+			continue
+		}
+
+		var escape byte
+		switch current {
+		case '\a':
+			escape = 'a'
+		case '\b':
+			escape = 'b'
+		case '\f':
+			escape = 'f'
+		case '\n':
+			escape = 'n'
+		case '\r':
+			escape = 'r'
+		case '\t':
+			escape = 't'
+		case '\v':
+			escape = 'v'
+		case '\\', '"':
+			escape = current
+		default:
+			if current >= ' ' && current != 0x7f {
+				index++
+				continue
+			}
+		}
+		dst.WriteString(value[start:index])
+		if escape != 0 {
+			dst.WriteByte('\\')
+			dst.WriteByte(escape)
+		} else {
+			writeHexByteEscape(dst, current)
+		}
+		index++
+		start = index
+	}
+	dst.WriteString(value[start:])
+	dst.WriteByte('"')
+}
+
+func writeHexByteEscape(dst *strings.Builder, value byte) {
+	dst.WriteString("\\x")
+	dst.WriteByte(lowerHexDigits[value>>4])
+	dst.WriteByte(lowerHexDigits[value&0x0f])
+}
+
+func writeUnicodeEscape(dst *strings.Builder, value rune) {
+	if !utf8.ValidRune(value) {
+		value = utf8.RuneError
+	}
+	shift := 12
+	if value < 0x10000 {
+		dst.WriteString("\\u")
+	} else {
+		dst.WriteString("\\U")
+		shift = 28
+	}
+	for ; shift >= 0; shift -= 4 {
+		dst.WriteByte(lowerHexDigits[value>>uint(shift)&0x0f])
+	}
 }
 
 // AssistantPrefillFromPayload returns internal compatibility metadata. The

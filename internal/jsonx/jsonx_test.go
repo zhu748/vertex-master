@@ -7,8 +7,9 @@ import (
 	"testing"
 )
 
-var benchmarkMarshalBytes []byte  //nolint:gochecknoglobals
-var benchmarkMarshalString string //nolint:gochecknoglobals
+var benchmarkMarshalBytes []byte   //nolint:gochecknoglobals
+var benchmarkMarshalString string  //nolint:gochecknoglobals
+var benchmarkMarshalViewLength int //nolint:gochecknoglobals
 
 type escapedHTMLMarshaler struct{}
 
@@ -68,6 +69,21 @@ func BenchmarkMarshalString(b *testing.B) {
 	}
 }
 
+func BenchmarkMarshalView(b *testing.B) {
+	value := map[string]any{
+		"text": strings.Repeat("<tag>你好&value</tag>", 1024),
+	}
+	b.ReportAllocs()
+	b.SetBytes(int64(len(value["text"].(string))))
+	for range b.N {
+		if err := MarshalView(value, func(encoded []byte) {
+			benchmarkMarshalViewLength = len(encoded)
+		}); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func TestMarshal(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -121,6 +137,52 @@ func TestEncodeWritesUnescapedJSONWithTrailingNewline(t *testing.T) {
 	}
 }
 
+func TestEncodeNoTrailingNewlineMatchesMarshal(t *testing.T) {
+	value := map[string]any{
+		"html":   "<b>你好</b> & ok",
+		"nested": []any{true, nil, map[string]any{"value": "😀"}},
+	}
+	want, err := Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := EncodeNoTrailingNewline(&output, value); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(output.Bytes(), want) {
+		t.Fatalf("EncodeNoTrailingNewline()=%q, Marshal()=%q", output.Bytes(), want)
+	}
+}
+
+func TestTrailingNewlineWriterHandlesMultipleWrites(t *testing.T) {
+	var output bytes.Buffer
+	writer := trailingNewlineWriter{writer: &output}
+	for _, chunk := range [][]byte{[]byte("first"), []byte(" second"), []byte("\n")} {
+		if written, err := writer.Write(chunk); err != nil || written != len(chunk) {
+			t.Fatalf("write %q: written=%d err=%v", chunk, written, err)
+		}
+	}
+	if err := writer.finish(); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := output.String(), "first second"; got != want {
+		t.Fatalf("trimmed output=%q, want %q", got, want)
+	}
+}
+
+func TestEncodeNoTrailingNewlineDoesNotWriteOnMarshalError(t *testing.T) {
+	cyclic := map[string]any{}
+	cyclic["self"] = cyclic
+	var output bytes.Buffer
+	if err := EncodeNoTrailingNewline(&output, cyclic); err == nil {
+		t.Fatal("cyclic value error = nil")
+	}
+	if output.Len() != 0 {
+		t.Fatalf("partial output after marshal error: %q", output.Bytes())
+	}
+}
+
 func TestMarshalMatchesUnescapedEncoder(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -167,6 +229,33 @@ func TestMarshalCyclicValueReturnsError(t *testing.T) {
 	value["self"] = value
 	if _, err := Marshal(value); err == nil {
 		t.Fatal("Marshal() cyclic value error = nil")
+	}
+}
+
+func TestMarshalViewMatchesMarshalAndSkipsConsumerOnError(t *testing.T) {
+	value := map[string]any{"html": "<b>你好</b> & ok"}
+	want, err := Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []byte
+	if err := MarshalView(value, func(view []byte) {
+		got = append(got, view...)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("MarshalView()=%q, Marshal()=%q", got, want)
+	}
+
+	cyclic := map[string]any{}
+	cyclic["self"] = cyclic
+	called := false
+	if err := MarshalView(cyclic, func([]byte) { called = true }); err == nil {
+		t.Fatal("MarshalView() cyclic value error = nil")
+	}
+	if called {
+		t.Fatal("MarshalView consumer ran after serialization failure")
 	}
 }
 

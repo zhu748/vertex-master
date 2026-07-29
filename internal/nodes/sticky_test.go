@@ -41,7 +41,7 @@ func TestStickySnapshotConcurrentReadersAndUpdates(t *testing.T) {
 			defer workers.Done()
 			for iteration := range 1000 {
 				uri := fmt.Sprintf("node-%d", (worker+iteration)%32)
-				_, _ = pool.snapshot()[uri]
+				_ = pool.snapshot()[uri]
 			}
 		}()
 	}

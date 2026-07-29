@@ -13,7 +13,14 @@ import (
 	"github.com/bsfdsagfadg/vertex/internal/config"
 )
 
-var benchmarkSelectedNodes []Node //nolint:gochecknoglobals
+var (
+	benchmarkSelectedNodes    []Node                 //nolint:gochecknoglobals
+	benchmarkHealthPointers   map[string]*NodeHealth //nolint:gochecknoglobals
+	benchmarkNodePoolStats    NodePoolStats          //nolint:gochecknoglobals
+	benchmarkNodePoolSnapshot NodePoolSnapshot       //nolint:gochecknoglobals
+	benchmarkNodePageSnapshot NodePoolPageSnapshot   //nolint:gochecknoglobals
+	benchmarkNodeURIs         []string               //nolint:gochecknoglobals
+)
 
 func resetState() {
 	mu.Lock()
@@ -118,6 +125,353 @@ func BenchmarkRecordSelectionLargePool(b *testing.B) {
 	b.ResetTimer()
 	for range b.N {
 		RecordSelection(target)
+	}
+}
+
+func BenchmarkEnableNodeLargePool(b *testing.B) {
+	const nodeCount = 5000
+	nodes := make([]Node, nodeCount)
+	health := make(map[string]*NodeHealth, 1)
+	for index := range nodes {
+		rawURI := fmt.Sprintf("http://enable-node-%d.invalid:8080", index)
+		nodes[index] = Node{Name: fmt.Sprintf("node-%d", index), RawURI: rawURI}
+	}
+	target := nodes[len(nodes)-1].RawURI
+	nodes[len(nodes)-1].Disabled = true
+	health[target] = &NodeHealth{CooldownUntil: time.Now().Add(time.Minute).Unix()}
+
+	mu.Lock()
+	previousNodes, previousIndex, previousHealth, previousLoaded :=
+		nodeList, nodeIndexByURI, healthMap, loaded
+	nodeList, healthMap, loaded = nodes, health, true
+	rebuildNodeIndexUnsafe()
+	mu.Unlock()
+	b.Cleanup(func() {
+		mu.Lock()
+		nodeList, nodeIndexByURI, healthMap, loaded =
+			previousNodes, previousIndex, previousHealth, previousLoaded
+		mu.Unlock()
+	})
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if !EnableNode(target) {
+			b.Fatal("target node disappeared")
+		}
+	}
+}
+
+func BenchmarkPruneHealthLargePool(b *testing.B) {
+	const nodeCount = 5000
+	const staleCount = 500
+	nodes := make([]Node, nodeCount)
+	health := make(map[string]*NodeHealth, nodeCount+staleCount)
+	for index := range nodes {
+		uri := fmt.Sprintf("http://prune-node-%d.invalid:8080", index)
+		nodes[index] = Node{Name: fmt.Sprintf("node-%d", index), RawURI: uri}
+		health[uri] = &NodeHealth{SuccessCount: 1} //nolint:exhaustruct
+	}
+	for index := range staleCount {
+		uri := fmt.Sprintf("http://stale-node-%d.invalid:8080", index)
+		health[uri] = &NodeHealth{FailCount: 1} //nolint:exhaustruct
+	}
+
+	mu.Lock()
+	previousNodes, previousIndex, previousHealth, previousLoaded := nodeList, nodeIndexByURI, healthMap, loaded
+	nodeList, healthMap, loaded = nodes, health, true
+	rebuildNodeIndexUnsafe()
+	mu.Unlock()
+	b.Cleanup(func() {
+		mu.Lock()
+		nodeList, nodeIndexByURI, healthMap, loaded = previousNodes, previousIndex, previousHealth, previousLoaded
+		mu.Unlock()
+	})
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		mu.Lock()
+		for index := range staleCount {
+			uri := fmt.Sprintf("http://stale-node-%d.invalid:8080", index)
+			healthMap[uri] = &NodeHealth{FailCount: 1} //nolint:exhaustruct
+		}
+		pruneHealthUnsafe()
+		mu.Unlock()
+	}
+}
+
+func BenchmarkSelectNodesForHealthCheckLargePool(b *testing.B) {
+	const nodeCount = 5000
+	nodes := make([]Node, nodeCount)
+	health := make(map[string]*NodeHealth, nodeCount)
+	now := time.Now()
+	for index := range nodes {
+		uri := fmt.Sprintf("http://health-node-%d.invalid:8080", index)
+		nodes[index] = Node{Name: fmt.Sprintf("node-%d", index), RawURI: uri}
+		health[uri] = &NodeHealth{
+			LastSuccessAt: now.Add(-time.Duration(index+1) * time.Second).Unix(),
+		}
+	}
+
+	mu.Lock()
+	previousNodes, previousIndex, previousHealth, previousLoaded := nodeList, nodeIndexByURI, healthMap, loaded
+	nodeList, healthMap, loaded = nodes, health, true
+	rebuildNodeIndexUnsafe()
+	mu.Unlock()
+	b.Cleanup(func() {
+		mu.Lock()
+		nodeList, nodeIndexByURI, healthMap, loaded = previousNodes, previousIndex, previousHealth, previousLoaded
+		mu.Unlock()
+	})
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		benchmarkSelectedNodes = SelectNodesForHealthCheck(50, 0, now)
+	}
+}
+
+func BenchmarkLoadNodePoolSnapshotLargePool(b *testing.B) {
+	const nodeCount = 5000
+	nodes := make([]Node, nodeCount)
+	health := make(map[string]*NodeHealth, nodeCount)
+	now := time.Now()
+	for index := range nodes {
+		uri := fmt.Sprintf("http://snapshot-node-%d.invalid:8080", index)
+		nodes[index] = Node{Name: fmt.Sprintf("node-%d", index), RawURI: uri}
+		health[uri] = &NodeHealth{
+			SuccessCount:  1,
+			LastSuccessAt: now.Unix(),
+		}
+	}
+
+	mu.Lock()
+	previousNodes, previousIndex, previousHealth, previousLoaded := nodeList, nodeIndexByURI, healthMap, loaded
+	nodeList, healthMap, loaded = nodes, health, true
+	rebuildNodeIndexUnsafe()
+	mu.Unlock()
+	b.Cleanup(func() {
+		mu.Lock()
+		nodeList, nodeIndexByURI, healthMap, loaded = previousNodes, previousIndex, previousHealth, previousLoaded
+		mu.Unlock()
+	})
+
+	b.Run("separate_reads", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			benchmarkSelectedNodes = LoadNodes()
+			benchmarkHealthPointers = LoadHealth()
+			benchmarkNodePoolStats = GetNodePoolStats(now)
+		}
+	})
+	b.Run("consistent_snapshot", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			benchmarkNodePoolSnapshot = LoadNodePoolSnapshot(now)
+		}
+	})
+	b.Run("filtered_page", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			benchmarkNodePageSnapshot = LoadNodePoolPageSnapshot(now, 1, 50, nil)
+		}
+	})
+	b.Run("filtered_uris", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			benchmarkNodeURIs = LoadFilteredNodeURIs(nil)
+		}
+	})
+}
+
+func BenchmarkSortNodesLargePoolAlreadySorted(b *testing.B) {
+	const nodeCount = 5000
+	nodes := make([]Node, nodeCount)
+	health := make(map[string]*NodeHealth, nodeCount)
+	for index := range nodes {
+		rawURI := fmt.Sprintf("http://sort-node-%d.invalid:8080", index)
+		nodes[index] = Node{
+			Name:   fmt.Sprintf("node-%05d", index),
+			RawURI: rawURI,
+		}
+		health[rawURI] = &NodeHealth{LastTestMs: float64(index + 1)}
+	}
+
+	mu.Lock()
+	previousNodes, previousIndex, previousHealth, previousLoaded :=
+		nodeList, nodeIndexByURI, healthMap, loaded
+	nodeList, healthMap, loaded = nodes, health, true
+	rebuildNodeIndexUnsafe()
+	mu.Unlock()
+	b.Cleanup(func() {
+		mu.Lock()
+		nodeList, nodeIndexByURI, healthMap, loaded =
+			previousNodes, previousIndex, previousHealth, previousLoaded
+		mu.Unlock()
+	})
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		SortNodesByLatency()
+	}
+}
+
+func TestPruneHealthRemovesOnlyUnknownNodes(t *testing.T) {
+	resetState()
+	defer resetState()
+
+	firstURI := "http://first.invalid:8080"
+	secondURI := "http://second.invalid:8080"
+	staleURI := "http://stale.invalid:8080"
+	mu.Lock()
+	nodeList = []Node{
+		{Name: "first", RawURI: firstURI},
+		{Name: "second", RawURI: secondURI},
+	}
+	healthMap = map[string]*NodeHealth{
+		firstURI:  {SuccessCount: 1},
+		secondURI: {FailCount: 1},
+		staleURI:  {FailCount: 2},
+	}
+	loaded = true
+	rebuildNodeIndexUnsafe()
+	pruneHealthUnsafe()
+	mu.Unlock()
+
+	health := LoadHealth()
+	if len(health) != 2 || health[firstURI] == nil || health[secondURI] == nil {
+		t.Fatalf("pruned health = %#v, want only known nodes", health)
+	}
+	if health[staleURI] != nil {
+		t.Fatalf("stale health survived pruning: %#v", health[staleURI])
+	}
+}
+
+func TestLoadNodePoolSnapshotIsConsistentAndDetached(t *testing.T) {
+	resetState()
+	defer resetState()
+
+	now := time.Now()
+	healthyURI := "http://healthy.invalid:8080"
+	disabledURI := "http://disabled.invalid:8080"
+	mu.Lock()
+	nodeList = []Node{
+		{Name: "healthy", RawURI: healthyURI},
+		{Name: "disabled", RawURI: disabledURI, Disabled: true},
+	}
+	healthMap = map[string]*NodeHealth{
+		healthyURI: {SuccessCount: 2, LastSuccessAt: now.Unix()},
+	}
+	subscriptionSources = map[string]map[int64]bool{
+		healthyURI: {1: true, 2: true},
+	}
+	loaded = true
+	rebuildNodeIndexUnsafe()
+	mu.Unlock()
+
+	snapshot := LoadNodePoolSnapshot(now)
+	if len(snapshot.Nodes) != 2 || len(snapshot.Health) != 2 || len(snapshot.HasHealth) != 2 {
+		t.Fatalf("snapshot sizes: nodes=%d health=%d", len(snapshot.Nodes), len(snapshot.Health))
+	}
+	if snapshot.Nodes[0].SubscriptionSourceCount != 2 {
+		t.Fatalf("subscription source count=%d, want 2", snapshot.Nodes[0].SubscriptionSourceCount)
+	}
+	if snapshot.Stats.Total != 2 || snapshot.Stats.Enabled != 1 ||
+		snapshot.Stats.Disabled != 1 || snapshot.Stats.Healthy != 1 {
+		t.Fatalf("snapshot stats: %#v", snapshot.Stats)
+	}
+
+	snapshot.Nodes[0].Name = "mutated"
+	snapshot.Health[0].SuccessCount = 99
+	next := LoadNodePoolSnapshot(now)
+	if next.Nodes[0].Name != "healthy" || next.Health[0].SuccessCount != 2 {
+		t.Fatalf("snapshot mutation leaked into store: %#v %#v", next.Nodes[0], next.Health[0])
+	}
+}
+
+func TestLoadNodePoolPageSnapshotFiltersPagesClampsAndDetaches(t *testing.T) {
+	resetState()
+	defer resetState()
+
+	now := time.Now()
+	mu.Lock()
+	nodeList = []Node{
+		{Name: "manual", RawURI: "http://manual.invalid"},
+		{Name: "subscription-one", RawURI: "http://one.invalid"},
+		{Name: "subscription-two", RawURI: "http://two.invalid", Disabled: true},
+		{Name: "subscription-three", RawURI: "http://three.invalid"},
+	}
+	healthMap = map[string]*NodeHealth{
+		"http://one.invalid":   {SuccessCount: 2, LastSuccessAt: now.Unix()},
+		"http://three.invalid": {FailCount: 1, ConsecutiveFailures: 1, LastFailAt: now.Unix()},
+	}
+	subscriptionSources = map[string]map[int64]bool{
+		"http://one.invalid":   {1: true},
+		"http://two.invalid":   {1: true, 2: true},
+		"http://three.invalid": {2: true},
+	}
+	loaded = true
+	rebuildNodeIndexUnsafe()
+	mu.Unlock()
+
+	matchSubscription := func(node Node, _ *NodeHealth) bool {
+		return node.SubscriptionSourceCount > 0
+	}
+	snapshot := LoadNodePoolPageSnapshot(now, 2, 1, matchSubscription)
+	if snapshot.TotalMatches != 3 || snapshot.Page != 2 || snapshot.PageSize != 1 ||
+		snapshot.TotalPages != 3 || len(snapshot.Nodes) != 1 {
+		t.Fatalf("page snapshot metadata=%#v", snapshot)
+	}
+	if snapshot.Nodes[0].Name != "subscription-two" ||
+		snapshot.Nodes[0].SubscriptionSourceCount != 2 || snapshot.HasHealth[0] {
+		t.Fatalf("page snapshot entry=%#v health=%#v hasHealth=%v",
+			snapshot.Nodes[0], snapshot.Health[0], snapshot.HasHealth[0])
+	}
+	if snapshot.Stats.Total != 4 || snapshot.Stats.Enabled != 3 ||
+		snapshot.Stats.Disabled != 1 || snapshot.Stats.Healthy != 1 ||
+		snapshot.Stats.Unhealthy != 1 {
+		t.Fatalf("page snapshot stats=%#v", snapshot.Stats)
+	}
+
+	clamped := LoadNodePoolPageSnapshot(now, 99, 1, matchSubscription)
+	if clamped.Page != 3 || clamped.TotalPages != 3 || len(clamped.Nodes) != 1 ||
+		clamped.Nodes[0].Name != "subscription-three" || !clamped.HasHealth[0] {
+		t.Fatalf("clamped page=%#v", clamped)
+	}
+	clamped.Nodes[0].Name = "mutated"
+	clamped.Health[0].FailCount = 99
+	next := LoadNodePoolPageSnapshot(now, 3, 1, matchSubscription)
+	if next.Nodes[0].Name != "subscription-three" || next.Health[0].FailCount != 1 {
+		t.Fatalf("page mutation leaked into store: %#v %#v", next.Nodes[0], next.Health[0])
+	}
+
+	unpaged := LoadNodePoolPageSnapshot(now, 7, 0, matchSubscription)
+	if unpaged.Page != 1 || unpaged.PageSize != 3 || unpaged.TotalPages != 1 ||
+		len(unpaged.Nodes) != 3 {
+		t.Fatalf("unpaged snapshot=%#v", unpaged)
+	}
+
+	maxInt := int(^uint(0) >> 1)
+	extreme := LoadNodePoolPageSnapshot(now, maxInt, maxInt, matchSubscription)
+	if extreme.Page != 1 || extreme.PageSize != maxInt || extreme.TotalPages != 1 ||
+		len(extreme.Nodes) != 3 {
+		t.Fatalf("extreme pagination snapshot=%#v", extreme)
+	}
+
+	healthyURIs := LoadFilteredNodeURIs(func(node Node, health *NodeHealth) bool {
+		return node.SubscriptionSourceCount > 0 && health != nil && health.SuccessCount > 0
+	})
+	if len(healthyURIs) != 1 || healthyURIs[0] != "http://one.invalid" {
+		t.Fatalf("filtered URIs=%#v", healthyURIs)
+	}
+	healthyURIs[0] = "mutated"
+	nextURIs := LoadFilteredNodeURIs(func(_ Node, health *NodeHealth) bool {
+		return health != nil && health.SuccessCount > 0
+	})
+	if len(nextURIs) != 1 || nextURIs[0] != "http://one.invalid" {
+		t.Fatalf("URI result mutation leaked into store: %#v", nextURIs)
 	}
 }
 
@@ -241,7 +595,9 @@ func TestNodesLifecycle(t *testing.T) {
 	n1 := Node{RawURI: "uri1", Name: "node1"} //nolint:exhaustruct
 	n2 := Node{RawURI: "uri2", Name: "node2"} //nolint:exhaustruct
 
-	MergeNodes([]Node{n1, n2})
+	if err := MergeNodes([]Node{n1, n2, n1}); err != nil {
+		t.Fatalf("MergeNodes() error = %v", err)
+	}
 
 	nodes := LoadNodes()
 	if len(nodes) != 2 {
@@ -249,7 +605,9 @@ func TestNodesLifecycle(t *testing.T) {
 	}
 
 	// Test Dedup
-	MergeNodes([]Node{n1}) // Add duplicate
+	if err := MergeNodes([]Node{n1}); err != nil { // Add duplicate
+		t.Fatalf("MergeNodes() duplicate error = %v", err)
+	}
 	if len(LoadNodes()) != 2 {
 		t.Fatalf("Expected 2 nodes after merging duplicate, got %d", len(LoadNodes()))
 	}
@@ -275,7 +633,9 @@ func TestNodesLifecycle(t *testing.T) {
 	}
 
 	// Test BatchUpdateNodesDisabled
-	BatchUpdateNodesDisabled([]string{"uri1"}, true)
+	if err := BatchUpdateNodesDisabled([]string{"uri1"}, true); err != nil {
+		t.Fatalf("BatchUpdateNodesDisabled() error = %v", err)
+	}
 	for _, n := range LoadNodes() {
 		if n.RawURI == "uri1" && !n.Disabled {
 			t.Errorf("Expected uri1 to be disabled")
@@ -323,6 +683,10 @@ func TestParseNodeIdentity(t *testing.T) {
 		{"ss", "ss://YWVzLTI1Ni1nY206cGFzc3dvcmQ=@127.0.0.1:8888", true, "ss", "aes-256-gcm:password", "127.0.0.1", 8888},
 		{"vless", "vless://uuid@example.com:443", true, "vless", "uuid", "example.com", 443},
 		{"trojan", "trojan://password@example.com:8443", true, "trojan", "password", "example.com", 8443},
+		{"password ignored", "trojan://alice:secret@example.com:8443/path?x=1#name", true, "trojan", "alice", "example.com", 8443},
+		{"default port", "http://example.com/path", true, "http", "", "example.com", 443},
+		{"ipv6", "socks5://user@[2001:db8::1]:1080", true, "socks5", "user", "2001:db8::1", 1080},
+		{"escaped username fallback", "vless://user%20name@example.com:443", true, "vless", "user name", "example.com", 443},
 		{"invalid", "not-a-uri://", false, "", "", "", 0},
 	}
 	for _, tt := range tests {
@@ -353,7 +717,9 @@ func TestUpdateNodeTestResult(t *testing.T) {
 
 	// Setup: one enabled node
 	n1 := Node{RawURI: "uri1", Name: "node1"} //nolint:exhaustruct
-	MergeNodes([]Node{n1})
+	if err := MergeNodes([]Node{n1}); err != nil {
+		t.Fatalf("MergeNodes() error = %v", err)
+	}
 
 	// Test: fail the node
 	UpdateNodeTestResult("uri1", false, 100, "timeout")
@@ -393,7 +759,9 @@ func TestMergeNodesPrunesHealthMap(t *testing.T) {
 	n1 := Node{RawURI: "uri1", Name: "node1"} //nolint:exhaustruct
 	n2 := Node{RawURI: "uri2", Name: "node2"} //nolint:exhaustruct
 
-	MergeNodes([]Node{n1, n2})
+	if err := MergeNodes([]Node{n1, n2}); err != nil {
+		t.Fatalf("MergeNodes() error = %v", err)
+	}
 
 	RecordTest("uri1", true, 10, "")
 	RecordTest("uri2", false, 0, "timeout")
@@ -408,7 +776,9 @@ func TestMergeNodesPrunesHealthMap(t *testing.T) {
 	healthMap["orphan-uri"] = &NodeHealth{SuccessCount: 99} //nolint:exhaustruct
 	mu.Unlock()
 
-	MergeNodes([]Node{n1})
+	if err := MergeNodes([]Node{n1}); err != nil {
+		t.Fatalf("MergeNodes() prune error = %v", err)
+	}
 	health = LoadHealth()
 	if len(health) != 1 {
 		t.Fatalf("Expected 1 health entry after MergeNodes prunes orphan, got %d", len(health))
@@ -432,10 +802,15 @@ func TestEnableNode(t *testing.T) {
 	defer resetState()
 
 	n1 := Node{RawURI: "uri1", Name: "node1", Disabled: true} //nolint:exhaustruct
-	MergeNodes([]Node{n1})
+	if err := MergeNodes([]Node{n1}); err != nil {
+		t.Fatalf("MergeNodes() error = %v", err)
+	}
 
 	// Also set cooldown
 	RecordTest("uri1", false, 0, "timeout")
+	mu.Lock()
+	delete(nodeIndexByURI, "uri1")
+	mu.Unlock()
 
 	ok := EnableNode("uri1")
 	if !ok {
@@ -464,7 +839,9 @@ func TestDedupNodesSemantic(t *testing.T) {
 	// Two nodes with same identity but different raw URIs (different names/fragments)
 	n1 := Node{RawURI: "vless://uuid@example.com:443?security=tls#name1", Name: "node1"}
 	n2 := Node{RawURI: "vless://uuid@example.com:443?security=tls#name2", Name: "node2"}
-	MergeNodes([]Node{n1, n2})
+	if err := MergeNodes([]Node{n1, n2}); err != nil {
+		t.Fatalf("MergeNodes() error = %v", err)
+	}
 
 	removed := DedupNodes()
 	if removed != 1 {
@@ -483,7 +860,9 @@ func TestSelectForParallelCooldownFallback(t *testing.T) {
 	n1 := Node{RawURI: "uri1", Name: "node1"}
 	n2 := Node{RawURI: "uri2", Name: "node2"}
 	n3 := Node{RawURI: "uri3", Name: "node3"}
-	MergeNodes([]Node{n1, n2, n3})
+	if err := MergeNodes([]Node{n1, n2, n3}); err != nil {
+		t.Fatalf("MergeNodes() error = %v", err)
+	}
 
 	// Put n1 and n2 in cooldown, leave n3 normal
 	RecordTest("uri1", false, 0, "timeout")
@@ -534,7 +913,9 @@ func TestSelectForParallelLimitsUntestedExploration(t *testing.T) {
 		uri := fmt.Sprintf("untested-%d", i)
 		list = append(list, Node{RawURI: uri, Name: uri})
 	}
-	MergeNodes(list)
+	if err := MergeNodes(list); err != nil {
+		t.Fatalf("MergeNodes() error = %v", err)
+	}
 	for i := 0; i < 10; i++ {
 		RecordTest(fmt.Sprintf("healthy-%d", i), true, 20, "")
 	}
@@ -721,12 +1102,14 @@ func TestSelectNodesForHealthCheckPriority(t *testing.T) {
 	resetState()
 	defer resetState()
 
-	MergeNodes([]Node{
+	if err := MergeNodes([]Node{
 		{RawURI: "untested", Name: "untested"},
 		{RawURI: "failed", Name: "failed"},
 		{RawURI: "healthy", Name: "healthy"},
 		{RawURI: "disabled", Name: "disabled", Disabled: true},
-	})
+	}); err != nil {
+		t.Fatalf("MergeNodes() error = %v", err)
+	}
 	RecordTest("failed", false, 0, "timeout")
 	RecordTest("healthy", true, 10, "")
 
@@ -741,6 +1124,32 @@ func TestSelectNodesForHealthCheckPriority(t *testing.T) {
 		selected[1].RawURI != "failed" ||
 		selected[2].RawURI != "healthy" {
 		t.Fatalf("unexpected health check priority: %#v", selected)
+	}
+}
+
+func TestSelectNodesForHealthCheckPreservesStableOrderAtLimit(t *testing.T) {
+	resetState()
+	defer resetState()
+
+	const nodeCount = 100
+	nodes := make([]Node, nodeCount)
+	for index := range nodes {
+		uri := fmt.Sprintf("untested-%03d", index)
+		nodes[index] = Node{RawURI: uri, Name: uri}
+	}
+	if err := MergeNodes(nodes); err != nil {
+		t.Fatal(err)
+	}
+
+	selected := SelectNodesForHealthCheck(5, time.Hour, time.Now())
+	if len(selected) != 5 {
+		t.Fatalf("selected %d nodes, want 5", len(selected))
+	}
+	for index, node := range selected {
+		want := fmt.Sprintf("untested-%03d", index)
+		if node.RawURI != want {
+			t.Fatalf("selected[%d]=%q, want %q", index, node.RawURI, want)
+		}
 	}
 }
 

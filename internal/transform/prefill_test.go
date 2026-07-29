@@ -1,11 +1,35 @@
 package transform
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/bsfdsagfadg/vertex/internal/config"
 )
+
+func TestBuildAssistantPrefillInstructionMatchesStrconvQuote(t *testing.T) {
+	prefixes := []string{
+		"plain ASCII",
+		"quote: \" slash: \\",
+		"controls:\a\b\f\n\r\t\v\x00\x1f\x7f",
+		"中文与 emoji 🦊",
+		"unicode escapes: \u0085\u200b\u2028\U0001f600",
+		string([]byte{'a', 0xff, 'b'}),
+	}
+	allBytes := make([]byte, 256)
+	for index := range allBytes {
+		allBytes[index] = byte(index)
+	}
+	prefixes = append(prefixes, string(allBytes))
+
+	for _, prefix := range prefixes {
+		want := assistantPrefillInstructionPrefix + strconv.Quote(prefix)
+		if got := buildAssistantPrefillInstruction(prefix); got != want {
+			t.Fatalf("buildAssistantPrefillInstruction(%q)=%q, want %q", prefix, got, want)
+		}
+	}
+}
 
 func TestGemini36ConvertsTrailingAssistantPrefill(t *testing.T) {
 	body := map[string]any{

@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"log"
 	"net/http"
@@ -27,22 +26,19 @@ func (c *ChatHandler) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 	}
 
 	var body map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	body, err := decodeJSONObject(r.Body)
+	if err != nil {
 		if isRequestBodyTooLarge(err) {
 			oaiError(w, http.StatusRequestEntityTooLarge, "请求体过大 (request body too large)", "invalid_request_error")
 			return
 		}
-		if _, ok := err.(*json.SyntaxError); ok && strings.Contains(err.Error(), "invalid UTF-8") {
+		if strings.Contains(err.Error(), "invalid UTF-8") {
 			oaiError(w, http.StatusBadRequest, "请求体编码错误，需为 UTF-8 (request body must be UTF-8 encoded)", "invalid_request_error")
 			return
 		}
 		oaiError(w, http.StatusBadRequest, "请求格式错误，JSON 解析失败 (invalid JSON)", "invalid_request_error")
 		return
 	}
-	if body == nil {
-		body = make(map[string]any)
-	}
-
 	rawModel, _ := body["model"].(string)
 	if strings.TrimSpace(rawModel) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{

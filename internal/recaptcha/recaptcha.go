@@ -103,6 +103,18 @@ func fetchOnce(ctx context.Context, net *transport.NetworkClient, proxyURI strin
 	}
 	defer sess.Close()
 
+	token, err := FetchTokenWithSession(ctx, sess)
+	return token, err == nil && token != ""
+}
+
+// FetchTokenWithSession executes the shared reCAPTCHA exchange on an existing
+// transport session. Admin health checks use this to test the exact same flow
+// as production requests without creating a second implementation.
+func FetchTokenWithSession(ctx context.Context, sess *transport.Session) (string, error) {
+	if sess == nil {
+		return "", fmt.Errorf("transport session is nil")
+	}
+
 	cb := randomString(10)
 	anchorURL := fmt.Sprintf(
 		"%s/recaptcha/enterprise/anchor?ar=1&k=%s&co=%s&hl=%s&v=%s&size=invisible&anchor-ms=20000&execute-ms=15000&cb=%s",
@@ -113,7 +125,7 @@ func fetchOnce(ctx context.Context, net *transport.NetworkClient, proxyURI strin
 		ctx, "GET", anchorURL, transport.AnchorHeaders(), nil, recaptchaResponseMaxBytes,
 	)
 	if err != nil {
-		return "", false
+		return "", fmt.Errorf("GET anchor: %w", err)
 	}
 	m := tokenRe.FindSubmatch(anchorBody)
 	if m == nil {
@@ -122,7 +134,7 @@ func fetchOnce(ctx context.Context, net *transport.NetworkClient, proxyURI strin
 			bodyStr = bodyStr[:500] + "..."
 		}
 		log.Printf("[Recaptcha] anchor token正则匹配失败, body前缀: %s", bodyStr)
-		return "", false
+		return "", fmt.Errorf("从 anchor HTML 解析 recaptcha-token 失败")
 	}
 	baseToken := string(m[1])
 
@@ -148,14 +160,14 @@ func fetchOnce(ctx context.Context, net *transport.NetworkClient, proxyURI strin
 		ctx, "POST", reloadURL, header, strings.NewReader(form.Encode()), recaptchaResponseMaxBytes,
 	)
 	if err != nil {
-		return "", false
+		return "", fmt.Errorf("POST reload: %w", err)
 	}
 	if status != 200 {
 		log.Printf("[Recaptcha] Reload 失败, HTTP 状态码: %d, 返回内容: %s", status, string(reloadBody))
 	}
 	rm := rrespRe.FindSubmatch(reloadBody)
 	if rm == nil {
-		return "", false
+		return "", fmt.Errorf("从 reload 响应解析 rresp 失败")
 	}
-	return string(rm[1]), true
+	return string(rm[1]), nil
 }

@@ -197,22 +197,26 @@ func lookupNodeUnsafe(uri string) (Node, bool) {
 	return Node{}, false
 }
 
-func containsNodeForUpdateUnsafe(uri string) bool {
+func nodeIndexForUpdateUnsafe(uri string) (int, bool) {
 	if position, ok := nodeIndexByURI[uri]; ok &&
 		position >= 0 && position < len(nodeList) && nodeList[position].RawURI == uri {
-		return true
+		return position, true
 	}
 	// 列表增删/排序后索引可能暂时陈旧；写路径发现 miss 时重建一次，
 	// 后续候选启动与名称查询恢复 O(1)。
 	rebuildNodeIndexUnsafe()
-	_, ok := nodeIndexByURI[uri]
-	return ok
+	position, ok := nodeIndexByURI[uri]
+	return position, ok
+}
+
+func containsNodeForUpdateUnsafe(uri string) bool {
+	_, found := nodeIndexForUpdateUnsafe(uri)
+	return found
 }
 
 func LoadNodes() []Node {
 	lockLoadedForRead()
 	defer mu.RUnlock()
-	log.Printf("[Nodes] 获取所有节点 (数量: %d)", len(nodeList))
 	out := append([]Node(nil), nodeList...)
 	for i := range out {
 		out[i].SubscriptionSourceCount = len(subscriptionSources[out[i].RawURI])
@@ -223,208 +227,203 @@ func LoadNodes() []Node {
 func LoadHealth() map[string]*NodeHealth {
 	lockLoadedForRead()
 	defer mu.RUnlock()
-	out := make(map[string]*NodeHealth, len(healthMap))
-	for uri, health := range healthMap {
-		if health == nil {
-			out[uri] = nil
-			continue
-		}
-		copied := *health
-		out[uri] = &copied
-	}
-	return out
+	return cloneHealthMapUnsafe()
 }
 
-// writeAtomicJSON has been removed because it is unused
-
-func saveNodesUnsafe() error {
-	return saveNodesUnsafeWithTx(nil)
+type NodePoolSnapshot struct {
+	Nodes     []Node
+	Health    []NodeHealth
+	HasHealth []bool
+	Stats     NodePoolStats
 }
 
-func saveNodesUnsafeWithTx(finalize func(*sql.Tx) error) error {
-	database := db.CurrentDB()
-	if database == nil {
-		return nil
-	}
-	tx, err := database.Begin()
-	if err != nil {
-		return fmt.Errorf("开始保存节点事务: %w", err)
-	}
-	rollback := func(saveErr error) error {
-		_ = tx.Rollback()
-		return fmt.Errorf("保存节点事务: %w", saveErr)
-	}
+// NodePoolPageSnapshot is a detached, internally consistent filtered page.
+// TotalMatches and pagination metadata describe the complete filtered result,
+// while Nodes, Health and HasHealth contain only the selected page.
+type NodePoolPageSnapshot struct {
+	Nodes        []Node
+	Health       []NodeHealth
+	HasHealth    []bool
+	Stats        NodePoolStats
+	TotalMatches int
+	Page         int
+	PageSize     int
+	TotalPages   int
+}
 
-	type persistedNode struct {
-		node      Node
-		sortOrder int
+// LoadNodePoolSnapshot returns a detached, internally consistent view for
+// callers that need nodes, health and aggregate stats together.
+func LoadNodePoolSnapshot(now time.Time) NodePoolSnapshot {
+	lockLoadedForRead()
+	defer mu.RUnlock()
+
+	snapshot := NodePoolSnapshot{
+		Nodes:     append([]Node(nil), nodeList...),
+		Health:    make([]NodeHealth, len(nodeList)),
+		HasHealth: make([]bool, len(nodeList)),
+		Stats:     NodePoolStats{Total: len(nodeList)},
 	}
-	existingRows, err := tx.Query(
-		"SELECT raw_uri, type, name, disabled, source_id, sort_order FROM nodes",
-	)
-	if err != nil {
-		return rollback(err)
-	}
-	existing := make(map[string]persistedNode)
-	for existingRows.Next() {
-		var persisted persistedNode
-		if err := existingRows.Scan(
-			&persisted.node.RawURI,
-			&persisted.node.Type,
-			&persisted.node.Name,
-			&persisted.node.Disabled,
-			&persisted.node.SourceID,
-			&persisted.sortOrder,
-		); err != nil {
-			_ = existingRows.Close()
-			return rollback(err)
+	nowUnix := now.Unix()
+	for index := range snapshot.Nodes {
+		node := snapshot.Nodes[index]
+		snapshot.Nodes[index].SubscriptionSourceCount = len(subscriptionSources[node.RawURI])
+		health := healthMap[node.RawURI]
+		if health != nil {
+			snapshot.Health[index] = *health
+			snapshot.HasHealth[index] = true
 		}
-		existing[persisted.node.RawURI] = persisted
+		addNodePoolStats(&snapshot.Stats, node, health, nowUnix)
 	}
-	if err := existingRows.Err(); err != nil {
-		_ = existingRows.Close()
-		return rollback(err)
-	}
-	_ = existingRows.Close()
+	return snapshot
+}
 
-	upsertStmt, err := tx.Prepare(`INSERT INTO nodes
-		(raw_uri, type, name, disabled, source_id, sort_order)
-		VALUES (?, ?, ?, ?, ?, ?)
-		ON CONFLICT(raw_uri) DO UPDATE SET
-			type = excluded.type,
-			name = excluded.name,
-			disabled = excluded.disabled,
-			source_id = excluded.source_id,
-			sort_order = excluded.sort_order`)
-	if err != nil {
-		return rollback(err)
+// LoadFilteredNodeURIs returns a detached list of matching node URIs without
+// materializing node and health snapshots. match runs under the node read lock,
+// must be side-effect free and must not retain the health pointer.
+func LoadFilteredNodeURIs(match func(Node, *NodeHealth) bool) []string {
+	lockLoadedForRead()
+	defer mu.RUnlock()
+
+	uris := make([]string, 0, len(nodeList))
+	for _, storedNode := range nodeList {
+		health := healthMap[storedNode.RawURI]
+		node := storedNode
+		node.SubscriptionSourceCount = len(subscriptionSources[node.RawURI])
+		if match == nil || match(node, health) {
+			uris = append(uris, node.RawURI)
+		}
 	}
-	desired := make(map[string]bool, len(nodeList))
-	for index, n := range nodeList {
-		desired[n.RawURI] = true
-		persisted, exists := existing[n.RawURI]
-		if exists &&
-			persisted.node.Type == n.Type &&
-			persisted.node.Name == n.Name &&
-			persisted.node.Disabled == n.Disabled &&
-			persisted.node.SourceID == n.SourceID &&
-			persisted.sortOrder == index {
+	return uris
+}
+
+// LoadNodePoolPageSnapshot filters and pages the node pool while holding one
+// read lock. match must be side-effect free and must not retain the health
+// pointer. A non-positive pageSize preserves the unpaged behavior and returns
+// every match on page one.
+func LoadNodePoolPageSnapshot(
+	now time.Time,
+	page int,
+	pageSize int,
+	match func(Node, *NodeHealth) bool,
+) NodePoolPageSnapshot {
+	lockLoadedForRead()
+	defer mu.RUnlock()
+
+	if page < 1 {
+		page = 1
+	}
+	requestedPage := page
+	unpaged := pageSize < 1
+	if unpaged {
+		page = 1
+		requestedPage = 1
+	}
+
+	snapshot := NodePoolPageSnapshot{
+		Stats: NodePoolStats{Total: len(nodeList)},
+		Page:  page,
+	}
+	if !unpaged {
+		snapshot.PageSize = pageSize
+		snapshot.Nodes = make([]Node, 0, min(pageSize, len(nodeList)))
+		snapshot.Health = make([]NodeHealth, 0, min(pageSize, len(nodeList)))
+		snapshot.HasHealth = make([]bool, 0, min(pageSize, len(nodeList)))
+	} else {
+		snapshot.Nodes = make([]Node, 0, len(nodeList))
+		snapshot.Health = make([]NodeHealth, 0, len(nodeList))
+		snapshot.HasHealth = make([]bool, 0, len(nodeList))
+	}
+
+	start := 0
+	end := len(nodeList)
+	if !unpaged {
+		start, end = nodePoolPageBounds(len(nodeList), requestedPage, pageSize)
+	}
+	nowUnix := now.Unix()
+	for _, storedNode := range nodeList {
+		health := healthMap[storedNode.RawURI]
+		addNodePoolStats(&snapshot.Stats, storedNode, health, nowUnix)
+
+		node := storedNode
+		node.SubscriptionSourceCount = len(subscriptionSources[node.RawURI])
+		if match != nil && !match(node, health) {
 			continue
 		}
-		if _, err := upsertStmt.Exec(
-			n.RawURI, n.Type, n.Name, n.Disabled, n.SourceID, index,
-		); err != nil {
-			_ = upsertStmt.Close()
-			return rollback(err)
-		}
-	}
-	_ = upsertStmt.Close()
-
-	deleteStmt, err := tx.Prepare("DELETE FROM nodes WHERE raw_uri = ?")
-	if err != nil {
-		return rollback(err)
-	}
-	nodesDeleted := false
-	for rawURI := range existing {
-		if desired[rawURI] {
+		matchedIndex := snapshot.TotalMatches
+		snapshot.TotalMatches++
+		if matchedIndex < start || matchedIndex >= end {
 			continue
 		}
-		if _, err := deleteStmt.Exec(rawURI); err != nil {
-			_ = deleteStmt.Close()
-			return rollback(err)
-		}
-		nodesDeleted = true
+		appendNodePoolPageEntry(&snapshot, node, health)
 	}
-	_ = deleteStmt.Close()
 
-	type sourceKey struct {
-		sourceID int64
-		rawURI   string
+	if unpaged {
+		snapshot.PageSize = max(1, snapshot.TotalMatches)
+		snapshot.TotalPages = 1
+		return snapshot
 	}
-	sourceRows, err := tx.Query(
-		"SELECT subscription_id, raw_uri FROM proxy_subscription_nodes",
-	)
-	if err != nil {
-		return rollback(err)
-	}
-	existingSources := make(map[sourceKey]bool)
-	for sourceRows.Next() {
-		var key sourceKey
-		if err := sourceRows.Scan(&key.sourceID, &key.rawURI); err != nil {
-			_ = sourceRows.Close()
-			return rollback(err)
-		}
-		existingSources[key] = true
-	}
-	if err := sourceRows.Err(); err != nil {
-		_ = sourceRows.Close()
-		return rollback(err)
-	}
-	_ = sourceRows.Close()
 
-	desiredSources := make(map[sourceKey]bool)
-	for rawURI, sourceIDs := range subscriptionSources {
-		if !desired[rawURI] {
+	snapshot.TotalPages = 1
+	if snapshot.TotalMatches > 0 {
+		snapshot.TotalPages = (snapshot.TotalMatches-1)/pageSize + 1
+	}
+	if requestedPage <= snapshot.TotalPages {
+		return snapshot
+	}
+
+	// Preserve the admin API's historical page clamping without retaining all
+	// matching nodes: only an out-of-range request needs this second scan.
+	snapshot.Page = snapshot.TotalPages
+	start, end = nodePoolPageBounds(snapshot.TotalMatches, snapshot.Page, pageSize)
+	snapshot.Nodes = snapshot.Nodes[:0]
+	snapshot.Health = snapshot.Health[:0]
+	snapshot.HasHealth = snapshot.HasHealth[:0]
+	matchedIndex := 0
+	for _, storedNode := range nodeList {
+		health := healthMap[storedNode.RawURI]
+		node := storedNode
+		node.SubscriptionSourceCount = len(subscriptionSources[node.RawURI])
+		if match != nil && !match(node, health) {
 			continue
 		}
-		for sourceID := range sourceIDs {
-			desiredSources[sourceKey{sourceID: sourceID, rawURI: rawURI}] = true
+		if matchedIndex >= start && matchedIndex < end {
+			appendNodePoolPageEntry(&snapshot, node, health)
+		}
+		matchedIndex++
+		if matchedIndex >= end {
+			break
 		}
 	}
+	return snapshot
+}
 
-	sourceInsertStmt, err := tx.Prepare(`INSERT INTO proxy_subscription_nodes(subscription_id, raw_uri)
-		VALUES (?, ?)`)
-	if err != nil {
-		return rollback(err)
+func nodePoolPageBounds(total, page, pageSize int) (int, int) {
+	if total <= 0 || page < 1 || pageSize < 1 {
+		return 0, max(0, total)
 	}
-	sourcesChanged := false
-	for key := range desiredSources {
-		if existingSources[key] {
-			continue
-		}
-		if _, err := sourceInsertStmt.Exec(key.sourceID, key.rawURI); err != nil {
-			_ = sourceInsertStmt.Close()
-			return rollback(err)
-		}
-		sourcesChanged = true
+	pageIndex := page - 1
+	if pageIndex > total/pageSize {
+		return total, total
 	}
-	_ = sourceInsertStmt.Close()
+	start := pageIndex * pageSize
+	if start >= total {
+		return total, total
+	}
+	if pageSize >= total-start {
+		return start, total
+	}
+	return start, start + pageSize
+}
 
-	sourceDeleteStmt, err := tx.Prepare(
-		"DELETE FROM proxy_subscription_nodes WHERE subscription_id = ? AND raw_uri = ?",
-	)
-	if err != nil {
-		return rollback(err)
+func appendNodePoolPageEntry(snapshot *NodePoolPageSnapshot, node Node, health *NodeHealth) {
+	snapshot.Nodes = append(snapshot.Nodes, node)
+	if health == nil {
+		snapshot.Health = append(snapshot.Health, NodeHealth{})
+		snapshot.HasHealth = append(snapshot.HasHealth, false)
+		return
 	}
-	for key := range existingSources {
-		if desiredSources[key] {
-			continue
-		}
-		if _, err := sourceDeleteStmt.Exec(key.sourceID, key.rawURI); err != nil {
-			_ = sourceDeleteStmt.Close()
-			return rollback(err)
-		}
-		sourcesChanged = true
-	}
-	_ = sourceDeleteStmt.Close()
-	if sourcesChanged || nodesDeleted {
-		if _, err := tx.Exec(`UPDATE proxy_subscriptions
-			SET node_count = (
-				SELECT COUNT(*) FROM proxy_subscription_nodes psn
-				WHERE psn.subscription_id = proxy_subscriptions.id
-			)`); err != nil {
-			return rollback(err)
-		}
-	}
-	if finalize != nil {
-		if err := finalize(tx); err != nil {
-			return rollback(err)
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("提交节点事务: %w", err)
-	}
-	return nil
+	snapshot.Health = append(snapshot.Health, *health)
+	snapshot.HasHealth = append(snapshot.HasHealth, true)
 }
 
 type healthUpdate struct {
@@ -605,19 +604,6 @@ func FlushHealth(ctx context.Context) error {
 	}
 }
 
-func saveHealthUnsafe() {
-	database := db.CurrentDB()
-	if database == nil {
-		return
-	}
-	healthOnce.Do(initHealthQueue)
-	for uri, h := range healthMap {
-		if h != nil {
-			enqueueHealthUpdate(healthUpdate{database: database, uri: uri, h: *h})
-		}
-	}
-}
-
 func updateSingleNodeHealthUnsafe(uri string, h *NodeHealth) {
 	database := db.CurrentDB()
 	if database == nil || h == nil {
@@ -754,31 +740,139 @@ func CheckTestControl() bool {
 	return !globalProgress.Running || globalProgress.Terminated
 }
 
-func pruneHealthUnsafe() {
-	for uri := range healthMap {
-		found := false
-		for _, n := range nodeList {
-			if n.RawURI == uri {
-				found = true
-				break
+// pruneHealthUnsafe removes orphaned health rows after nodeIndexByURI has been
+// rebuilt for the current nodeList and returns the removed entries for callers
+// that may need to roll the change back.
+func pruneHealthUnsafe() map[string]*NodeHealth {
+	var removed map[string]*NodeHealth
+	for uri, health := range healthMap {
+		if _, found := nodeIndexByURI[uri]; !found {
+			if removed == nil {
+				removed = make(map[string]*NodeHealth)
 			}
-		}
-		if !found {
+			removed[uri] = health
 			delete(healthMap, uri)
 		}
 	}
+	return removed
 }
 
-func cloneSubscriptionSourcesUnsafe() map[string]map[int64]bool {
-	out := make(map[string]map[int64]bool, len(subscriptionSources))
+func restoreSubscriptionMembershipUnsafe(sourceID int64, previous []string) {
 	for rawURI, sourceIDs := range subscriptionSources {
-		copied := make(map[int64]bool, len(sourceIDs))
-		for sourceID, present := range sourceIDs {
-			copied[sourceID] = present
+		if !sourceIDs[sourceID] {
+			continue
 		}
-		out[rawURI] = copied
+		delete(sourceIDs, sourceID)
+		if len(sourceIDs) == 0 {
+			delete(subscriptionSources, rawURI)
+		}
 	}
-	return out
+	for _, rawURI := range previous {
+		if subscriptionSources[rawURI] == nil {
+			subscriptionSources[rawURI] = make(map[int64]bool)
+		}
+		subscriptionSources[rawURI][sourceID] = true
+	}
+}
+
+type detachedNodeRuntimeState struct {
+	sourceIDs  map[int64]bool
+	health     *NodeHealth
+	hadSources bool
+	hadHealth  bool
+}
+
+type removedNodePosition struct {
+	originalIndex int
+	node          Node
+	runtimeState  detachedNodeRuntimeState
+}
+
+// restoreRemovedNodePositionsUnsafe reconstructs the original list after it
+// has been compacted in place. Walking backwards keeps unread compacted nodes
+// from being overwritten while removed nodes are inserted at their old slots.
+func restoreRemovedNodePositionsUnsafe(removed []removedNodePosition) {
+	keptCount := len(nodeList)
+	originalCount := keptCount + len(removed)
+	nodeList = nodeList[:originalCount]
+	keptIndex := keptCount - 1
+	removedIndex := len(removed) - 1
+	for originalIndex := originalCount - 1; originalIndex >= 0; originalIndex-- {
+		if removedIndex >= 0 && removed[removedIndex].originalIndex == originalIndex {
+			nodeList[originalIndex] = removed[removedIndex].node
+			removedIndex--
+			continue
+		}
+		nodeList[originalIndex] = nodeList[keptIndex]
+		keptIndex--
+	}
+}
+
+func publishRemovedNodeIndexesUnsafe(removed []removedNodePosition) {
+	for _, item := range removed {
+		delete(nodeIndexByURI, item.node.RawURI)
+	}
+	for index, node := range nodeList {
+		nodeIndexByURI[node.RawURI] = index
+	}
+}
+
+func detachNodeRuntimeStateUnsafe(rawURI string) detachedNodeRuntimeState {
+	sourceIDs, hadSources := subscriptionSources[rawURI]
+	health, hadHealth := healthMap[rawURI]
+	delete(subscriptionSources, rawURI)
+	delete(healthMap, rawURI)
+	return detachedNodeRuntimeState{
+		sourceIDs:  sourceIDs,
+		health:     health,
+		hadSources: hadSources,
+		hadHealth:  hadHealth,
+	}
+}
+
+func restoreNodeRuntimeStateUnsafe(
+	rawURI string,
+	state detachedNodeRuntimeState,
+) {
+	if state.hadSources {
+		subscriptionSources[rawURI] = state.sourceIDs
+	}
+	if state.hadHealth {
+		healthMap[rawURI] = state.health
+	}
+}
+
+func restoreNodeRuntimeStatesUnsafe(states map[string]detachedNodeRuntimeState) {
+	for rawURI, state := range states {
+		restoreNodeRuntimeStateUnsafe(rawURI, state)
+	}
+}
+
+type subscriptionSourceState struct {
+	sourceIDs map[int64]bool
+	hadValue  bool
+}
+
+func snapshotSubscriptionSourceUnsafe(rawURI string) subscriptionSourceState {
+	sourceIDs, hadValue := subscriptionSources[rawURI]
+	if !hadValue {
+		return subscriptionSourceState{}
+	}
+	copied := make(map[int64]bool, len(sourceIDs))
+	for sourceID, present := range sourceIDs {
+		copied[sourceID] = present
+	}
+	return subscriptionSourceState{sourceIDs: copied, hadValue: hadValue}
+}
+
+func restoreSubscriptionSourceStatesUnsafe(states map[string]subscriptionSourceState) {
+	for rawURI, state := range states {
+		if state.hadValue {
+			subscriptionSources[rawURI] = state.sourceIDs
+		} else {
+			delete(subscriptionSources, rawURI)
+		}
+	}
 }
 
 func cloneHealthMapUnsafe() map[string]*NodeHealth {
@@ -800,9 +894,9 @@ func cloneHealthMapUnsafe() map[string]*NodeHealth {
 func ReplaceManualNodes(newNodes []Node) error {
 	mu.Lock()
 	ensureLoaded()
-	previousNodes := append([]Node(nil), nodeList...)
-	previousSources := cloneSubscriptionSourcesUnsafe()
-	previousHealth := cloneHealthMapUnsafe()
+	// nextNodes is built in independent storage, so the current slice can be
+	// retained directly as the immutable persistence and rollback snapshot.
+	previousNodes := nodeList
 
 	desired := make(map[string]Node, len(newNodes))
 	desiredOrder := make([]string, 0, len(newNodes))
@@ -812,17 +906,16 @@ func ReplaceManualNodes(newNodes []Node) error {
 			continue
 		}
 		node.SourceID = 0
+		node.SubscriptionSourceCount = 0
 		if _, exists := desired[node.RawURI]; !exists {
 			desiredOrder = append(desiredOrder, node.RawURI)
 		}
 		desired[node.RawURI] = node
 	}
 
-	existing := make(map[string]Node, len(nodeList))
 	nextNodes := make([]Node, 0, len(nodeList)+len(desired))
-	keptURIs := make(map[string]bool, len(nodeList)+len(desired))
-	for _, current := range nodeList {
-		existing[current.RawURI] = current
+	keptExisting := make([]bool, len(nodeList))
+	for index, current := range nodeList {
 		sources := subscriptionSources[current.RawURI]
 		if len(sources) == 0 {
 			continue
@@ -831,7 +924,7 @@ func ReplaceManualNodes(newNodes []Node) error {
 			replacement.Disabled = current.Disabled
 			replacement.SourceID = 0
 			nextNodes = append(nextNodes, replacement)
-			keptURIs[current.RawURI] = true
+			keptExisting[index] = true
 			delete(desired, current.RawURI)
 			continue
 		}
@@ -843,36 +936,42 @@ func ReplaceManualNodes(newNodes []Node) error {
 		}
 		current.SourceID = smallestSourceID
 		nextNodes = append(nextNodes, current)
-		keptURIs[current.RawURI] = true
+		keptExisting[index] = true
 	}
 	for _, rawURI := range desiredOrder {
 		replacement, exists := desired[rawURI]
 		if !exists {
 			continue
 		}
-		if current, found := existing[rawURI]; found {
-			replacement.Disabled = current.Disabled
+		if index, found := nodeIndexByURI[rawURI]; found {
+			replacement.Disabled = nodeList[index].Disabled
+			keptExisting[index] = true
 		}
 		nextNodes = append(nextNodes, replacement)
-		keptURIs[rawURI] = true
 	}
 
 	removedURIs := make([]string, 0)
-	for _, current := range nodeList {
-		if !keptURIs[current.RawURI] {
+	var detachedStates map[string]detachedNodeRuntimeState
+	for index, current := range nodeList {
+		if !keptExisting[index] {
 			removedURIs = append(removedURIs, current.RawURI)
-			delete(subscriptionSources, current.RawURI)
-			delete(healthMap, current.RawURI)
+			state := detachNodeRuntimeStateUnsafe(current.RawURI)
+			if state.hadSources || state.hadHealth {
+				if detachedStates == nil {
+					detachedStates = make(map[string]detachedNodeRuntimeState)
+				}
+				detachedStates[current.RawURI] = state
+			}
 		}
 	}
 	nodeList = nextNodes
-	if err := saveNodesUnsafe(); err != nil {
+	if err := persistNodeSnapshotDiffUnsafe(previousNodes, nil); err != nil {
 		nodeList = previousNodes
-		subscriptionSources = previousSources
-		healthMap = previousHealth
+		restoreNodeRuntimeStatesUnsafe(detachedStates)
 		mu.Unlock()
 		return err
 	}
+	rebuildNodeIndexUnsafe()
 	for _, rawURI := range removedURIs {
 		globalStickyPool.Evict(rawURI)
 	}
@@ -890,30 +989,46 @@ func MergeNodes(newNodes []Node) error {
 	mu.Lock()
 	defer mu.Unlock()
 	ensureLoaded()
-	previousNodes := append([]Node(nil), nodeList...)
-	previousHealth := cloneHealthMapUnsafe()
-	existing := make(map[string]int)
-	for i, n := range nodeList {
-		existing[n.RawURI] = i
-	}
+	previousNodeCount := len(nodeList)
+	inserted := make([]nodeInsert, 0, len(newNodes))
+	manualized := make([]nodeManualization, 0)
 	for _, n := range newNodes {
 		n.RawURI = strings.TrimSpace(n.RawURI)
 		if n.RawURI == "" {
 			continue
 		}
 		n.SourceID = 0
-		if index, found := existing[n.RawURI]; found {
+		n.SubscriptionSourceCount = 0
+		index, found := nodeIndexByURI[n.RawURI]
+		if found {
 			// 手动导入与订阅节点重合时，标记为手动节点；订阅关系仍会保留。
-			nodeList[index].SourceID = 0
+			if nodeList[index].SourceID != 0 {
+				manualized = append(manualized, nodeManualization{
+					rawURI:           n.RawURI,
+					index:            index,
+					previousSourceID: nodeList[index].SourceID,
+				})
+				nodeList[index].SourceID = 0
+			}
 			continue
 		}
+		sortOrder := len(nodeList)
 		nodeList = append(nodeList, n)
-		existing[n.RawURI] = len(nodeList) - 1
+		nodeIndexByURI[n.RawURI] = len(nodeList) - 1
+		inserted = append(inserted, nodeInsert{node: n, sortOrder: sortOrder})
 	}
-	pruneHealthUnsafe()
-	if err := saveNodesUnsafe(); err != nil {
-		nodeList = previousNodes
-		healthMap = previousHealth
+	prunedHealth := pruneHealthUnsafe()
+	if err := persistMergedNodesUnsafe(inserted, manualized); err != nil {
+		nodeList = nodeList[:previousNodeCount]
+		for _, change := range inserted {
+			delete(nodeIndexByURI, change.node.RawURI)
+		}
+		for _, change := range manualized {
+			nodeList[change.index].SourceID = change.previousSourceID
+		}
+		for rawURI, health := range prunedHealth {
+			healthMap[rawURI] = health
+		}
 		log.Printf("[Nodes] 合并节点持久化失败，已回滚内存状态: %v", err)
 		return err
 	}
@@ -971,58 +1086,70 @@ func syncSubscriptionNodes(
 
 	mu.Lock()
 	ensureLoaded()
-	database := db.CurrentDB()
-	if database == nil {
+	if db.CurrentDB() == nil {
 		mu.Unlock()
 		return SubscriptionNodeSyncResult{}, errors.New("database unavailable")
 	}
-	var sourceExists bool
-	if err := database.QueryRow(
-		"SELECT EXISTS(SELECT 1 FROM proxy_subscriptions WHERE id = ?)",
-		sourceID,
-	).Scan(&sourceExists); err != nil {
-		mu.Unlock()
-		return SubscriptionNodeSyncResult{}, fmt.Errorf("检查代理订阅: %w", err)
-	}
-	if !sourceExists {
-		mu.Unlock()
-		return SubscriptionNodeSyncResult{}, errors.New("proxy subscription not found")
-	}
-	previousNodes := append([]Node(nil), nodeList...)
-	previousSources := cloneSubscriptionSourcesUnsafe()
-	previousHealth := cloneHealthMapUnsafe()
-	result := SubscriptionNodeSyncResult{}
-	desired := make(map[string]Node, len(newNodes))
-	desiredOrder := make([]string, 0, len(newNodes))
-	for _, n := range newNodes {
-		n.RawURI = strings.TrimSpace(n.RawURI)
-		if n.RawURI == "" {
-			continue
+	finishUnchanged := func(count int) (SubscriptionNodeSyncResult, error) {
+		result := SubscriptionNodeSyncResult{Count: count}
+		var persistFinalize func(*sql.Tx) error
+		if finalize != nil {
+			persistFinalize = func(tx *sql.Tx) error {
+				return finalize(tx, result)
+			}
 		}
-		if _, exists := desired[n.RawURI]; !exists {
-			desiredOrder = append(desiredOrder, n.RawURI)
+		err := persistSubscriptionSyncUnsafe(subscriptionSyncChanges{
+			sourceID: sourceID,
+			count:    result.Count,
+		}, persistFinalize)
+		mu.Unlock()
+		if err != nil {
+			return SubscriptionNodeSyncResult{}, err
 		}
-		desired[n.RawURI] = n
+		return result, nil
+	}
+	if subscriptionSyncInputUnchangedUnsafe(sourceID, newNodes) {
+		return finishUnchanged(len(newNodes))
 	}
 
-	previousMembership := make(map[string]bool)
+	desired, desiredSet := normalizeSubscriptionNodesUnsafe(newNodes)
+	if subscriptionSyncUnchangedUnsafe(sourceID, desired) {
+		return finishUnchanged(len(desired))
+	}
+
+	previousMembership := make([]string, 0, len(desired))
 	for rawURI, sourceIDs := range subscriptionSources {
 		if sourceIDs[sourceID] {
-			previousMembership[rawURI] = true
+			previousMembership = append(previousMembership, rawURI)
 		}
 	}
-
-	nodeIndexes := make(map[string]int, len(nodeList))
-	for i := range nodeList {
-		nodeIndexes[nodeList[i].RawURI] = i
+	originalNodeCount := len(nodeList)
+	var previousNodeValues map[string]Node
+	capturePreviousNode := func(node Node) {
+		if previousNodeValues == nil {
+			previousNodeValues = make(map[string]Node)
+		}
+		if _, captured := previousNodeValues[node.RawURI]; !captured {
+			previousNodeValues[node.RawURI] = node
+		}
 	}
-	for _, uri := range desiredOrder {
-		next := desired[uri]
+	result := SubscriptionNodeSyncResult{}
+
+	insertedNodes := make(map[string]Node)
+	updatedNodes := make(map[string]Node)
+	membershipsAdded := make([]string, 0)
+	for _, desiredNode := range desired {
+		next := desiredNode
+		uri := next.RawURI
+		wasMember := subscriptionSources[uri][sourceID]
 		if subscriptionSources[uri] == nil {
 			subscriptionSources[uri] = make(map[int64]bool)
 		}
 		subscriptionSources[uri][sourceID] = true
-		if index, exists := nodeIndexes[uri]; exists {
+		if !wasMember {
+			membershipsAdded = append(membershipsAdded, uri)
+		}
+		if index, exists := nodeIndexByURI[uri]; exists {
 			current := nodeList[index]
 			if current.SourceID != 0 && (current.SourceID == sourceID || sourceID < current.SourceID) {
 				next.SourceID = sourceID
@@ -1030,31 +1157,43 @@ func syncSubscriptionNodes(
 				if strings.TrimSpace(next.Name) == "" {
 					next.Name = current.Name
 				}
-				nodeList[index] = next
+				if next != current {
+					capturePreviousNode(current)
+					nodeList[index] = next
+					updatedNodes[uri] = next
+				}
 			}
 		} else {
 			next.SourceID = sourceID
 			nodeList = append(nodeList, next)
-			nodeIndexes[uri] = len(nodeList) - 1
+			insertedNodes[uri] = next
 			result.Added++
 		}
-		delete(previousMembership, uri)
 		result.Count++
 	}
 
-	for uri := range previousMembership {
+	membershipsRemoved := make([]string, 0)
+	for _, uri := range previousMembership {
+		if desiredSet.containsUnsafe(uri) {
+			continue
+		}
 		delete(subscriptionSources[uri], sourceID)
 		if len(subscriptionSources[uri]) == 0 {
 			delete(subscriptionSources, uri)
 		}
+		membershipsRemoved = append(membershipsRemoved, uri)
 	}
 
-	kept := make([]Node, 0, len(nodeList))
+	var removedNodes []removedNodePosition
+	keptCount := 0
 	var removedURIs []string
-	for _, n := range nodeList {
+	var removedHealth map[string]*NodeHealth
+	for originalIndex, n := range nodeList {
+		original := n
 		sources := subscriptionSources[n.RawURI]
 		if n.SourceID == 0 {
-			kept = append(kept, n)
+			nodeList[keptCount] = n
+			keptCount++
 			continue
 		}
 		if len(sources) > 0 {
@@ -1065,34 +1204,88 @@ func syncSubscriptionNodes(
 				}
 			}
 			n.SourceID = smallest
-			kept = append(kept, n)
+			if n != original {
+				if _, existed := nodeIndexByURI[n.RawURI]; existed {
+					capturePreviousNode(original)
+				}
+				updatedNodes[n.RawURI] = n
+			}
+			nodeList[keptCount] = n
+			keptCount++
 			continue
 		}
 
 		result.Removed++
 		removedURIs = append(removedURIs, n.RawURI)
+		removedNodes = append(removedNodes, removedNodePosition{
+			originalIndex: originalIndex,
+			node:          n,
+		})
 		delete(subscriptionSources, n.RawURI)
+		if health, exists := healthMap[n.RawURI]; exists {
+			if removedHealth == nil {
+				removedHealth = make(map[string]*NodeHealth)
+			}
+			removedHealth[n.RawURI] = health
+		}
 		delete(healthMap, n.RawURI)
+		delete(updatedNodes, n.RawURI)
 	}
-	nodeList = kept
+	nodeList = nodeList[:keptCount]
+	inserted := make([]nodeInsert, 0, len(insertedNodes))
+	updated := make([]Node, 0, len(updatedNodes))
+	positionChanges := make([]nodeInsert, 0)
+	for index, node := range nodeList {
+		if _, ok := insertedNodes[node.RawURI]; ok {
+			inserted = append(inserted, nodeInsert{node: node, sortOrder: index})
+		} else if previousIndex, existed := nodeIndexByURI[node.RawURI]; existed && previousIndex != index {
+			positionChanges = append(positionChanges, nodeInsert{node: node, sortOrder: index})
+		}
+		if _, ok := updatedNodes[node.RawURI]; ok {
+			updated = append(updated, node)
+		}
+	}
 	var persistFinalize func(*sql.Tx) error
 	if finalize != nil {
 		persistFinalize = func(tx *sql.Tx) error {
 			return finalize(tx, result)
 		}
 	}
-	if err := saveNodesUnsafeWithTx(persistFinalize); err != nil {
-		nodeList = previousNodes
-		subscriptionSources = previousSources
-		healthMap = previousHealth
+	changes := subscriptionSyncChanges{
+		sourceID:           sourceID,
+		count:              result.Count,
+		inserted:           inserted,
+		updated:            updated,
+		membershipsAdded:   membershipsAdded,
+		membershipsRemoved: membershipsRemoved,
+		removedNodes:       removedURIs,
+		positionChanges:    positionChanges,
+	}
+	if err := persistSubscriptionSyncUnsafe(changes, persistFinalize); err != nil {
+		if len(removedNodes) > 0 {
+			restoreRemovedNodePositionsUnsafe(removedNodes)
+		}
+		nodeList = nodeList[:originalNodeCount]
+		for rawURI, previous := range previousNodeValues {
+			if index, exists := nodeIndexByURI[rawURI]; exists {
+				nodeList[index] = previous
+			}
+		}
+		restoreSubscriptionMembershipUnsafe(sourceID, previousMembership)
+		for rawURI, health := range removedHealth {
+			healthMap[rawURI] = health
+		}
 		mu.Unlock()
 		return SubscriptionNodeSyncResult{}, err
 	}
 	for _, rawURI := range removedURIs {
-		globalStickyPool.Evict(rawURI)
+		delete(nodeIndexByURI, rawURI)
 	}
-	if result.Removed > 0 {
-		saveHealthUnsafe()
+	for index, node := range nodeList {
+		nodeIndexByURI[node.RawURI] = index
+	}
+	for _, rawURI := range removedURIs {
+		globalStickyPool.Evict(rawURI)
 	}
 	cb := DeleteNodeCallback
 	mu.Unlock()
@@ -1103,6 +1296,164 @@ func syncSubscriptionNodes(
 		}
 	}
 	return result, nil
+}
+
+// subscriptionSyncInputUnchangedUnsafe handles the common case where a
+// subscription refresh already contains normalized, unique nodes. A compact
+// index bitmap detects duplicates without copying the input or building a
+// full URI map.
+func subscriptionSyncInputUnchangedUnsafe(sourceID int64, newNodes []Node) bool {
+	membershipCount := 0
+	for _, sourceIDs := range subscriptionSources {
+		if sourceIDs[sourceID] {
+			membershipCount++
+		}
+	}
+	if membershipCount != len(newNodes) {
+		return false
+	}
+
+	seen := make([]bool, len(nodeList))
+	for _, next := range newNodes {
+		rawURI := strings.TrimSpace(next.RawURI)
+		if rawURI == "" || rawURI != next.RawURI || !subscriptionSources[rawURI][sourceID] {
+			return false
+		}
+		index, exists := nodeIndexByURI[rawURI]
+		if !exists || index < 0 || index >= len(nodeList) || seen[index] {
+			return false
+		}
+		seen[index] = true
+
+		current := nodeList[index]
+		if current.SourceID == 0 || current.SourceID != sourceID && sourceID >= current.SourceID {
+			continue
+		}
+		next.SubscriptionSourceCount = 0
+		next.SourceID = sourceID
+		next.Disabled = current.Disabled
+		if strings.TrimSpace(next.Name) == "" {
+			next.Name = current.Name
+		}
+		if next != current {
+			return false
+		}
+	}
+	return true
+}
+
+type subscriptionDesiredSet struct {
+	byURI      map[string]int
+	existing   []bool
+	newRawURIs map[string]struct{}
+}
+
+func (desired subscriptionDesiredSet) containsUnsafe(rawURI string) bool {
+	if desired.byURI != nil {
+		_, exists := desired.byURI[rawURI]
+		return exists
+	}
+	if index, exists := nodeIndexByURI[rawURI]; exists &&
+		index >= 0 && index < len(desired.existing) {
+		return desired.existing[index]
+	}
+	_, exists := desired.newRawURIs[rawURI]
+	return exists
+}
+
+// normalizeSubscriptionNodesUnsafe reuses already normalized, unique input
+// directly. Existing-node membership is represented by a compact bitmap and
+// only genuinely new URIs need a map. Irregular input falls back to the full
+// stable-order, last-value-wins normalization path.
+func normalizeSubscriptionNodesUnsafe(newNodes []Node) ([]Node, subscriptionDesiredSet) {
+	existing := make([]bool, len(nodeList))
+	var newRawURIs map[string]struct{}
+	fastPath := true
+	for _, node := range newNodes {
+		rawURI := strings.TrimSpace(node.RawURI)
+		if rawURI == "" || rawURI != node.RawURI || node.SubscriptionSourceCount != 0 {
+			fastPath = false
+			break
+		}
+		if index, exists := nodeIndexByURI[rawURI]; exists {
+			if index < 0 || index >= len(existing) || existing[index] {
+				fastPath = false
+				break
+			}
+			existing[index] = true
+			continue
+		}
+		if newRawURIs == nil {
+			newRawURIs = make(map[string]struct{})
+		}
+		if _, duplicate := newRawURIs[rawURI]; duplicate {
+			fastPath = false
+			break
+		}
+		newRawURIs[rawURI] = struct{}{}
+	}
+	if fastPath {
+		return newNodes, subscriptionDesiredSet{
+			existing:   existing,
+			newRawURIs: newRawURIs,
+		}
+	}
+
+	desired := make([]Node, 0, len(newNodes))
+	byURI := make(map[string]int, len(newNodes))
+	for _, node := range newNodes {
+		node.RawURI = strings.TrimSpace(node.RawURI)
+		if node.RawURI == "" {
+			continue
+		}
+		node.SubscriptionSourceCount = 0
+		if index, exists := byURI[node.RawURI]; exists {
+			desired[index] = node
+			continue
+		}
+		byURI[node.RawURI] = len(desired)
+		desired = append(desired, node)
+	}
+	return desired, subscriptionDesiredSet{byURI: byURI}
+}
+
+func subscriptionSyncUnchangedUnsafe(
+	sourceID int64,
+	desired []Node,
+) bool {
+	membershipCount := 0
+	for _, sourceIDs := range subscriptionSources {
+		if sourceIDs[sourceID] {
+			membershipCount++
+		}
+	}
+	if membershipCount != len(desired) {
+		return false
+	}
+
+	for _, next := range desired {
+		rawURI := next.RawURI
+		if !subscriptionSources[rawURI][sourceID] {
+			return false
+		}
+		index, exists := nodeIndexByURI[rawURI]
+		if !exists {
+			return false
+		}
+		current := nodeList[index]
+		if current.SourceID == 0 || current.SourceID != sourceID && sourceID >= current.SourceID {
+			continue
+		}
+		next.SourceID = sourceID
+		next.Disabled = current.Disabled
+		if strings.TrimSpace(next.Name) == "" {
+			next.Name = current.Name
+		}
+		if next != current {
+			return false
+		}
+	}
+	return true
 }
 
 // DeleteProxySubscriptionAndNodes 原子删除订阅归属、仅由该订阅拥有的节点和订阅元数据。
@@ -1142,28 +1493,36 @@ func DeleteSubscriptionNodes(sourceID int64) (int, error) {
 func DeleteNode(uri string) {
 	mu.Lock()
 	ensureLoaded()
-	previousNodes := append([]Node(nil), nodeList...)
-	previousSources := cloneSubscriptionSourcesUnsafe()
-	previousHealth := cloneHealthMapUnsafe()
-	var kept []Node
-	for _, n := range nodeList {
-		if n.RawURI != uri {
-			kept = append(kept, n)
-		}
+	index, exists := nodeIndexByURI[uri]
+	detachedState := detachNodeRuntimeStateUnsafe(uri)
+	affectedSourceIDs := make(map[int64]bool)
+	for sourceID := range detachedState.sourceIDs {
+		affectedSourceIDs[sourceID] = true
 	}
-	nodeList = kept
-	delete(subscriptionSources, uri)
-	delete(healthMap, uri)
-	if err := saveNodesUnsafe(); err != nil {
-		nodeList = previousNodes
-		subscriptionSources = previousSources
-		healthMap = previousHealth
+	var removed Node
+	if exists {
+		removed = nodeList[index]
+		copy(nodeList[index:], nodeList[index+1:])
+		nodeList = nodeList[:len(nodeList)-1]
+	}
+	if err := deletePersistedNodesUnsafe([]string{uri}, affectedSourceIDs); err != nil {
+		if exists {
+			nodeList = append(nodeList, Node{})
+			copy(nodeList[index+1:], nodeList[index:])
+			nodeList[index] = removed
+		}
+		restoreNodeRuntimeStateUnsafe(uri, detachedState)
 		mu.Unlock()
 		log.Printf("[Nodes] 删除节点持久化失败，已回滚内存状态: %v", err)
 		return
 	}
+	if exists {
+		delete(nodeIndexByURI, uri)
+		for current := index; current < len(nodeList); current++ {
+			nodeIndexByURI[nodeList[current].RawURI] = current
+		}
+	}
 	globalStickyPool.Evict(uri)
-	saveHealthUnsafe()
 	cb := DeleteNodeCallback
 	mu.Unlock() // 必须先解锁，避免底层的销毁回调查找节点名称时发生死锁
 	if cb != nil {
@@ -1174,24 +1533,59 @@ func DeleteNode(uri string) {
 func DedupNodes() int {
 	mu.Lock()
 	ensureLoaded()
-	previousNodes := append([]Node(nil), nodeList...)
-	previousSources := cloneSubscriptionSourcesUnsafe()
-	previousHealth := cloneHealthMapUnsafe()
-	keepMap := make(map[string]int)
-	var kept []Node
+	var previousNodes []Node
+	var previousMemberships map[membershipKey]bool
+	type parsedDedupKey struct {
+		scheme   string
+		userinfo string
+		host     string
+		port     int
+	}
+	parsedKeepMap := make(map[parsedDedupKey]int, len(nodeList))
+	var rawKeepMap map[string]int
+	// previousNodes is an independent rollback snapshot, so compact the live
+	// list in place instead of allocating another full-size node slice.
+	kept := nodeList[:0]
 	removed := 0
 	var removedURIs []string
+	var keptSourceStates map[string]subscriptionSourceState
+	var removedStates map[string]detachedNodeRuntimeState
 	for _, n := range nodeList {
-		key := n.RawURI
+		keptIndex := 0
+		exists := false
 		if scheme, userinfo, host, port, ok := parseNodeIdentity(n.RawURI); ok {
-			key = scheme + "://" + userinfo + "@" + host + ":" + strconv.Itoa(port)
+			key := parsedDedupKey{
+				scheme: scheme, userinfo: userinfo, host: host, port: port,
+			}
+			keptIndex, exists = parsedKeepMap[key]
+			if !exists {
+				parsedKeepMap[key] = len(kept)
+			}
+		} else {
+			if rawKeepMap == nil {
+				rawKeepMap = make(map[string]int)
+			}
+			keptIndex, exists = rawKeepMap[n.RawURI]
+			if !exists {
+				rawKeepMap[n.RawURI] = len(kept)
+			}
 		}
-		if _, exists := keepMap[key]; !exists {
-			keepMap[key] = len(kept)
+		if !exists {
 			kept = append(kept, n)
 		} else {
-			keptIndex := keepMap[key]
+			if previousMemberships == nil {
+				// Before the first duplicate, in-place compaction has only
+				// written every node back to its original slot. Capture the
+				// rollback snapshot lazily so the no-op path avoids a full copy.
+				previousNodes = append([]Node(nil), nodeList...)
+				previousMemberships = flattenMemberships(subscriptionSources)
+				keptSourceStates = make(map[string]subscriptionSourceState)
+				removedStates = make(map[string]detachedNodeRuntimeState)
+			}
 			keptURI := kept[keptIndex].RawURI
+			if _, captured := keptSourceStates[keptURI]; !captured {
+				keptSourceStates[keptURI] = snapshotSubscriptionSourceUnsafe(keptURI)
+			}
 			if subscriptionSources[keptURI] == nil {
 				subscriptionSources[keptURI] = make(map[int64]bool)
 			}
@@ -1209,23 +1603,29 @@ func DedupNodes() int {
 			}
 			removed++
 			removedURIs = append(removedURIs, n.RawURI)
-			delete(subscriptionSources, n.RawURI)
-			delete(healthMap, n.RawURI)
+			state := detachNodeRuntimeStateUnsafe(n.RawURI)
+			if state.hadSources || state.hadHealth {
+				removedStates[n.RawURI] = state
+			}
 		}
 	}
+	if removed == 0 {
+		mu.Unlock()
+		return 0
+	}
 	nodeList = kept
-	if err := saveNodesUnsafe(); err != nil {
+	if err := persistNodeSnapshotDiffUnsafe(previousNodes, previousMemberships); err != nil {
 		nodeList = previousNodes
-		subscriptionSources = previousSources
-		healthMap = previousHealth
+		restoreSubscriptionSourceStatesUnsafe(keptSourceStates)
+		restoreNodeRuntimeStatesUnsafe(removedStates)
 		mu.Unlock()
 		log.Printf("[Nodes] 节点去重持久化失败，已回滚内存状态: %v", err)
 		return 0
 	}
+	rebuildNodeIndexUnsafe()
 	for _, rawURI := range removedURIs {
 		globalStickyPool.Evict(rawURI)
 	}
-	saveHealthUnsafe()
 	cb := DeleteNodeCallback
 	mu.Unlock() // 先解锁再通知销毁连接池
 
@@ -1240,35 +1640,48 @@ func DedupNodes() int {
 func DeleteDisabled() int {
 	mu.Lock()
 	ensureLoaded()
-	previousNodes := append([]Node(nil), nodeList...)
-	previousSources := cloneSubscriptionSourcesUnsafe()
-	previousHealth := cloneHealthMapUnsafe()
-	var kept []Node
-	removed := 0
+	var removedNodes []removedNodePosition
 	var removedURIs []string
-	for _, n := range nodeList {
-		if !n.Disabled {
-			kept = append(kept, n)
-		} else {
-			removed++
-			removedURIs = append(removedURIs, n.RawURI)
-			delete(subscriptionSources, n.RawURI)
-			delete(healthMap, n.RawURI)
+	var affectedSourceIDs map[int64]bool
+	keptCount := 0
+	for originalIndex, node := range nodeList {
+		if !node.Disabled {
+			nodeList[keptCount] = node
+			keptCount++
+			continue
+		}
+		state := detachNodeRuntimeStateUnsafe(node.RawURI)
+		removedNodes = append(removedNodes, removedNodePosition{
+			originalIndex: originalIndex,
+			node:          node,
+			runtimeState:  state,
+		})
+		removedURIs = append(removedURIs, node.RawURI)
+		for sourceID := range state.sourceIDs {
+			if affectedSourceIDs == nil {
+				affectedSourceIDs = make(map[int64]bool)
+			}
+			affectedSourceIDs[sourceID] = true
 		}
 	}
-	nodeList = kept
-	if err := saveNodesUnsafe(); err != nil {
-		nodeList = previousNodes
-		subscriptionSources = previousSources
-		healthMap = previousHealth
+	if len(removedNodes) == 0 {
+		mu.Unlock()
+		return 0
+	}
+	nodeList = nodeList[:keptCount]
+	if err := deletePersistedNodesUnsafe(removedURIs, affectedSourceIDs); err != nil {
+		restoreRemovedNodePositionsUnsafe(removedNodes)
+		for _, removed := range removedNodes {
+			restoreNodeRuntimeStateUnsafe(removed.node.RawURI, removed.runtimeState)
+		}
 		mu.Unlock()
 		log.Printf("[Nodes] 删除禁用节点持久化失败，已回滚内存状态: %v", err)
 		return 0
 	}
+	publishRemovedNodeIndexesUnsafe(removedNodes)
 	for _, rawURI := range removedURIs {
 		globalStickyPool.Evict(rawURI)
 	}
-	saveHealthUnsafe()
 	cb := DeleteNodeCallback
 	mu.Unlock()
 
@@ -1277,43 +1690,56 @@ func DeleteDisabled() int {
 			cb(u)
 		}
 	}
-	return removed
+	return len(removedNodes)
 }
 
 func BatchUpdateNodesDisabled(uris []string, disabled bool) error {
 	mu.Lock()
 	defer mu.Unlock()
 	ensureLoaded()
-	previousNodes := append([]Node(nil), nodeList...)
-	targets := make(map[string]bool)
-	for _, u := range uris {
-		targets[u] = true
+	type disabledChange struct {
+		index    int
+		previous bool
+		rawURI   string
 	}
-	for i, n := range nodeList {
-		if targets[n.RawURI] {
-			nodeList[i].Disabled = disabled
+	changes := make([]disabledChange, 0, len(uris))
+	for _, u := range uris {
+		index, exists := nodeIndexByURI[u]
+		if !exists || nodeList[index].Disabled == disabled {
+			continue
 		}
+		changes = append(changes, disabledChange{
+			index:    index,
+			previous: nodeList[index].Disabled,
+			rawURI:   u,
+		})
+		nodeList[index].Disabled = disabled
 	}
 	database := db.CurrentDB()
-	if database == nil || len(uris) == 0 {
+	if database == nil || len(changes) == 0 {
 		return nil
+	}
+	restoreChanges := func() {
+		for _, change := range changes {
+			nodeList[change.index].Disabled = change.previous
+		}
 	}
 	tx, err := database.Begin()
 	if err != nil {
-		nodeList = previousNodes
+		restoreChanges()
 		return fmt.Errorf("开始批量更新节点事务: %w", err)
 	}
 	rollback := func(updateErr error) error {
 		_ = tx.Rollback()
-		nodeList = previousNodes
+		restoreChanges()
 		return fmt.Errorf("批量更新节点: %w", updateErr)
 	}
 	stmt, err := tx.Prepare("UPDATE nodes SET disabled = ? WHERE raw_uri = ?")
 	if err != nil {
 		return rollback(err)
 	}
-	for _, u := range uris {
-		if _, err := stmt.Exec(disabled, u); err != nil {
+	for _, change := range changes {
+		if _, err := stmt.Exec(disabled, change.rawURI); err != nil {
 			_ = stmt.Close()
 			return rollback(err)
 		}
@@ -1322,7 +1748,7 @@ func BatchUpdateNodesDisabled(uris []string, disabled bool) error {
 		return rollback(err)
 	}
 	if err := tx.Commit(); err != nil {
-		nodeList = previousNodes
+		restoreChanges()
 		return fmt.Errorf("提交批量更新节点事务: %w", err)
 	}
 	return nil
@@ -1331,34 +1757,47 @@ func BatchUpdateNodesDisabled(uris []string, disabled bool) error {
 func BatchDeleteNodes(uris []string) error {
 	mu.Lock()
 	ensureLoaded()
-	previousNodes := append([]Node(nil), nodeList...)
-	previousSources := cloneSubscriptionSourcesUnsafe()
-	previousHealth := cloneHealthMapUnsafe()
 	targets := make(map[string]bool)
+	detachedStates := make(map[string]detachedNodeRuntimeState)
+	affectedSourceIDs := make(map[int64]bool)
 	for _, u := range uris {
+		if targets[u] {
+			continue
+		}
 		targets[u] = true
-		delete(subscriptionSources, u)
-		delete(healthMap, u)
-	}
-	var kept []Node
-	for _, n := range nodeList {
-		if !targets[n.RawURI] {
-			kept = append(kept, n)
+		state := detachNodeRuntimeStateUnsafe(u)
+		if state.hadSources || state.hadHealth {
+			detachedStates[u] = state
+		}
+		for sourceID := range state.sourceIDs {
+			affectedSourceIDs[sourceID] = true
 		}
 	}
-	nodeList = kept
-	if err := saveNodesUnsafe(); err != nil {
-		nodeList = previousNodes
-		subscriptionSources = previousSources
-		healthMap = previousHealth
+	var removedNodes []removedNodePosition
+	keptCount := 0
+	for originalIndex, node := range nodeList {
+		if targets[node.RawURI] {
+			removedNodes = append(removedNodes, removedNodePosition{
+				originalIndex: originalIndex,
+				node:          node,
+			})
+			continue
+		}
+		nodeList[keptCount] = node
+		keptCount++
+	}
+	nodeList = nodeList[:keptCount]
+	if err := deletePersistedNodesUnsafe(uris, affectedSourceIDs); err != nil {
+		restoreRemovedNodePositionsUnsafe(removedNodes)
+		restoreNodeRuntimeStatesUnsafe(detachedStates)
 		mu.Unlock()
 		log.Printf("[Nodes] 批量删除节点持久化失败，已回滚内存状态: %v", err)
 		return err
 	}
+	publishRemovedNodeIndexesUnsafe(removedNodes)
 	for _, rawURI := range uris {
 		globalStickyPool.Evict(rawURI)
 	}
-	saveHealthUnsafe()
 	cb := DeleteNodeCallback
 	mu.Unlock() // 防止在批量删除时引发卡死死锁
 
@@ -1370,103 +1809,65 @@ func BatchDeleteNodes(uris []string) error {
 	return nil
 }
 
-func SortNodesByLatency() {
+func nodeLatencySortValueUnsafe(node Node) float64 {
+	health := healthMap[node.RawURI]
+	if health == nil {
+		return math.MaxFloat64
+	}
+	if health.ConsecutiveFailures > 0 {
+		return 1e6 + float64(health.ConsecutiveFailures)*1000
+	}
+	if health.LastTestMs > 0 {
+		return health.LastTestMs
+	}
+	return math.MaxFloat64
+}
+
+func nodeLatencyLessUnsafe(left, right Node, descending bool) bool {
+	// Disabled nodes stay last in both directions.
+	if left.Disabled != right.Disabled {
+		return !left.Disabled
+	}
+	leftValue := nodeLatencySortValueUnsafe(left)
+	rightValue := nodeLatencySortValueUnsafe(right)
+	if leftValue == rightValue {
+		return left.Name < right.Name
+	}
+	if descending {
+		return leftValue > rightValue
+	}
+	return leftValue < rightValue
+}
+
+func sortNodesByLatency(descending bool) {
 	mu.Lock()
 	ensureLoaded()
+	less := func(i, j int) bool {
+		return nodeLatencyLessUnsafe(nodeList[i], nodeList[j], descending)
+	}
+	if sort.SliceIsSorted(nodeList, less) {
+		mu.Unlock()
+		return
+	}
 	previousNodes := append([]Node(nil), nodeList...)
-
-	sort.Slice(nodeList, func(i, j int) bool {
-		n1 := nodeList[i]
-		n2 := nodeList[j]
-
-		// 禁用的排在最后面
-		if n1.Disabled != n2.Disabled {
-			return !n1.Disabled
-		}
-
-		h1 := healthMap[n1.RawURI]
-		h2 := healthMap[n2.RawURI]
-
-		val1 := math.MaxFloat64
-		if h1 != nil {
-			if h1.ConsecutiveFailures > 0 {
-				val1 = 1e6 + float64(h1.ConsecutiveFailures)*1000
-			} else if h1.LastTestMs > 0 {
-				val1 = h1.LastTestMs
-			}
-		}
-
-		val2 := math.MaxFloat64
-		if h2 != nil {
-			if h2.ConsecutiveFailures > 0 {
-				val2 = 1e6 + float64(h2.ConsecutiveFailures)*1000
-			} else if h2.LastTestMs > 0 {
-				val2 = h2.LastTestMs
-			}
-		}
-
-		// 延迟一致的按名字自然排序
-		if val1 == val2 {
-			return n1.Name < n2.Name
-		}
-		return val1 < val2
-	})
-
-	if err := saveNodesUnsafe(); err != nil {
+	sort.Slice(nodeList, less)
+	if err := persistNodeOrderUnsafe(); err != nil {
 		nodeList = previousNodes
 		log.Printf("[Nodes] 保存节点排序失败，已回滚内存状态: %v", err)
+	} else {
+		for index, node := range nodeList {
+			nodeIndexByURI[node.RawURI] = index
+		}
 	}
 	mu.Unlock()
 }
 
+func SortNodesByLatency() {
+	sortNodesByLatency(false)
+}
+
 func SortNodesByLatencyDesc() {
-	mu.Lock()
-	ensureLoaded()
-	previousNodes := append([]Node(nil), nodeList...)
-
-	sort.Slice(nodeList, func(i, j int) bool {
-		n1 := nodeList[i]
-		n2 := nodeList[j]
-
-		// 禁用的排在最后面
-		if n1.Disabled != n2.Disabled {
-			return !n1.Disabled
-		}
-
-		h1 := healthMap[n1.RawURI]
-		h2 := healthMap[n2.RawURI]
-
-		val1 := math.MaxFloat64
-		if h1 != nil {
-			if h1.ConsecutiveFailures > 0 {
-				val1 = 1e6 + float64(h1.ConsecutiveFailures)*1000
-			} else if h1.LastTestMs > 0 {
-				val1 = h1.LastTestMs
-			}
-		}
-
-		val2 := math.MaxFloat64
-		if h2 != nil {
-			if h2.ConsecutiveFailures > 0 {
-				val2 = 1e6 + float64(h2.ConsecutiveFailures)*1000
-			} else if h2.LastTestMs > 0 {
-				val2 = h2.LastTestMs
-			}
-		}
-
-		// 延迟一致的按名字自然排序
-		if val1 == val2 {
-			return n1.Name < n2.Name
-		}
-		// 这里改为降序，val1 > val2
-		return val1 > val2
-	})
-
-	if err := saveNodesUnsafe(); err != nil {
-		nodeList = previousNodes
-		log.Printf("[Nodes] 保存节点排序失败，已回滚内存状态: %v", err)
-	}
-	mu.Unlock()
+	sortNodesByLatency(true)
 }
 
 func GetNodeName(uri string) string {
@@ -1548,20 +1949,17 @@ func EnableNode(uri string) bool {
 	mu.Lock()
 	defer mu.Unlock()
 	ensureLoaded()
-	found := false
-	for i, n := range nodeList {
-		if n.RawURI == uri {
-			nodeList[i].Disabled = false
-			if h, exists := healthMap[uri]; exists {
-				h.CooldownUntil = 0
-				updateSingleNodeHealthUnsafe(uri, h)
-			}
-			updateSingleNodeDisabledUnsafe(uri, false)
-			found = true
-			break
-		}
+	index, found := nodeIndexForUpdateUnsafe(uri)
+	if !found {
+		return false
 	}
-	return found
+	nodeList[index].Disabled = false
+	if health, exists := healthMap[uri]; exists {
+		health.CooldownUntil = 0
+		updateSingleNodeHealthUnsafe(uri, health)
+	}
+	updateSingleNodeDisabledUnsafe(uri, false)
+	return true
 }
 
 func padB64(s string) string {
@@ -1614,6 +2012,9 @@ func parseNodeIdentity(rawURI string) (scheme, userinfo, host string, port int, 
 		}
 		return "", "", "", 0, false
 	}
+	if scheme, userinfo, host, port, ok := parseSimpleNodeIdentity(rawURI); ok {
+		return scheme, userinfo, host, port, true
+	}
 	u, err := url.Parse(rawURI)
 	if err != nil || u.Scheme == "" || u.Host == "" {
 		return "", "", "", 0, false
@@ -1629,6 +2030,92 @@ func parseNodeIdentity(rawURI string) (scheme, userinfo, host string, port int, 
 		port = 443
 	}
 	return scheme, userinfo, host, port, true
+}
+
+// parseSimpleNodeIdentity handles the overwhelmingly common unescaped
+// scheme://userinfo@host:port form without allocating. Complex authorities
+// deliberately fall back to net/url in parseNodeIdentity.
+func parseSimpleNodeIdentity(rawURI string) (scheme, userinfo, host string, port int, ok bool) {
+	separator := strings.Index(rawURI, "://")
+	if separator <= 0 || !validProxyScheme(rawURI[:separator]) {
+		return "", "", "", 0, false
+	}
+	authority := rawURI[separator+3:]
+	if end := strings.IndexAny(authority, "/?#"); end >= 0 {
+		authority = authority[:end]
+	}
+	if authority == "" || strings.ContainsAny(authority, "%\\") {
+		return "", "", "", 0, false
+	}
+
+	hostPort := authority
+	if at := strings.LastIndexByte(authority, '@'); at >= 0 {
+		rawUserinfo := authority[:at]
+		if colon := strings.IndexByte(rawUserinfo, ':'); colon >= 0 {
+			rawUserinfo = rawUserinfo[:colon]
+		}
+		userinfo = rawUserinfo
+		hostPort = authority[at+1:]
+	}
+	if hostPort == "" {
+		return "", "", "", 0, false
+	}
+
+	port = 443
+	if hostPort[0] == '[' {
+		closeBracket := strings.IndexByte(hostPort, ']')
+		if closeBracket <= 1 {
+			return "", "", "", 0, false
+		}
+		host = hostPort[1:closeBracket]
+		remainder := hostPort[closeBracket+1:]
+		if remainder != "" {
+			if remainder[0] != ':' {
+				return "", "", "", 0, false
+			}
+			parsedPort, parsed := parseSimpleNodePort(remainder[1:])
+			if !parsed {
+				return "", "", "", 0, false
+			}
+			port = parsedPort
+		}
+	} else {
+		if strings.Count(hostPort, ":") > 1 {
+			return "", "", "", 0, false
+		}
+		host = hostPort
+		if colon := strings.LastIndexByte(hostPort, ':'); colon >= 0 {
+			host = hostPort[:colon]
+			parsedPort, parsed := parseSimpleNodePort(hostPort[colon+1:])
+			if !parsed {
+				return "", "", "", 0, false
+			}
+			port = parsedPort
+		}
+	}
+	if host == "" {
+		return "", "", "", 0, false
+	}
+	return rawURI[:separator], userinfo, host, port, true
+}
+
+func parseSimpleNodePort(rawPort string) (int, bool) {
+	if rawPort == "" {
+		return 443, true
+	}
+	for index := range len(rawPort) {
+		if rawPort[index] < '0' || rawPort[index] > '9' {
+			return 0, false
+		}
+	}
+	port, err := strconv.Atoi(rawPort)
+	if err != nil {
+		return 0, false
+	}
+	if port == 0 {
+		port = 443
+	}
+	return port, true
 }
 
 func minInt(a, b int) int {
@@ -1889,30 +2376,91 @@ type NodePoolStats struct {
 	Untested  int `json:"untested"`
 }
 
+type healthCheckCandidate struct {
+	node     Node
+	priority int
+	lastSeen int64
+	order    int
+}
+
+func healthCheckEarlier(left, right healthCheckCandidate) bool {
+	if left.priority != right.priority {
+		return left.priority < right.priority
+	}
+	if left.lastSeen != right.lastSeen {
+		return left.lastSeen < right.lastSeen
+	}
+	return left.order < right.order
+}
+
+func retainEarliestHealthCheck(
+	candidates []healthCheckCandidate,
+	candidate healthCheckCandidate,
+	limit int,
+) []healthCheckCandidate {
+	if len(candidates) < limit {
+		candidates = append(candidates, candidate)
+		if len(candidates) == limit {
+			for index := len(candidates)/2 - 1; index >= 0; index-- {
+				siftDownHealthCheckMaxHeap(candidates, index)
+			}
+		}
+		return candidates
+	}
+	if !healthCheckEarlier(candidate, candidates[0]) {
+		return candidates
+	}
+	candidates[0] = candidate
+	siftDownHealthCheckMaxHeap(candidates, 0)
+	return candidates
+}
+
+func siftDownHealthCheckMaxHeap(candidates []healthCheckCandidate, index int) {
+	for {
+		left := index*2 + 1
+		if left >= len(candidates) {
+			return
+		}
+		latest := left
+		if right := left + 1; right < len(candidates) &&
+			healthCheckEarlier(candidates[left], candidates[right]) {
+			latest = right
+		}
+		if !healthCheckEarlier(candidates[index], candidates[latest]) {
+			return
+		}
+		candidates[index], candidates[latest] = candidates[latest], candidates[index]
+		index = latest
+	}
+}
+
 func GetNodePoolStats(now time.Time) NodePoolStats {
 	lockLoadedForRead()
 	defer mu.RUnlock()
 	stats := NodePoolStats{Total: len(nodeList)}
 	nowUnix := now.Unix()
 	for _, node := range nodeList {
-		if node.Disabled {
-			stats.Disabled++
-			continue
-		}
-		stats.Enabled++
-		health := healthMap[node.RawURI]
-		switch {
-		case health == nil || (health.LastSuccessAt == 0 && health.LastFailAt == 0):
-			stats.Untested++
-		case health.CooldownUntil > nowUnix:
-			stats.Cooling++
-		case health.ConsecutiveFailures > 0:
-			stats.Unhealthy++
-		default:
-			stats.Healthy++
-		}
+		addNodePoolStats(&stats, node, healthMap[node.RawURI], nowUnix)
 	}
 	return stats
+}
+
+func addNodePoolStats(stats *NodePoolStats, node Node, health *NodeHealth, nowUnix int64) {
+	if node.Disabled {
+		stats.Disabled++
+		return
+	}
+	stats.Enabled++
+	switch {
+	case health == nil || (health.LastSuccessAt == 0 && health.LastFailAt == 0):
+		stats.Untested++
+	case health.CooldownUntil > nowUnix:
+		stats.Cooling++
+	case health.ConsecutiveFailures > 0:
+		stats.Unhealthy++
+	default:
+		stats.Healthy++
+	}
 }
 
 // SelectNodesForHealthCheck 按“未测试、冷却到期失败、健康记录过期”的顺序选择巡检节点。
@@ -1922,44 +2470,43 @@ func SelectNodesForHealthCheck(limit int, staleAfter time.Duration, now time.Tim
 	}
 	lockLoadedForRead()
 
-	type candidate struct {
-		node     Node
-		priority int
-		lastSeen int64
-	}
 	nowUnix := now.Unix()
 	staleBefore := now.Add(-staleAfter).Unix()
-	candidates := make([]candidate, 0, min(limit*2, len(nodeList)))
-	for _, node := range nodeList {
+	candidates := make([]healthCheckCandidate, 0, min(limit, len(nodeList)))
+	for order, node := range nodeList {
 		if node.Disabled {
 			continue
 		}
 		health := healthMap[node.RawURI]
+		var candidate healthCheckCandidate
 		switch {
 		case health == nil || (health.LastSuccessAt == 0 && health.LastFailAt == 0):
-			candidates = append(candidates, candidate{node: node, priority: 0})
+			candidate = healthCheckCandidate{node: node, priority: 0, order: order}
 		case health.CooldownUntil > nowUnix:
 			continue
 		case health.ConsecutiveFailures > 0:
-			candidates = append(candidates, candidate{
-				node: node, priority: 1, lastSeen: health.LastFailAt,
-			})
+			candidate = healthCheckCandidate{
+				node: node, priority: 1, lastSeen: health.LastFailAt, order: order,
+			}
 		case staleAfter <= 0 || health.LastSuccessAt <= staleBefore:
-			candidates = append(candidates, candidate{
-				node: node, priority: 2, lastSeen: health.LastSuccessAt,
-			})
+			candidate = healthCheckCandidate{
+				node: node, priority: 2, lastSeen: health.LastSuccessAt, order: order,
+			}
+		default:
+			continue
 		}
+		candidates = retainEarliestHealthCheck(candidates, candidate, limit)
 	}
 	mu.RUnlock()
-	sort.SliceStable(candidates, func(i, j int) bool {
-		if candidates[i].priority != candidates[j].priority {
-			return candidates[i].priority < candidates[j].priority
+	slices.SortFunc(candidates, func(left, right healthCheckCandidate) int {
+		if healthCheckEarlier(left, right) {
+			return -1
 		}
-		return candidates[i].lastSeen < candidates[j].lastSeen
+		if healthCheckEarlier(right, left) {
+			return 1
+		}
+		return 0
 	})
-	if len(candidates) > limit {
-		candidates = candidates[:limit]
-	}
 	selected := make([]Node, len(candidates))
 	for i := range candidates {
 		selected[i] = candidates[i].node
@@ -2234,7 +2781,7 @@ func weightedNodeSample(candidates []scoredNode, count int) []Node {
 	}
 	const inlineCandidateLimit = 80
 	var inlineCandidates [inlineCandidateLimit]weightedCandidate
-	pool := inlineCandidates[:0]
+	var pool []weightedCandidate
 	if len(candidates) <= len(inlineCandidates) {
 		pool = inlineCandidates[:len(candidates)]
 	} else {

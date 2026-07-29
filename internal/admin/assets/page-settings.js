@@ -184,10 +184,6 @@ async function saveSettings() {
     $('#set_proxy_failover_max_attempts').focus();
     return;
   }
-  // Keep sending whatever telemetry_enabled is in curSettings to prevent config loss/errors
-  if (curSettings.telemetry_enabled !== undefined) {
-    out['telemetry_enabled'] = curSettings.telemetry_enabled;
-  }
   if (!out['parallel_pool_enabled']) {
     out['sticky_node_priority'] = false;
     out['parallel_pool_retry_enabled'] = false;

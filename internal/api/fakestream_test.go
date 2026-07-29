@@ -19,6 +19,9 @@ func TestSplitIntoRuneChunks(t *testing.T) {
 	}
 	for _, text := range cases {
 		chunks := splitIntoRuneChunks(text)
+		if len(chunks) > fakeStreamTargetChunks {
+			t.Errorf("文本 %q 被切成 %d 段，超过目标上限 %d", text, len(chunks), fakeStreamTargetChunks)
+		}
 		// 每个分片都必须是合法 UTF-8（不含被截断的多字节序列）。
 		for i, c := range chunks {
 			if !utf8.ValidString(c) {

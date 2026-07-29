@@ -24,28 +24,31 @@ var schemaUnsupportedKeys = map[string]bool{ //nolint:gochecknoglobals
 	"title": true,
 }
 
-// cleanFunctionParameters 递归用 Gemini 白名单清洗 JSON Schema，剔除上游不支持的字段。
-func cleanFunctionParameters(schema any) any {
+// cleanNativeFunctionParameters 在一次递归中用 Gemini 白名单清洗 JSON
+// Schema，并转换为匿名 Vertex UI 端点需要的原生 Map-style Schema。
+func cleanNativeFunctionParameters(schema any) any {
 	switch s := schema.(type) {
 	case []any:
 		out := make([]any, len(s))
 		for i, item := range s {
-			out[i] = cleanFunctionParameters(item)
+			out[i] = cleanNativeFunctionParameters(item)
 		}
 		return out
 	case map[string]any:
 		// 不按不受信任 schema 的总键数无限预分配；最终只会保留白名单字段。
 		cleaned := make(map[string]any, min(len(s), len(geminiAllowedSchemaFields)))
 		for key, value := range s {
-			if !geminiAllowedSchemaFields[key] {
+			if !geminiAllowedSchemaFields[key] || schemaUnsupportedKeys[key] {
 				continue
 			}
 			switch key {
 			case "properties":
 				if vm, ok := value.(map[string]any); ok {
-					props := make(map[string]any, len(vm))
+					props := make([]any, 0, len(vm))
 					for k, v := range vm {
-						props[k] = cleanFunctionParameters(v)
+						props = append(props, map[string]any{
+							"key": k, "value": cleanNativeFunctionParameters(v),
+						})
 					}
 					cleaned[key] = props
 					continue
@@ -53,17 +56,7 @@ func cleanFunctionParameters(schema any) any {
 				cleaned[key] = value
 			case "items":
 				if _, ok := value.(map[string]any); ok {
-					cleaned[key] = cleanFunctionParameters(value)
-					continue
-				}
-				cleaned[key] = value
-			case "anyOf":
-				if vl, ok := value.([]any); ok {
-					out := make([]any, len(vl))
-					for i, item := range vl {
-						out[i] = cleanFunctionParameters(item)
-					}
-					cleaned[key] = out
+					cleaned[key] = cleanNativeFunctionParameters(value)
 					continue
 				}
 				cleaned[key] = value
@@ -71,6 +64,8 @@ func cleanFunctionParameters(schema any) any {
 				cleaned[key] = value
 			}
 		}
+		cleaned["type"] = nativeSchemaType(cleaned["type"])
+		convertNativeSchemaNumericConstraints(cleaned)
 		return cleaned
 	default:
 		return schema
@@ -91,24 +86,7 @@ func toNativeSchema(schema any) any {
 		out[k] = v
 	}
 
-	switch t := out["type"].(type) {
-	case []any:
-		picked := "string"
-		for _, item := range t {
-			if s, ok := item.(string); ok && s != "null" {
-				picked = s
-				break
-			}
-		}
-		out["type"] = strings.ToUpper(picked)
-	case string:
-		out["type"] = strings.ToUpper(t)
-	default:
-		out["type"] = "OBJECT"
-	}
-	if !validNativeSchemaType(out["type"].(string)) {
-		out["type"] = "STRING"
-	}
+	out["type"] = nativeSchemaType(out["type"])
 
 	if props, ok := out["properties"].(map[string]any); ok {
 		nativeProps := make([]any, 0, len(props))
@@ -126,22 +104,95 @@ func toNativeSchema(schema any) any {
 		out["items"] = toNativeSchema(items)
 	}
 
-	numericConstraints := []string{"minItems", "maxItems", "minProperties", "maxProperties", "minLength", "maxLength"}
-	for _, field := range numericConstraints {
-		if v, ok := out[field]; ok && v != nil {
+	convertNativeSchemaNumericConstraints(out)
+
+	return out
+}
+
+func nativeSchemaType(raw any) string {
+	picked := ""
+	switch value := raw.(type) {
+	case []any:
+		picked = "string"
+		for _, item := range value {
+			if candidate, ok := item.(string); ok && candidate != "null" {
+				picked = candidate
+				break
+			}
+		}
+	case string:
+		picked = value
+	default:
+		return "OBJECT"
+	}
+	switch picked {
+	case "string", "STRING":
+		return "STRING"
+	case "integer", "INTEGER":
+		return "INTEGER"
+	case "number", "NUMBER":
+		return "NUMBER"
+	case "boolean", "BOOLEAN":
+		return "BOOLEAN"
+	case "array", "ARRAY":
+		return "ARRAY"
+	case "object", "OBJECT":
+		return "OBJECT"
+	default:
+		upper := strings.ToUpper(picked)
+		if validNativeSchemaType(upper) {
+			return upper
+		}
+		return "STRING"
+	}
+}
+
+func convertNativeSchemaNumericConstraints(schema map[string]any) {
+	for _, field := range [...]string{
+		"minItems", "maxItems", "minProperties", "maxProperties", "minLength", "maxLength",
+	} {
+		if v, ok := schema[field]; ok && v != nil {
 			switch n := v.(type) {
 			case float64:
-				out[field] = strconv.FormatFloat(n, 'f', 0, 64)
+				schema[field] = strconv.FormatFloat(n, 'f', 0, 64)
 			case int:
-				out[field] = strconv.Itoa(n)
+				schema[field] = strconv.Itoa(n)
 			case int64:
-				out[field] = strconv.FormatInt(n, 10)
+				schema[field] = strconv.FormatInt(n, 10)
 			case string:
 			}
 		}
 	}
+}
 
-	return out
+func canonicalNativeSchema(schema any) bool {
+	m, ok := schema.(map[string]any)
+	typ, typeOK := m["type"].(string)
+	if !ok || !typeOK || !validNativeSchemaType(typ) {
+		return false
+	}
+	for key, value := range m {
+		if schemaUnsupportedKeys[key] || strings.Contains(key, "_") {
+			return false
+		}
+		switch key {
+		case "properties":
+			if _, ok := value.([]any); !ok {
+				return false
+			}
+		case "items":
+			if nested, ok := value.(map[string]any); ok && !canonicalNativeSchema(nested) {
+				return false
+			}
+		case "minItems", "maxItems", "minProperties", "maxProperties", "minLength", "maxLength":
+			if value != nil {
+				if _, ok := value.(string); !ok {
+					return false
+				}
+			}
+		}
+	}
+	return true
 }
 
 func validNativeSchemaType(value string) bool {

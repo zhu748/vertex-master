@@ -2,12 +2,163 @@ package nodes
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/bsfdsagfadg/vertex/internal/db"
 )
+
+func BenchmarkSyncSubscriptionLargePoolNoChanges(b *testing.B) {
+	const nodeCount = 5000
+	db.CloseDB()
+	if err := db.InitDB(filepath.Join(b.TempDir(), "subscription-benchmark.db")); err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(db.CloseDB)
+	resetState()
+
+	item, err := SaveProxySubscription(ProxySubscription{
+		Name: "benchmark", URL: "https://example.com/benchmark", ProxyType: "http",
+		RefreshIntervalMinutes: 60, Enabled: true,
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	proxies := make([]Node, nodeCount)
+	for index := range proxies {
+		proxies[index] = Node{
+			Type:   "http",
+			Name:   fmt.Sprintf("node-%d", index),
+			RawURI: fmt.Sprintf("http://benchmark-%d.invalid:8080", index),
+		}
+	}
+	if _, err = SyncSubscriptionNodes(item.ID, proxies); err != nil {
+		b.Fatal(err)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if _, err = SyncSubscriptionNodes(item.ID, proxies); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkSyncSubscriptionLargePoolOneReplacement(b *testing.B) {
+	const nodeCount = 5000
+	db.CloseDB()
+	if err := db.InitDB(filepath.Join(b.TempDir(), "subscription-change-benchmark.db")); err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(db.CloseDB)
+	resetState()
+
+	item, err := SaveProxySubscription(ProxySubscription{
+		Name: "change-benchmark", URL: "https://example.com/change-benchmark", ProxyType: "http",
+		RefreshIntervalMinutes: 60, Enabled: true,
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	proxies := make([]Node, nodeCount)
+	for index := range proxies {
+		proxies[index] = Node{
+			Type:   "http",
+			Name:   fmt.Sprintf("node-%d", index),
+			RawURI: fmt.Sprintf("http://change-benchmark-%d.invalid:8080", index),
+		}
+	}
+	if _, err = SyncSubscriptionNodes(item.ID, proxies); err != nil {
+		b.Fatal(err)
+	}
+	firstSet := append([]Node(nil), proxies...)
+	secondSet := append([]Node(nil), proxies...)
+	firstSet[len(firstSet)-1] = Node{
+		Type: "http", Name: "replacement-a", RawURI: "http://replacement-a.invalid:8080",
+	}
+	secondSet[len(secondSet)-1] = Node{
+		Type: "http", Name: "replacement-b", RawURI: "http://replacement-b.invalid:8080",
+	}
+	mu.Lock()
+	for _, node := range nodeList {
+		healthMap[node.RawURI] = &NodeHealth{SuccessCount: 1, LastSuccessAt: time.Now().Unix()}
+	}
+	mu.Unlock()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for iteration := range b.N {
+		next := firstSet
+		if iteration%2 != 0 {
+			next = secondSet
+		}
+		if _, err = SyncSubscriptionNodes(item.ID, next); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func TestSyncSubscriptionDeduplicatesInputWithStableOrderAndLastValue(t *testing.T) {
+	db.CloseDB()
+	if err := db.InitDB(filepath.Join(t.TempDir(), "subscription-dedup.db")); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(db.CloseDB)
+	resetState()
+
+	item, err := SaveProxySubscription(ProxySubscription{
+		Name: "dedup", URL: "https://example.com/dedup", ProxyType: "http",
+		RefreshIntervalMinutes: 60, Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstURI := "http://first.invalid:8080"
+	secondURI := "http://second.invalid:8080"
+	input := []Node{
+		{Type: "http", Name: "first-old", RawURI: "  " + firstURI + "  "},
+		{Type: "http", Name: "second", RawURI: secondURI},
+		{Type: "http", Name: "first-new", RawURI: firstURI},
+	}
+	result, err := SyncSubscriptionNodes(item.ID, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Count != 2 || result.Added != 2 || result.Removed != 0 {
+		t.Fatalf("deduplicated sync result: %#v", result)
+	}
+	loaded := LoadNodes()
+	if len(loaded) != 2 ||
+		loaded[0].RawURI != firstURI ||
+		loaded[0].Name != "first-new" ||
+		loaded[1].RawURI != secondURI {
+		t.Fatalf("deduplicated nodes lost order or last value: %#v", loaded)
+	}
+
+	result, err = SyncSubscriptionNodes(item.ID, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Count != 2 || result.Added != 0 || result.Removed != 0 {
+		t.Fatalf("unchanged deduplicated sync result: %#v", result)
+	}
+
+	duplicate := Node{Type: "http", Name: "first-new", RawURI: firstURI}
+	result, err = SyncSubscriptionNodes(item.ID, []Node{duplicate, duplicate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Count != 1 || result.Added != 0 || result.Removed != 1 {
+		t.Fatalf("duplicate-only sync result: %#v", result)
+	}
+	loaded = LoadNodes()
+	if len(loaded) != 1 || loaded[0].RawURI != firstURI || loaded[0].Name != "first-new" {
+		t.Fatalf("duplicate input incorrectly hit unchanged fast path: %#v", loaded)
+	}
+}
 
 func TestProxySubscriptionLifecycleAndNodeReplacement(t *testing.T) {
 	db.CloseDB()
@@ -18,7 +169,9 @@ func TestProxySubscriptionLifecycleAndNodeReplacement(t *testing.T) {
 	resetState()
 
 	manual := Node{Type: "http", Name: "manual", RawURI: "http://127.0.0.1:8000"} //nolint:exhaustruct
-	MergeNodes([]Node{manual})
+	if err := MergeNodes([]Node{manual}); err != nil {
+		t.Fatal(err)
+	}
 
 	item, err := SaveProxySubscription(ProxySubscription{
 		Name:                   "pool",
@@ -76,7 +229,9 @@ func TestProxySubscriptionLifecycleAndNodeReplacement(t *testing.T) {
 
 	preservedURI := "socks5://127.0.0.1:1080"
 	RecordTest(preservedURI, true, 12.5, "")
-	BatchUpdateNodesDisabled([]string{preservedURI}, true)
+	if err := BatchUpdateNodesDisabled([]string{preservedURI}, true); err != nil {
+		t.Fatal(err)
+	}
 
 	second, err := SyncSubscriptionNodes(item.ID, []Node{
 		{Type: "socks5", Name: "one renamed", RawURI: preservedURI},        //nolint:exhaustruct
@@ -102,6 +257,13 @@ func TestProxySubscriptionLifecycleAndNodeReplacement(t *testing.T) {
 	}
 	if health := LoadHealth()[preservedURI]; health == nil || health.SuccessCount != 1 || health.LastTestMs != 12.5 {
 		t.Fatalf("unchanged node health was lost: %#v", health)
+	}
+	persistedSubscription, err := GetProxySubscription(item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persistedSubscription.NodeCount != second.Count {
+		t.Fatalf("incremental sync node_count=%d, want %d", persistedSubscription.NodeCount, second.Count)
 	}
 
 	if err := UpdateProxySubscriptionResult(item.ID, second.Count, nil); err != nil {
@@ -212,6 +374,36 @@ func TestSharedNodeSurvivesSingleSubscriptionRemoval(t *testing.T) {
 	}
 	if health := LoadHealth()[shared.RawURI]; health == nil || health.SuccessCount != 1 {
 		t.Fatalf("shared node health was not preserved: %#v", health)
+	}
+	var persistedSourceID int64
+	if err := db.CurrentDB().QueryRow(
+		"SELECT source_id FROM nodes WHERE raw_uri = ?",
+		shared.RawURI,
+	).Scan(&persistedSourceID); err != nil {
+		t.Fatal(err)
+	}
+	var firstMembership, secondMembership int
+	if err := db.CurrentDB().QueryRow(
+		"SELECT COUNT(*) FROM proxy_subscription_nodes WHERE subscription_id = ? AND raw_uri = ?",
+		first.ID,
+		shared.RawURI,
+	).Scan(&firstMembership); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CurrentDB().QueryRow(
+		"SELECT COUNT(*) FROM proxy_subscription_nodes WHERE subscription_id = ? AND raw_uri = ?",
+		second.ID,
+		shared.RawURI,
+	).Scan(&secondMembership); err != nil {
+		t.Fatal(err)
+	}
+	if persistedSourceID != second.ID || firstMembership != 0 || secondMembership != 1 {
+		t.Fatalf(
+			"persisted shared ownership source=%d first=%d second=%d",
+			persistedSourceID,
+			firstMembership,
+			secondMembership,
+		)
 	}
 
 	removed, err := DeleteSubscriptionNodes(second.ID)

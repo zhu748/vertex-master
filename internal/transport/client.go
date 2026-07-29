@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -22,6 +23,8 @@ type Response = http.Response
 
 // ErrResponseBodyTooLarge 表示受限读取超过调用方允许的响应体大小。
 var ErrResponseBodyTooLarge = errors.New("response body too large")
+
+const maxResponseReadPreallocateBytes int64 = 4 << 20
 
 // Session 封装一个独立的 tls-client，服务于单次逻辑请求。
 type Session struct {
@@ -59,7 +62,7 @@ func (s *Session) DoAndReadLimit(
 		return 0, nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	data, readErr := ReadAllLimit(resp.Body, maxBytes)
+	data, readErr := readAllLimitWithHint(resp.Body, maxBytes, resp.ContentLength)
 	if readErr != nil {
 		return resp.StatusCode, data, fmt.Errorf("读取响应体: %w", readErr)
 	}
@@ -69,13 +72,31 @@ func (s *Session) DoAndReadLimit(
 // ReadAllLimit 读取 reader。maxBytes <= 0 表示不限；超限时返回限制内的前缀和
 // ErrResponseBodyTooLarge，便于错误日志保留有界的上游详情。
 func ReadAllLimit(reader io.Reader, maxBytes int64) ([]byte, error) {
+	return readAllLimitWithHint(reader, maxBytes, -1)
+}
+
+func readAllLimitWithHint(reader io.Reader, maxBytes, sizeHint int64) ([]byte, error) {
 	if maxBytes <= 0 {
+		if sizeHint > 0 {
+			return readAllWithCapacity(reader, min(sizeHint, maxResponseReadPreallocateBytes))
+		}
 		return io.ReadAll(reader)
 	}
 	if maxBytes == int64(^uint64(0)>>1) {
+		if sizeHint > 0 {
+			return readAllWithCapacity(reader, min(sizeHint, maxResponseReadPreallocateBytes))
+		}
 		return io.ReadAll(reader)
 	}
-	data, err := io.ReadAll(io.LimitReader(reader, maxBytes+1))
+	limited := io.LimitReader(reader, maxBytes+1)
+	var data []byte
+	var err error
+	if sizeHint > 0 {
+		capacity := min(sizeHint, maxBytes+1, maxResponseReadPreallocateBytes)
+		data, err = readAllWithCapacity(limited, capacity)
+	} else {
+		data, err = io.ReadAll(limited)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -83,6 +104,20 @@ func ReadAllLimit(reader io.Reader, maxBytes int64) ([]byte, error) {
 		return data[:maxBytes], fmt.Errorf("%w: limit %d bytes", ErrResponseBodyTooLarge, maxBytes)
 	}
 	return data, nil
+}
+
+func readAllWithCapacity(reader io.Reader, capacity int64) ([]byte, error) {
+	var buffer bytes.Buffer
+	if capacity > 0 {
+		// bytes.Buffer.ReadFrom reserves bytes.MinRead before each read. Include
+		// that spare capacity so an exact Content-Length does not trigger a
+		// second allocation solely for the final EOF probe.
+		buffer.Grow(int(capacity) + bytes.MinRead)
+	}
+	if _, err := buffer.ReadFrom(reader); err != nil {
+		return buffer.Bytes(), err
+	}
+	return buffer.Bytes(), nil
 }
 
 type StreamResponse struct { //nolint:govet

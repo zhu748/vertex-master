@@ -150,13 +150,19 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		oaiError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error")
+		return
+	}
+	if r.Method == http.MethodHead {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":          "healthy",
-		"timestamp":       time.Now().Unix(),
-		"api_keys_loaded": s.mw.keys.Count(),
-		"version":         s.version,
-		"build_commit":    s.commit,
-		"build_time":      s.buildTime,
+		"status":    "healthy",
+		"timestamp": time.Now().Unix(),
+		"version":   s.version,
 	})
 }
 
@@ -188,7 +194,7 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status": "ready", "timestamp": time.Now().Unix(), "api_keys_loaded": s.mw.keys.Count(),
+		"status": "ready", "timestamp": time.Now().Unix(),
 	})
 }
 
