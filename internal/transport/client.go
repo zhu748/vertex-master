@@ -9,6 +9,7 @@ import (
 	"log"
 	"math/rand"
 	"strings"
+	"sync"
 
 	http "github.com/bogdanfinn/fhttp"
 	tls_client "github.com/bogdanfinn/tls-client"
@@ -24,7 +25,14 @@ type Response = http.Response
 // ErrResponseBodyTooLarge 表示受限读取超过调用方允许的响应体大小。
 var ErrResponseBodyTooLarge = errors.New("response body too large")
 
-const maxResponseReadPreallocateBytes int64 = 4 << 20
+const (
+	maxResponseReadPreallocateBytes     int64 = 4 << 20
+	maxPooledResponseReadBufferCapacity       = 1 << 20
+)
+
+var responseReadBufferPool = sync.Pool{ //nolint:gochecknoglobals
+	New: func() any { return new(bytes.Buffer) },
+}
 
 // Session 封装一个独立的 tls-client，服务于单次逻辑请求。
 type Session struct {
@@ -95,7 +103,7 @@ func readAllLimitWithHint(reader io.Reader, maxBytes, sizeHint int64) ([]byte, e
 		capacity := min(sizeHint, maxBytes+1, maxResponseReadPreallocateBytes)
 		data, err = readAllWithCapacity(limited, capacity)
 	} else {
-		data, err = io.ReadAll(limited)
+		data, err = readAllWithPooledBuffer(limited)
 	}
 	if err != nil {
 		return nil, err
@@ -104,6 +112,37 @@ func readAllLimitWithHint(reader io.Reader, maxBytes, sizeHint int64) ([]byte, e
 		return data[:maxBytes], fmt.Errorf("%w: limit %d bytes", ErrResponseBodyTooLarge, maxBytes)
 	}
 	return data, nil
+}
+
+// readAllWithPooledBuffer amortizes the geometric growth needed when an HTTP
+// response omits Content-Length. Returned bytes are detached before a buffer is
+// reused; unusually large backing arrays are transferred to the caller and not
+// retained by the pool.
+func readAllWithPooledBuffer(reader io.Reader) ([]byte, error) {
+	buffer := responseReadBufferPool.Get().(*bytes.Buffer)
+	buffer.Reset()
+	if _, err := buffer.ReadFrom(reader); err != nil {
+		releaseResponseReadBuffer(buffer)
+		return nil, err
+	}
+
+	view := buffer.Bytes()
+	if cap(view) > maxPooledResponseReadBufferCapacity {
+		// The buffer object becomes unreachable, while its backing array remains
+		// owned by the returned slice. Avoid a second large full-body copy.
+		return view, nil
+	}
+	data := bytes.Clone(view)
+	releaseResponseReadBuffer(buffer)
+	return data, nil
+}
+
+func releaseResponseReadBuffer(buffer *bytes.Buffer) {
+	if buffer.Cap() > maxPooledResponseReadBufferCapacity {
+		return
+	}
+	buffer.Reset()
+	responseReadBufferPool.Put(buffer)
 }
 
 func readAllWithCapacity(reader io.Reader, capacity int64) ([]byte, error) {

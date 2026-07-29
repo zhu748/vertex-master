@@ -103,6 +103,26 @@ func TestReadAllLimitWithHintHandlesExactWrongAndOversizedLengths(t *testing.T) 
 	if !errors.Is(err, sentinel) || string(data) != "prefix" {
 		t.Fatalf("unlimited hinted read error: data=%q err=%v", data, err)
 	}
+	data, err = ReadAllLimit(&dataThenErrorReader{data: []byte("prefix"), err: sentinel}, 16)
+	if !errors.Is(err, sentinel) || data != nil {
+		t.Fatalf("bounded unknown-length read error: data=%q err=%v", data, err)
+	}
+}
+
+func TestReadAllLimitUnknownLengthResultDoesNotAliasPool(t *testing.T) {
+	first, err := ReadAllLimit(strings.NewReader("first response"), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 10 {
+		data, readErr := ReadAllLimit(strings.NewReader("replacement response"), 1024)
+		if readErr != nil || string(data) != "replacement response" {
+			t.Fatalf("replacement data=%q err=%v", data, readErr)
+		}
+	}
+	if got, want := string(first), "first response"; got != want {
+		t.Fatalf("earlier result changed after pool reuse: got %q, want %q", got, want)
+	}
 }
 
 func TestSessionDoAndReadLimit(t *testing.T) {
@@ -122,6 +142,30 @@ func TestSessionDoAndReadLimit(t *testing.T) {
 	)
 	if status != http.StatusOK || !errors.Is(err, ErrResponseBodyTooLarge) || len(data) != 16 {
 		t.Fatalf("status=%d len=%d err=%v", status, len(data), err)
+	}
+}
+
+func TestSessionDoAndReadLimitChunkedResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("first chunk"))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		_, _ = w.Write([]byte(" second chunk"))
+	}))
+	defer server.Close()
+
+	network := NewNetworkClient(false)
+	session, err := network.CreateSession(5, "", "chunked-response-limit-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	status, data, err := session.DoAndReadLimit(
+		context.Background(), http.MethodGet, server.URL, nil, nil, 1024,
+	)
+	if status != http.StatusOK || err != nil || string(data) != "first chunk second chunk" {
+		t.Fatalf("status=%d data=%q err=%v", status, data, err)
 	}
 }
 
