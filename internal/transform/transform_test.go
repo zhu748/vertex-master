@@ -17,6 +17,8 @@ func TestSnakeToCamel(t *testing.T) {
 		"topK":              "topK", // 无下划线原样
 		"temperature":       "temperature",
 		"thinking_config":   "thinkingConfig",
+		"__hello__WORLD":    "HelloWorld",
+		"field_ÉCOLE":       "fieldÉcole",
 	}
 	for in, want := range cases {
 		if got := SnakeToCamel(in); got != want {

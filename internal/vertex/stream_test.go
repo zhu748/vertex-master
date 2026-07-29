@@ -15,6 +15,36 @@ import (
 	"github.com/bsfdsagfadg/vertex/internal/recaptcha"
 )
 
+var benchmarkExtractedRecursiveText string //nolint:gochecknoglobals
+
+func BenchmarkExtractTextRecursiveOneMiB(b *testing.B) {
+	text := strings.Repeat("A", 64<<10)
+	flat := make([]any, 16)
+	for index := range flat {
+		flat[index] = map[string]any{"text": text}
+	}
+	var nested any = flat
+	for range 8 {
+		nested = []any{nested}
+	}
+
+	for name, value := range map[string]any{
+		"flat":         flat,
+		"eight_levels": nested,
+	} {
+		b.Run(name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.SetBytes(1 << 20)
+			for range b.N {
+				benchmarkExtractedRecursiveText = extractTextRecursive(value, 0)
+				if len(benchmarkExtractedRecursiveText) != 1<<20 {
+					b.Fatalf("recursive text length=%d", len(benchmarkExtractedRecursiveText))
+				}
+			}
+		})
+	}
+}
+
 func BenchmarkScanStreamFrames(b *testing.B) {
 	const frameCount = 64
 	var raw strings.Builder
@@ -791,7 +821,17 @@ func TestExtractTextRecursive_DepthGuard(t *testing.T) {
 	for i := 0; i < 25; i++ {
 		deep = map[string]any{"text": deep}
 	}
-	_ = extractTextRecursive(deep, 0)
+	if got := extractTextRecursive(deep, 0); got != "" {
+		t.Errorf("超过深度上限的 map 不应继续展开，got %q", got)
+	}
+	if got := extractTextRecursive(strings.Repeat("x", 600), maximumRecursiveTextDepth+1); len(got) != maximumRecursiveTextLeafBytes {
+		t.Errorf("深度上限字符串应截断到 %d 字节，got %d", maximumRecursiveTextLeafBytes, len(got))
+	}
+	cycle := make([]any, 1)
+	cycle[0] = cycle
+	if got := extractTextRecursive(cycle, 0); got != "" {
+		t.Errorf("自引用数组应由深度上限终止，got %q", got)
+	}
 }
 
 func TestProcessStreamingObject_ClientDisconnectStops(t *testing.T) {

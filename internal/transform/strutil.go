@@ -2,6 +2,8 @@ package transform
 
 import (
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // SnakeToCamel 将 snake_case 转为 camelCase。
@@ -9,14 +11,54 @@ import (
 // 无下划线则原样返回（已是 camelCase 的键经此函数不变，这点对 generationConfig
 // 的键转换很重要：temperature/topP/topK 等保持不动）。
 func SnakeToCamel(s string) string {
-	if !strings.Contains(s, "_") {
+	firstUnderscore := strings.IndexByte(s, '_')
+	if firstUnderscore < 0 {
 		return s
 	}
-	parts := strings.Split(s, "_")
+	asciiOnly := true
+	for index := firstUnderscore + 1; index < len(s); index++ {
+		if s[index] >= utf8.RuneSelf {
+			asciiOnly = false
+			break
+		}
+	}
+
 	var b strings.Builder
-	b.WriteString(parts[0])
-	for _, p := range parts[1:] {
-		b.WriteString(pyTitle(p))
+	b.Grow(len(s))
+	b.WriteString(s[:firstUnderscore])
+	upperNext := true
+	if asciiOnly {
+		for index := firstUnderscore + 1; index < len(s); index++ {
+			value := s[index]
+			if value == '_' {
+				upperNext = true
+				continue
+			}
+			if upperNext {
+				if value >= 'a' && value <= 'z' {
+					value -= 'a' - 'A'
+				}
+				upperNext = false
+			} else if value >= 'A' && value <= 'Z' {
+				value += 'a' - 'A'
+			}
+			b.WriteByte(value)
+		}
+		return b.String()
+	}
+
+	for _, value := range s[firstUnderscore+1:] {
+		if value == '_' {
+			upperNext = true
+			continue
+		}
+		if upperNext {
+			value = unicode.ToUpper(value)
+			upperNext = false
+		} else {
+			value = unicode.ToLower(value)
+		}
+		b.WriteRune(value)
 	}
 	return b.String()
 }
@@ -59,13 +101,4 @@ func CamelToSnake(s string) string {
 		return strings.ToLower(converted)
 	}
 	return converted
-}
-
-// pyTitle 把单个词归一为首字母大写、其余小写。
-// （Go 的 strings.Title 不会把其余字母转小写，故自实现。）
-func pyTitle(s string) string {
-	if s == "" {
-		return s
-	}
-	return strings.ToUpper(s[:1]) + strings.ToLower(s[1:])
 }

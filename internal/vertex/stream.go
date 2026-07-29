@@ -981,12 +981,17 @@ func cleanPart(part map[string]any) map[string]any {
 	return nil
 }
 
+const (
+	maximumRecursiveTextDepth     = 20
+	maximumRecursiveTextLeafBytes = 500
+)
+
 // extractTextRecursive 从嵌套结构中递归提取纯文本，防止无限递归（depth>20 截断）。
 func extractTextRecursive(val any, depth int) string {
-	if depth > 20 {
+	if depth > maximumRecursiveTextDepth {
 		s := toStr(val)
-		if len(s) > 500 {
-			return s[:500]
+		if len(s) > maximumRecursiveTextLeafBytes {
+			return s[:maximumRecursiveTextLeafBytes]
 		}
 		return s
 	}
@@ -999,14 +1004,63 @@ func extractTextRecursive(val any, depth int) string {
 		}
 		return ""
 	case []any:
+		textLength := extractedTextLength(v, depth)
 		var sb strings.Builder
-		for _, item := range v {
-			if t := extractTextRecursive(item, depth+1); t != "" {
-				sb.WriteString(t)
-			}
+		if textLength > 0 {
+			sb.Grow(textLength)
 		}
+		appendExtractedText(&sb, v, depth)
 		return sb.String()
 	default:
 		return ""
+	}
+}
+
+func extractedTextLength(val any, depth int) int {
+	if depth > maximumRecursiveTextDepth {
+		return min(len(toStr(val)), maximumRecursiveTextLeafBytes)
+	}
+	switch value := val.(type) {
+	case string:
+		return len(value)
+	case map[string]any:
+		if text, ok := value["text"]; ok {
+			return extractedTextLength(text, depth+1)
+		}
+	case []any:
+		total := 0
+		maximumInt := int(^uint(0) >> 1)
+		for _, item := range value {
+			length := extractedTextLength(item, depth+1)
+			if length > maximumInt-total {
+				return 0
+			}
+			total += length
+		}
+		return total
+	}
+	return 0
+}
+
+func appendExtractedText(dst *strings.Builder, val any, depth int) {
+	if depth > maximumRecursiveTextDepth {
+		text := toStr(val)
+		if len(text) > maximumRecursiveTextLeafBytes {
+			text = text[:maximumRecursiveTextLeafBytes]
+		}
+		dst.WriteString(text)
+		return
+	}
+	switch value := val.(type) {
+	case string:
+		dst.WriteString(value)
+	case map[string]any:
+		if text, ok := value["text"]; ok {
+			appendExtractedText(dst, text, depth+1)
+		}
+	case []any:
+		for _, item := range value {
+			appendExtractedText(dst, item, depth+1)
+		}
 	}
 }
