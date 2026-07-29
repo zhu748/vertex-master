@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -27,15 +28,31 @@ func parseImportedNodes(text string) []nodes.Node {
 	}
 
 	normalized := maybeDecodeSubscriptionText(text)
+	if looksLikeJSONDocument(normalized) {
+		if imported := parseJSONImportedNodes(normalized); len(imported) > 0 {
+			return imported
+		}
+		if imported := parseClashYAMLToNodes(normalized); len(imported) > 0 {
+			return imported
+		}
+		return parseImportedNodeLines(normalized)
+	}
+	if looksLikeNodeLineList(normalized) {
+		return parseImportedNodeLines(normalized)
+	}
 	if imported := parseClashYAMLToNodes(normalized); len(imported) > 0 {
 		return imported
 	}
 	if imported := parseJSONImportedNodes(normalized); len(imported) > 0 {
 		return imported
 	}
+	return parseImportedNodeLines(normalized)
+}
 
-	var imported []nodes.Node
-	for _, line := range strings.Split(normalized, "\n") {
+func parseImportedNodeLines(text string) []nodes.Node {
+	capacity := min(strings.Count(text, "\n")+1, 4096)
+	imported := make([]nodes.Node, 0, capacity)
+	for line := range strings.SplitSeq(text, "\n") {
 		if node, ok := parseFlexibleImportedNodeLine(line); ok {
 			imported = append(imported, node)
 		}
@@ -49,23 +66,66 @@ func maybeDecodeSubscriptionText(text string) string {
 		return text
 	}
 
-	decoded := strings.TrimSpace(string(b))
-	if decoded == "" {
+	decodedBytes := bytes.TrimSpace(b)
+	if len(decodedBytes) == 0 {
 		return text
 	}
-	if strings.Contains(decoded, "proxies:") || hasImportableNodeLine(decoded) || len(parseJSONImportedNodes(decoded)) > 0 {
+	decoded := string(decodedBytes)
+	if strings.Contains(decoded, "proxies:") || looksLikeNodeLineList(decoded) || json.Valid(decodedBytes) {
 		return decoded
 	}
 	return text
 }
 
-func hasImportableNodeLine(text string) bool {
-	for _, line := range strings.Split(text, "\n") {
-		if _, ok := parseFlexibleImportedNodeLine(line); ok {
-			return true
+func looksLikeJSONDocument(text string) bool {
+	if text == "" {
+		return false
+	}
+	return text[0] == '{' || text[0] == '['
+}
+
+func looksLikeNodeLineList(text string) bool {
+	foundNodeURI := false
+	for line := range strings.SplitSeq(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+		if hasLikelyURIScheme(line) {
+			foundNodeURI = true
+			continue
+		}
+		if looksLikeStructuredImportLine(line) {
+			return false
 		}
 	}
-	return false
+	return foundNodeURI
+}
+
+func hasLikelyURIScheme(text string) bool {
+	separator := strings.Index(text, "://")
+	if separator < 1 {
+		return false
+	}
+	for index := range separator {
+		char := text[index]
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') {
+			continue
+		}
+		if index > 0 && ((char >= '0' && char <= '9') || char == '+' || char == '-' || char == '.') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func looksLikeStructuredImportLine(line string) bool {
+	if strings.HasPrefix(line, "{") || strings.HasPrefix(line, "[") || strings.HasPrefix(line, "-") {
+		return true
+	}
+	separator := strings.IndexByte(line, ':')
+	return separator >= 0 && (separator == len(line)-1 || line[separator+1] == ' ' || line[separator+1] == '\t')
 }
 
 func parseImportedNodeLine(line string) (nodes.Node, bool) {
