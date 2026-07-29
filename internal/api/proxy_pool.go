@@ -405,27 +405,7 @@ func StartProxySubscriptionScheduler(vc *vertex.VertexAIClient, cfg config.Confi
 			log.Printf("[ProxyPool] 读取定时订阅失败: %v", err)
 			return
 		}
-		var wg sync.WaitGroup
-		sem := make(chan struct{}, proxyRefreshConcurrency)
-		for _, item := range items {
-			if ctx.Err() != nil {
-				break
-			}
-			wg.Add(1)
-			go func(subscription nodes.ProxySubscription) {
-				defer wg.Done()
-				select {
-				case sem <- struct{}{}:
-				case <-ctx.Done():
-					return
-				}
-				defer func() { <-sem }()
-				if _, err := adm.refreshProxySubscription(ctx, subscription); err != nil {
-					log.Printf("[ProxyPool] 自动刷新订阅 %q 失败: %v", subscription.Name, err)
-				}
-			}(item)
-		}
-		wg.Wait()
+		refreshProxySubscriptions(ctx, items, adm.refreshProxySubscription)
 	}
 	go func() {
 		defer close(done)
@@ -445,4 +425,43 @@ func StartProxySubscriptionScheduler(vc *vertex.VertexAIClient, cfg config.Confi
 		cancel()
 		<-done
 	}
+}
+
+func refreshProxySubscriptions(
+	ctx context.Context,
+	items []nodes.ProxySubscription,
+	refresh func(context.Context, nodes.ProxySubscription) (int, error),
+) {
+	workerCount := min(proxyRefreshConcurrency, len(items))
+	if workerCount == 0 {
+		return
+	}
+
+	jobs := make(chan nodes.ProxySubscription)
+	var workers sync.WaitGroup
+	workers.Add(workerCount)
+	for range workerCount {
+		go func() {
+			defer workers.Done()
+			for subscription := range jobs {
+				if ctx.Err() != nil {
+					return
+				}
+				if _, err := refresh(ctx, subscription); err != nil {
+					log.Printf("[ProxyPool] 自动刷新订阅 %q 失败: %v", subscription.Name, err)
+				}
+			}
+		}()
+	}
+
+enqueue:
+	for _, item := range items {
+		select {
+		case jobs <- item:
+		case <-ctx.Done():
+			break enqueue
+		}
+	}
+	close(jobs)
+	workers.Wait()
 }
