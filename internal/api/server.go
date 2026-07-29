@@ -34,14 +34,17 @@ func NewServer(vc *vertex.VertexAIClient, keys *APIKeyManager, cfg config.Config
 	h := handler{vc: vc, keys: keys, cfg: cfg}
 	reqConv := transform.DefaultRequestConverter()
 	respConv := transform.DefaultResponseConverter()
+	claudePrompts := &claudePromptStore{}
 	return &Server{
 		chat:      &ChatHandler{handler: h, reqConv: reqConv, respConv: respConv},
 		responses: &ResponsesHandler{handler: h, reqConv: reqConv, respConv: respConv},
-		anthropic: &AnthropicHandler{handler: h, reqConv: reqConv, respConv: respConv},
+		anthropic: &AnthropicHandler{
+			handler: h, reqConv: reqConv, respConv: respConv, claudePrompts: claudePrompts,
+		},
 		image:     &ImageHandler{h},
 		audio:     &AudioHandler{h},
 		gemini:    &GeminiHandler{h},
-		admin:     &AdminHandler{handler: h}, //nolint:exhaustruct
+		admin:     &AdminHandler{handler: h, claudePrompts: claudePrompts}, //nolint:exhaustruct
 		mw:        &middleware{cfg: cfg, keys: keys},
 		version:   "dev",
 		commit:    "unknown",

@@ -104,3 +104,38 @@ func TestRecentProxyAndEnvironmentKeyUIAreEmbedded(t *testing.T) {
 		}
 	}
 }
+
+func TestClaudePromptSettingsUIIsEmbedded(t *testing.T) {
+	settingsScript, err := Assets.ReadFile("assets/page-settings.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(settingsScript)
+	for _, token := range []string{
+		"set_claude_prompt_replacement_enabled",
+		"set_claude_prompt_replace_from",
+		"set_claude_prompt_replace_to",
+		"set_claude_prompt_injection_enabled",
+		"set_claude_prompt_injection_position",
+		"set_claude_prompt_injection_text",
+		"useLatestClaudePromptAsFind",
+		"loadLatestClaudePrompt",
+	} {
+		if !strings.Contains(script, token) {
+			t.Errorf("Claude prompt settings token %q is missing", token)
+		}
+	}
+
+	apiScript, err := Assets.ReadFile("assets/api.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, token := range []string{
+		"/api/admin/claude-prompt/latest",
+		"claudePrompt",
+	} {
+		if !strings.Contains(string(apiScript), token) {
+			t.Errorf("Claude prompt API token %q is missing", token)
+		}
+	}
+}

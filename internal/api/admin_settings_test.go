@@ -71,6 +71,21 @@ func TestAdminPutSettingsRejectsInvalidProxySettings(t *testing.T) {
 			wantMessage: "max_n 必须在 1 到 32 之间",
 		},
 		{
+			name:        "invalid Claude injection position",
+			body:        `{"settings":{"claude_prompt_injection_position":"middle"}}`,
+			wantMessage: "claude_prompt_injection_position 必须是 prepend 或 append",
+		},
+		{
+			name:        "Claude replacement missing search text",
+			body:        `{"settings":{"claude_prompt_replacement_enabled":true}}`,
+			wantMessage: "查找内容不能为空",
+		},
+		{
+			name:        "Claude injection missing prompt",
+			body:        `{"settings":{"claude_prompt_injection_enabled":true,"claude_prompt_injection_text":"  "}}`,
+			wantMessage: "注入内容不能为空",
+		},
+		{
 			name:        "failover below concurrency",
 			body:        `{"settings":{"parallel_pool_size":8,"proxy_failover_max_attempts":7}}`,
 			wantMessage: "单请求最多尝试代理不能小于最大同时并发",
@@ -126,7 +141,13 @@ func TestAdminPutSettingsAcceptsValidProxySettings(t *testing.T) {
 		"proxy_health_check_concurrency":8,
 		"proxy_health_check_timeout_seconds":12,
 		"sticky_node_priority":true,
-		"parallel_pool_retry_enabled":true
+		"parallel_pool_retry_enabled":true,
+		"claude_prompt_injection_enabled":true,
+		"claude_prompt_injection_position":"prepend",
+		"claude_prompt_injection_text":"injected policy",
+		"claude_prompt_replacement_enabled":true,
+		"claude_prompt_replace_from":"old policy",
+		"claude_prompt_replace_to":"new policy"
 	}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/admin/settings", bytes.NewBufferString(body))
 	rec := httptest.NewRecorder()
@@ -158,11 +179,45 @@ func TestAdminPutSettingsAcceptsValidProxySettings(t *testing.T) {
 		"proxy_health_check_timeout_seconds":  float64(12),
 		"sticky_node_priority":                true,
 		"parallel_pool_retry_enabled":         true,
+		"claude_prompt_injection_enabled":     true,
+		"claude_prompt_injection_position":    "prepend",
+		"claude_prompt_injection_text":        "injected policy",
+		"claude_prompt_replacement_enabled":   true,
+		"claude_prompt_replace_from":          "old policy",
+		"claude_prompt_replace_to":            "new policy",
 	}
 	for key, want := range expected {
 		if got := raw[key]; got != want {
 			t.Errorf("%s 写盘值错误：got=%v want=%v", key, got, want)
 		}
+	}
+}
+
+func TestAdminPutSettingsRejectsOversizedClaudePromptRule(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("VPROXY_CONFIG", path)
+	config.InvalidateCache()
+	t.Cleanup(config.InvalidateCache)
+	adm := newAdminSettingsTestHandler()
+	body, err := json.Marshal(map[string]any{"settings": map[string]any{
+		"claude_prompt_injection_text": strings.Repeat("x", maxClaudePromptSettingBytes+1),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+
+	adm.adminPutSettings(
+		rec,
+		httptest.NewRequest(http.MethodPut, "/api/admin/settings", bytes.NewReader(body)),
+	)
+
+	if rec.Code != http.StatusBadRequest ||
+		!strings.Contains(rec.Body.String(), "不能超过") {
+		t.Fatalf("oversized Claude prompt status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("oversized rule must not be persisted: %v", err)
 	}
 }
 
@@ -206,12 +261,18 @@ func TestAdminSettingsExposeAndRejectEnvironmentManagedFields(t *testing.T) {
 	}
 	var response struct {
 		ManagedFields map[string]string `json:"managed_fields"`
+		Settings      map[string]any    `json:"settings"`
 	}
 	if err := json.Unmarshal(getRec.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
 	if got := response.ManagedFields["proxy_health_check_interval_minutes"]; got != "VPROXY_PROXY_HEALTH_CHECK_INTERVAL_MINUTES" {
 		t.Fatalf("managed field metadata = %q", got)
+	}
+	if response.Settings["claude_prompt_injection_position"] != "append" ||
+		response.Settings["claude_prompt_injection_enabled"] != false ||
+		response.Settings["claude_prompt_replacement_enabled"] != false {
+		t.Fatalf("Claude prompt settings missing from admin response: %#v", response.Settings)
 	}
 
 	putRec := httptest.NewRecorder()

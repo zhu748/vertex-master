@@ -20,8 +20,9 @@ import (
 // same Gemini/Vertex execution path as the OpenAI-compatible endpoints.
 type AnthropicHandler struct {
 	handler
-	reqConv  transform.RequestConverter
-	respConv transform.ResponseConverter
+	reqConv       transform.RequestConverter
+	respConv      transform.ResponseConverter
+	claudePrompts *claudePromptStore
 }
 
 func (h *AnthropicHandler) handleMessages(w http.ResponseWriter, r *http.Request) {
@@ -45,18 +46,11 @@ func (h *AnthropicHandler) handleMessages(w http.ResponseWriter, r *http.Request
 	actualModel, useFake := resolveRequestedModel(rawModel, h.cfg)
 	cli.UpdateReqModel(vertex.RequestIDFromContext(r.Context()), actualModel)
 
-	chatBody, err := anthropicToChatRequest(body)
+	model, payload, err := h.convertAnthropicRequest(body, rawModel, actualModel, "messages")
 	if err != nil {
 		h.anthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
-	chatBody["model"] = actualModel
-	model, payload, err := h.reqConv.Convert(chatBody, h.cfg)
-	if err != nil {
-		h.anthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
-		return
-	}
-	transform.ApplyImageConfig(payload, chatBody)
 
 	if protocolBoolValue(body["stream"]) {
 		h.streamMessages(r.Context(), w, rawModel, model, payload, useFake || h.cfg.AggregateStream())
@@ -92,13 +86,12 @@ func (h *AnthropicHandler) handleCountTokens(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	actualModel, _ := resolveRequestedModel(rawModel, h.cfg)
-	chatBody, err := anthropicToChatRequest(body)
-	if err != nil {
-		h.anthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
-		return
-	}
-	chatBody["model"] = actualModel
-	model, payload, err := h.reqConv.Convert(chatBody, h.cfg)
+	model, payload, err := h.convertAnthropicRequest(
+		body,
+		rawModel,
+		actualModel,
+		"count_tokens",
+	)
 	if err != nil {
 		h.anthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
@@ -109,6 +102,27 @@ func (h *AnthropicHandler) handleCountTokens(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"input_tokens": total})
+}
+
+func (h *AnthropicHandler) convertAnthropicRequest(
+	body map[string]any,
+	rawModel string,
+	actualModel string,
+	endpoint string,
+) (string, map[string]any, error) {
+	chatBody, err := anthropicToChatRequest(body)
+	if err != nil {
+		return "", nil, err
+	}
+	promptResult := applyClaudePromptPolicy(chatBody, h.cfg)
+	chatBody["model"] = actualModel
+	model, payload, err := h.reqConv.Convert(chatBody, h.cfg)
+	if err != nil {
+		return "", nil, err
+	}
+	transform.ApplyImageConfig(payload, chatBody)
+	h.claudePrompts.Record(rawModel, endpoint, promptResult)
+	return model, payload, nil
 }
 
 func (h *AnthropicHandler) readAnthropicBody(w http.ResponseWriter, r *http.Request) (map[string]any, bool) {

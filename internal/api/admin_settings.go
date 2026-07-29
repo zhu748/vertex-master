@@ -16,8 +16,14 @@ var adminAllowedSettings = map[string]bool{
 	"max_retries": true, "max_spill_mb": true,
 	"max_request_mb": true, "max_concurrent_requests": true, "max_n": true, "aggregate_stream": true,
 	"drop_max_tokens": true, "proxy_url": true,
-	"request_timeout":       true,
-	"parallel_pool_enabled": true, "parallel_pool_size": true,
+	"claude_prompt_injection_enabled":   true,
+	"claude_prompt_injection_position":  true,
+	"claude_prompt_injection_text":      true,
+	"claude_prompt_replacement_enabled": true,
+	"claude_prompt_replace_from":        true,
+	"claude_prompt_replace_to":          true,
+	"request_timeout":                   true,
+	"parallel_pool_enabled":             true, "parallel_pool_size": true,
 	"parallel_pool_delay_dynamic":         true,
 	"parallel_pool_delay_ms":              true,
 	"proxy_failover_max_attempts":         true,
@@ -64,15 +70,21 @@ func (adm *AdminHandler) adminGetSettings(w http.ResponseWriter, _ *http.Request
 	writeJSON(w, http.StatusOK, map[string]any{
 		"managed_fields": environmentManagedAdminSettings(),
 		"settings": map[string]any{
-			"max_retries":             adm.cfg.MaxRetries(),
-			"max_spill_mb":            adm.cfg.MaxSpillMB(),
-			"max_request_mb":          adm.cfg.MaxRequestMB(),
-			"max_concurrent_requests": adm.cfg.MaxConcurrentRequests(),
-			"max_n":                   adm.cfg.MaxN(),
-			"aggregate_stream":        adm.cfg.AggregateStream(),
-			"drop_max_tokens":         adm.cfg.DropMaxTokens(),
-			"request_timeout":         adm.cfg.RequestTimeout(),
-			"proxy_url":               adm.cfg.ProxyURL(), "parallel_pool_enabled": adm.cfg.ParallelPoolEnabled(), "parallel_pool_size": adm.cfg.ParallelPoolSize(), "active_node_uri": adm.cfg.ActiveNodeURI(),
+			"max_retries":                       adm.cfg.MaxRetries(),
+			"max_spill_mb":                      adm.cfg.MaxSpillMB(),
+			"max_request_mb":                    adm.cfg.MaxRequestMB(),
+			"max_concurrent_requests":           adm.cfg.MaxConcurrentRequests(),
+			"max_n":                             adm.cfg.MaxN(),
+			"aggregate_stream":                  adm.cfg.AggregateStream(),
+			"drop_max_tokens":                   adm.cfg.DropMaxTokens(),
+			"claude_prompt_injection_enabled":   adm.cfg.ClaudePromptInjectionEnabled(),
+			"claude_prompt_injection_position":  adm.cfg.ClaudePromptInjectionPosition(),
+			"claude_prompt_injection_text":      adm.cfg.ClaudePromptInjectionText(),
+			"claude_prompt_replacement_enabled": adm.cfg.ClaudePromptReplacementEnabled(),
+			"claude_prompt_replace_from":        adm.cfg.ClaudePromptReplaceFrom(),
+			"claude_prompt_replace_to":          adm.cfg.ClaudePromptReplaceTo(),
+			"request_timeout":                   adm.cfg.RequestTimeout(),
+			"proxy_url":                         adm.cfg.ProxyURL(), "parallel_pool_enabled": adm.cfg.ParallelPoolEnabled(), "parallel_pool_size": adm.cfg.ParallelPoolSize(), "active_node_uri": adm.cfg.ActiveNodeURI(),
 			"parallel_pool_delay_dynamic":         adm.cfg.ParallelPoolDelayDynamic(),
 			"parallel_pool_delay_ms":              adm.cfg.ParallelPoolDelayMs(),
 			"proxy_failover_max_attempts":         adm.cfg.ProxyFailoverMaxAttempts(),
@@ -142,9 +154,35 @@ func (adm *AdminHandler) adminPutSettings(w http.ResponseWriter, r *http.Request
 		case "aggregate_stream", "drop_max_tokens",
 			"parallel_pool_enabled", "parallel_pool_delay_dynamic",
 			"proxy_health_check_enabled", "sticky_node_priority",
-			"parallel_pool_retry_enabled", "debug_mode", "auto_refresh_logs":
+			"parallel_pool_retry_enabled", "debug_mode", "auto_refresh_logs",
+			"claude_prompt_injection_enabled", "claude_prompt_replacement_enabled":
 			if _, ok := v.(bool); !ok {
 				writeJSON(w, http.StatusBadRequest, adminErr(k+" 必须是布尔值"))
+				return
+			}
+		case "claude_prompt_injection_position":
+			position, ok := v.(string)
+			if !ok {
+				writeJSON(w, http.StatusBadRequest, adminErr(k+" 必须是字符串"))
+				return
+			}
+			if position != "prepend" && position != "append" {
+				writeJSON(w, http.StatusBadRequest, adminErr(k+" 必须是 prepend 或 append"))
+				return
+			}
+		case "claude_prompt_injection_text", "claude_prompt_replace_from",
+			"claude_prompt_replace_to":
+			text, ok := v.(string)
+			if !ok {
+				writeJSON(w, http.StatusBadRequest, adminErr(k+" 必须是字符串"))
+				return
+			}
+			if len(text) > maxClaudePromptSettingBytes {
+				writeJSON(
+					w,
+					http.StatusBadRequest,
+					adminErr(fmt.Sprintf("%s 不能超过 %d 字节", k, maxClaudePromptSettingBytes)),
+				)
 				return
 			}
 		case "proxy_url", "active_node_uri", "background_image", "font_size",
@@ -172,6 +210,38 @@ func (adm *AdminHandler) adminPutSettings(w http.ResponseWriter, r *http.Request
 			continue
 		}
 		updates[k] = v
+	}
+	claudeReplacementEnabled := adm.cfg.ClaudePromptReplacementEnabled()
+	if value, ok := updates["claude_prompt_replacement_enabled"].(bool); ok {
+		claudeReplacementEnabled = value
+	}
+	claudeReplaceFrom := adm.cfg.ClaudePromptReplaceFrom()
+	if value, ok := updates["claude_prompt_replace_from"].(string); ok {
+		claudeReplaceFrom = value
+	}
+	if claudeReplacementEnabled && claudeReplaceFrom == "" {
+		writeJSON(
+			w,
+			http.StatusBadRequest,
+			adminErr("启用 Claude 提示词替换时，查找内容不能为空"),
+		)
+		return
+	}
+	claudeInjectionEnabled := adm.cfg.ClaudePromptInjectionEnabled()
+	if value, ok := updates["claude_prompt_injection_enabled"].(bool); ok {
+		claudeInjectionEnabled = value
+	}
+	claudeInjectionText := adm.cfg.ClaudePromptInjectionText()
+	if value, ok := updates["claude_prompt_injection_text"].(string); ok {
+		claudeInjectionText = value
+	}
+	if claudeInjectionEnabled && strings.TrimSpace(claudeInjectionText) == "" {
+		writeJSON(
+			w,
+			http.StatusBadRequest,
+			adminErr("启用 Claude 系统提示词注入时，注入内容不能为空"),
+		)
+		return
 	}
 	poolSize := adm.cfg.ParallelPoolSize()
 	if value, ok := updates["parallel_pool_size"].(int); ok {

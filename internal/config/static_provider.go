@@ -6,19 +6,37 @@ type staticConfig struct {
 
 func StaticProvider(c AppConfig) ConfigProvider { return staticConfig{c} }
 
-func (s staticConfig) PortAPI() int                      { return s.c.PortAPI }
-func (s staticConfig) MaxRetries() int                   { return s.c.MaxRetries }
-func (s staticConfig) AdminPassword() string             { return s.c.AdminPassword }
-func (s staticConfig) ProxyURL() string                  { return s.c.ProxyURL }
-func (s staticConfig) DebugPprof() bool                  { return s.c.DebugPprof }
-func (s staticConfig) DebugMode() bool                   { return s.c.DebugMode }
-func (s staticConfig) DropMaxTokens() bool               { return s.c.DropMaxTokens }
-func (s staticConfig) AggregateStream() bool             { return s.c.AggregateStream }
-func (s staticConfig) MaxN() int                         { return s.c.MaxN }
-func (s staticConfig) MaxRequestMB() int                 { return s.c.MaxRequestMB }
-func (s staticConfig) MaxConcurrentRequests() int        { return s.c.MaxConcurrentRequests }
-func (s staticConfig) MaxSpillMB() int                   { return s.c.MaxSpillMB }
-func (s staticConfig) RequestTimeout() int               { return s.c.RequestTimeout }
+func (s staticConfig) PortAPI() int               { return s.c.PortAPI }
+func (s staticConfig) MaxRetries() int            { return s.c.MaxRetries }
+func (s staticConfig) AdminPassword() string      { return s.c.AdminPassword }
+func (s staticConfig) ProxyURL() string           { return s.c.ProxyURL }
+func (s staticConfig) DebugPprof() bool           { return s.c.DebugPprof }
+func (s staticConfig) DebugMode() bool            { return s.c.DebugMode }
+func (s staticConfig) DropMaxTokens() bool        { return s.c.DropMaxTokens }
+func (s staticConfig) AggregateStream() bool      { return s.c.AggregateStream }
+func (s staticConfig) MaxN() int                  { return s.c.MaxN }
+func (s staticConfig) MaxRequestMB() int          { return s.c.MaxRequestMB }
+func (s staticConfig) MaxConcurrentRequests() int { return s.c.MaxConcurrentRequests }
+func (s staticConfig) MaxSpillMB() int            { return s.c.MaxSpillMB }
+func (s staticConfig) RequestTimeout() int        { return s.c.RequestTimeout }
+func (s staticConfig) ClaudePromptInjectionEnabled() bool {
+	return s.c.ClaudePromptInjectionEnabled
+}
+func (s staticConfig) ClaudePromptInjectionPosition() string {
+	return normalizeClaudePromptInjectionPosition(s.c.ClaudePromptInjectionPosition)
+}
+func (s staticConfig) ClaudePromptInjectionText() string {
+	return s.c.ClaudePromptInjectionText
+}
+func (s staticConfig) ClaudePromptReplacementEnabled() bool {
+	return s.c.ClaudePromptReplacementEnabled
+}
+func (s staticConfig) ClaudePromptReplaceFrom() string {
+	return s.c.ClaudePromptReplaceFrom
+}
+func (s staticConfig) ClaudePromptReplaceTo() string {
+	return s.c.ClaudePromptReplaceTo
+}
 func (s staticConfig) VertexAPIKey() string              { return s.c.VertexAPIKey }
 func (s staticConfig) CountTokensQuerySignature() string { return s.c.CountTokensQuerySignature }
 func (s staticConfig) SafetySettings() map[string]string { return s.c.SafetySettings }

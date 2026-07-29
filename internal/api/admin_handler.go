@@ -38,6 +38,7 @@ var adminLogReadBlockPool = sync.Pool{ //nolint:gochecknoglobals
 type AdminHandler struct {
 	handler
 	backgroundUploadMu sync.Mutex
+	claudePrompts      *claudePromptStore
 }
 
 func (adm *AdminHandler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
@@ -272,6 +273,8 @@ func (adm *AdminHandler) handleAdminAPI(w http.ResponseWriter, r *http.Request) 
 		default:
 			adm.adminMethodNotAllowed(w)
 		}
+	case "/claude-prompt/latest":
+		adm.adminClaudePromptLatest(w, r)
 	case "/stats":
 		if !requireMethod(http.MethodGet) {
 			return

@@ -35,6 +35,14 @@ type AppConfig struct { //nolint:govet
 	MaxConcurrentRequests     int               `json:"max_concurrent_requests"`
 	RequestTimeout            int               `json:"request_timeout"`
 
+	// Claude Messages 顶层 system 提示词处理
+	ClaudePromptInjectionEnabled   bool   `json:"claude_prompt_injection_enabled"`
+	ClaudePromptInjectionPosition  string `json:"claude_prompt_injection_position"`
+	ClaudePromptInjectionText      string `json:"claude_prompt_injection_text"`
+	ClaudePromptReplacementEnabled bool   `json:"claude_prompt_replacement_enabled"`
+	ClaudePromptReplaceFrom        string `json:"claude_prompt_replace_from"`
+	ClaudePromptReplaceTo          string `json:"claude_prompt_replace_to"`
+
 	// 并发池与节点锁定配置
 	ActiveNodeURI            string `json:"active_node_uri"`
 	ParallelPoolEnabled      bool   `json:"parallel_pool_enabled"`
@@ -79,6 +87,7 @@ func DefaultConfig() AppConfig {
 		MaxRequestMB:                    64,
 		MaxConcurrentRequests:           16,
 		RequestTimeout:                  180,
+		ClaudePromptInjectionPosition:   "append",
 		ParallelPoolEnabled:             true,
 		StickyNodePriority:              true,
 		ParallelPoolRetryEnabled:        true,

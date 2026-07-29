@@ -17,6 +17,13 @@ type ConfigProvider interface {
 	MaxSpillMB() int
 	RequestTimeout() int
 
+	ClaudePromptInjectionEnabled() bool
+	ClaudePromptInjectionPosition() string
+	ClaudePromptInjectionText() string
+	ClaudePromptReplacementEnabled() bool
+	ClaudePromptReplaceFrom() string
+	ClaudePromptReplaceTo() string
+
 	VertexAPIKey() string
 	CountTokensQuerySignature() string
 
@@ -68,19 +75,37 @@ type dynamicConfig struct{}
 
 func GetProvider() ConfigProvider { return dynamicConfig{} }
 
-func (d dynamicConfig) PortAPI() int                      { return Load().PortAPI }
-func (d dynamicConfig) MaxRetries() int                   { return Load().MaxRetries }
-func (d dynamicConfig) AdminPassword() string             { return Load().AdminPassword }
-func (d dynamicConfig) ProxyURL() string                  { return Load().ProxyURL }
-func (d dynamicConfig) DebugPprof() bool                  { return Load().DebugPprof }
-func (d dynamicConfig) DebugMode() bool                   { return Load().DebugMode }
-func (d dynamicConfig) DropMaxTokens() bool               { return Load().DropMaxTokens }
-func (d dynamicConfig) AggregateStream() bool             { return Load().AggregateStream }
-func (d dynamicConfig) MaxN() int                         { return Load().MaxN }
-func (d dynamicConfig) MaxRequestMB() int                 { return Load().MaxRequestMB }
-func (d dynamicConfig) MaxConcurrentRequests() int        { return Load().MaxConcurrentRequests }
-func (d dynamicConfig) MaxSpillMB() int                   { return Load().MaxSpillMB }
-func (d dynamicConfig) RequestTimeout() int               { return Load().RequestTimeout }
+func (d dynamicConfig) PortAPI() int               { return Load().PortAPI }
+func (d dynamicConfig) MaxRetries() int            { return Load().MaxRetries }
+func (d dynamicConfig) AdminPassword() string      { return Load().AdminPassword }
+func (d dynamicConfig) ProxyURL() string           { return Load().ProxyURL }
+func (d dynamicConfig) DebugPprof() bool           { return Load().DebugPprof }
+func (d dynamicConfig) DebugMode() bool            { return Load().DebugMode }
+func (d dynamicConfig) DropMaxTokens() bool        { return Load().DropMaxTokens }
+func (d dynamicConfig) AggregateStream() bool      { return Load().AggregateStream }
+func (d dynamicConfig) MaxN() int                  { return Load().MaxN }
+func (d dynamicConfig) MaxRequestMB() int          { return Load().MaxRequestMB }
+func (d dynamicConfig) MaxConcurrentRequests() int { return Load().MaxConcurrentRequests }
+func (d dynamicConfig) MaxSpillMB() int            { return Load().MaxSpillMB }
+func (d dynamicConfig) RequestTimeout() int        { return Load().RequestTimeout }
+func (d dynamicConfig) ClaudePromptInjectionEnabled() bool {
+	return Load().ClaudePromptInjectionEnabled
+}
+func (d dynamicConfig) ClaudePromptInjectionPosition() string {
+	return normalizeClaudePromptInjectionPosition(Load().ClaudePromptInjectionPosition)
+}
+func (d dynamicConfig) ClaudePromptInjectionText() string {
+	return Load().ClaudePromptInjectionText
+}
+func (d dynamicConfig) ClaudePromptReplacementEnabled() bool {
+	return Load().ClaudePromptReplacementEnabled
+}
+func (d dynamicConfig) ClaudePromptReplaceFrom() string {
+	return Load().ClaudePromptReplaceFrom
+}
+func (d dynamicConfig) ClaudePromptReplaceTo() string {
+	return Load().ClaudePromptReplaceTo
+}
 func (d dynamicConfig) VertexAPIKey() string              { return Load().VertexAPIKey }
 func (d dynamicConfig) CountTokensQuerySignature() string { return Load().CountTokensQuerySignature }
 func (d dynamicConfig) SafetySettings() map[string]string { return Load().SafetySettings }
@@ -133,3 +158,12 @@ func (d dynamicConfig) ResolveModelName(s string) string { return Load().Resolve
 func (d dynamicConfig) AutoRefreshLogs() bool            { return Load().GetAutoRefreshLogs() }
 func (d dynamicConfig) ConfigDir() string                { return Load().ConfigDir() }
 func (d dynamicConfig) ConfigPath() string               { return Load().ConfigPath() }
+
+func normalizeClaudePromptInjectionPosition(position string) string {
+	switch position {
+	case "prepend", "append":
+		return position
+	default:
+		return "append"
+	}
+}

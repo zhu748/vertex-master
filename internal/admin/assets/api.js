@@ -17,6 +17,10 @@ const API = {
     get() { return API.raw('/api/admin/settings'); },
     put(v) { return API.raw('/api/admin/settings', { method: 'PUT', body: JSON.stringify({ settings: v }) }); },
   },
+  claudePrompt: {
+    latest() { return API.raw('/api/admin/claude-prompt/latest'); },
+    clear() { return API.raw('/api/admin/claude-prompt/latest', { method: 'DELETE' }); },
+  },
   stats: {
     get() { return API.raw('/api/admin/stats'); },
     reset() { return API.raw('/api/admin/stats/reset', { method: 'POST' }); },
