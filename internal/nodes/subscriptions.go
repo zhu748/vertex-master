@@ -200,14 +200,44 @@ func DeleteProxySubscription(id int64) error {
 }
 
 func DueProxySubscriptions(now time.Time) ([]ProxySubscription, error) {
-	items, err := ListProxySubscriptions()
-	if err != nil {
-		return nil, err
+	database := db.CurrentDB()
+	if database == nil {
+		return nil, errors.New("database unavailable")
 	}
-	due := make([]ProxySubscription, 0, len(items))
-	for _, item := range items {
-		if !item.Enabled {
-			continue
+	// Failed subscriptions still need the exact Go retry-delay calculation
+	// below, but every valid retry delay is at least one minute. Successful
+	// subscriptions can be filtered exactly in SQLite. Together these filters
+	// avoid a full row scan and allocation on every scheduler tick.
+	rows, err := database.Query(`SELECT id, managed_key, name, url, proxy_type, refresh_interval_minutes,
+		enabled, last_refreshed_at, last_attempt_at, last_error, consecutive_failures,
+		node_count, created_at, updated_at
+		FROM proxy_subscriptions
+		WHERE enabled = 1 AND (
+			(last_error <> '' AND last_attempt_at > 0 AND last_attempt_at <= ? - 60)
+			OR (
+				(last_error = '' OR last_attempt_at <= 0)
+				AND (
+					last_refreshed_at = 0
+					OR last_refreshed_at <= ? - refresh_interval_minutes * 60
+				)
+			)
+		)
+		ORDER BY id`, now.Unix(), now.Unix())
+	if err != nil {
+		return nil, fmt.Errorf("query due proxy subscriptions: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	due := []ProxySubscription{}
+	for rows.Next() {
+		var item ProxySubscription
+		if err := rows.Scan(
+			&item.ID, &item.ManagedKey, &item.Name, &item.URL, &item.ProxyType,
+			&item.RefreshIntervalMinutes, &item.Enabled, &item.LastRefreshedAt,
+			&item.LastAttemptAt, &item.LastError, &item.ConsecutiveFailures,
+			&item.NodeCount, &item.CreatedAt, &item.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan due proxy subscription: %w", err)
 		}
 		interval := time.Duration(item.RefreshIntervalMinutes) * time.Minute
 		if item.LastError != "" && item.LastAttemptAt > 0 {
@@ -217,11 +247,9 @@ func DueProxySubscriptions(now time.Time) ([]ProxySubscription, error) {
 			}
 			continue
 		}
-		if item.LastRefreshedAt == 0 || now.Sub(time.Unix(item.LastRefreshedAt, 0)) >= interval {
-			due = append(due, item)
-		}
+		due = append(due, item)
 	}
-	return due, nil
+	return due, rows.Err() //nolint:wrapcheck
 }
 
 func proxySubscriptionRetryDelay(failures int, interval time.Duration) time.Duration {

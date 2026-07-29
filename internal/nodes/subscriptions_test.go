@@ -10,6 +10,138 @@ import (
 	"github.com/bsfdsagfadg/vertex/internal/db"
 )
 
+func BenchmarkDueProxySubscriptionsMostlyNotDue(b *testing.B) {
+	const (
+		subscriptionCount = 10_000
+		dueCount          = 100
+	)
+	db.CloseDB()
+	if err := db.InitDB(filepath.Join(b.TempDir(), "due-subscriptions-benchmark.db")); err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(db.CloseDB)
+	resetState()
+
+	database := db.CurrentDB()
+	tx, err := database.Begin()
+	if err != nil {
+		b.Fatal(err)
+	}
+	stmt, err := tx.Prepare(`INSERT INTO proxy_subscriptions
+		(name, url, proxy_type, refresh_interval_minutes, enabled,
+		 last_refreshed_at, created_at, updated_at)
+		VALUES (?, ?, 'http', 60, 1, ?, ?, ?)`)
+	if err != nil {
+		_ = tx.Rollback()
+		b.Fatal(err)
+	}
+	now := time.Now().Truncate(time.Second)
+	for index := range subscriptionCount {
+		lastRefreshedAt := now.Unix()
+		if index < dueCount {
+			lastRefreshedAt = 0
+		}
+		if _, err = stmt.Exec(
+			fmt.Sprintf("subscription-%d", index),
+			fmt.Sprintf("https://example.com/%d", index),
+			lastRefreshedAt,
+			now.Unix(),
+			now.Unix(),
+		); err != nil {
+			_ = stmt.Close()
+			_ = tx.Rollback()
+			b.Fatal(err)
+		}
+	}
+	if err = stmt.Close(); err != nil {
+		_ = tx.Rollback()
+		b.Fatal(err)
+	}
+	if err = tx.Commit(); err != nil {
+		b.Fatal(err)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		items, queryErr := DueProxySubscriptions(now)
+		if queryErr != nil {
+			b.Fatal(queryErr)
+		}
+		if len(items) != dueCount {
+			b.Fatalf("due subscription count = %d, want %d", len(items), dueCount)
+		}
+	}
+}
+
+func TestDueProxySubscriptionsDatabasePrefilterPreservesSchedule(t *testing.T) {
+	db.CloseDB()
+	if err := db.InitDB(filepath.Join(t.TempDir(), "due-subscriptions.db")); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(db.CloseDB)
+	resetState()
+
+	now := time.Unix(2_000_000_000, 0)
+	type subscriptionState struct {
+		name          string
+		enabled       bool
+		interval      int
+		lastRefreshed int64
+		lastAttempt   int64
+		lastError     string
+		failures      int
+		wantDue       bool
+	}
+	states := []subscriptionState{
+		{name: "never refreshed", enabled: true, interval: 60, wantDue: true},
+		{name: "fresh", enabled: true, interval: 60, lastRefreshed: now.Unix(), wantDue: false},
+		{name: "interval elapsed", enabled: true, interval: 60,
+			lastRefreshed: now.Add(-time.Hour).Unix(), wantDue: true},
+		{name: "disabled", enabled: false, interval: 60, wantDue: false},
+		{name: "retry too early", enabled: true, interval: 60,
+			lastAttempt: now.Add(-59 * time.Second).Unix(), lastError: "temporary", failures: 1, wantDue: false},
+		{name: "retry elapsed", enabled: true, interval: 60,
+			lastAttempt: now.Add(-time.Minute).Unix(), lastError: "temporary", failures: 1, wantDue: true},
+		{name: "retry capped by interval", enabled: true, interval: 1,
+			lastAttempt: now.Add(-time.Minute).Unix(), lastError: "temporary", failures: 8, wantDue: true},
+		{name: "legacy error without attempt", enabled: true, interval: 60,
+			lastError: "legacy", wantDue: true},
+		{name: "future refresh", enabled: true, interval: 60,
+			lastRefreshed: now.Add(time.Hour).Unix(), wantDue: false},
+	}
+
+	database := db.CurrentDB()
+	for _, state := range states {
+		_, err := database.Exec(`INSERT INTO proxy_subscriptions
+			(name, url, proxy_type, refresh_interval_minutes, enabled,
+			 last_refreshed_at, last_attempt_at, last_error, consecutive_failures,
+			 created_at, updated_at)
+			VALUES (?, ?, 'http', ?, ?, ?, ?, ?, ?, ?, ?)`,
+			state.name, "https://example.com/"+state.name, state.interval, state.enabled,
+			state.lastRefreshed, state.lastAttempt, state.lastError, state.failures,
+			now.Unix(), now.Unix(),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	due, err := DueProxySubscriptions(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(map[string]bool, len(due))
+	for _, item := range due {
+		got[item.Name] = true
+	}
+	for _, state := range states {
+		if got[state.name] != state.wantDue {
+			t.Errorf("subscription %q due = %t, want %t", state.name, got[state.name], state.wantDue)
+		}
+	}
+}
+
 func BenchmarkSyncSubscriptionLargePoolNoChanges(b *testing.B) {
 	const nodeCount = 5000
 	db.CloseDB()
