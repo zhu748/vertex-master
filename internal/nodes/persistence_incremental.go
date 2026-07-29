@@ -34,6 +34,16 @@ type subscriptionSyncChanges struct {
 	positionChanges    []nodeInsert
 }
 
+type nodeSnapshotChanges struct {
+	inserted           []nodeInsert
+	updated            []Node
+	membershipsAdded   []membershipKey
+	membershipsRemoved []membershipKey
+	removedNodes       []string
+	positionChanges    []nodeInsert
+	affectedSourceIDs  map[int64]bool
+}
+
 // persistMergedNodesUnsafe persists only the changes produced by MergeNodes.
 // The caller holds mu and restores its in-memory changes if this returns an
 // error.
@@ -228,9 +238,51 @@ func persistNodeSnapshotDiffUnsafe(
 		}
 	}
 	positionChanges := changedNodePositionsUnsafe(previousNodes)
-	if len(inserted) == 0 && len(updated) == 0 && len(removedNodes) == 0 &&
-		len(membershipsAdded) == 0 && len(membershipsRemoved) == 0 &&
-		len(positionChanges) == 0 {
+	return persistNodeSnapshotChangesUnsafe(nodeSnapshotChanges{
+		inserted:           inserted,
+		updated:            updated,
+		membershipsAdded:   membershipsAdded,
+		membershipsRemoved: membershipsRemoved,
+		removedNodes:       removedNodes,
+		positionChanges:    positionChanges,
+		affectedSourceIDs:  affectedSourceIDs,
+	})
+}
+
+// persistIndexedNodeReplacementUnsafe compares the replacement list against
+// the still-published index of previousNodes. ReplaceManualNodes builds its new
+// list in separate storage and does not rebuild nodeIndexByURI until after the
+// transaction, so the old index replaces three full-pool temporary maps.
+func persistIndexedNodeReplacementUnsafe(previousNodes []Node, removedNodes []string) error {
+	changes := nodeSnapshotChanges{removedNodes: removedNodes}
+	for index, node := range nodeList {
+		previousIndex, existed := nodeIndexByURI[node.RawURI]
+		if !existed {
+			changes.inserted = append(changes.inserted, nodeInsert{node: node, sortOrder: index})
+			continue
+		}
+		if previousIndex < 0 || previousIndex >= len(previousNodes) ||
+			previousNodes[previousIndex].RawURI != node.RawURI {
+			// Preserve correctness if an unexpected stale index reaches this path.
+			return persistNodeSnapshotDiffUnsafe(previousNodes, nil)
+		}
+		if !persistedNodeFieldsEqual(previousNodes[previousIndex], node) {
+			changes.updated = append(changes.updated, node)
+		}
+		if previousIndex != index {
+			changes.positionChanges = append(
+				changes.positionChanges,
+				nodeInsert{node: node, sortOrder: index},
+			)
+		}
+	}
+	return persistNodeSnapshotChangesUnsafe(changes)
+}
+
+func persistNodeSnapshotChangesUnsafe(changes nodeSnapshotChanges) error {
+	if len(changes.inserted) == 0 && len(changes.updated) == 0 && len(changes.removedNodes) == 0 &&
+		len(changes.membershipsAdded) == 0 && len(changes.membershipsRemoved) == 0 &&
+		len(changes.positionChanges) == 0 {
 		return nil
 	}
 
@@ -247,22 +299,22 @@ func persistNodeSnapshotDiffUnsafe(
 		return fmt.Errorf("保存节点差异事务: %w", diffErr)
 	}
 
-	if err := insertNodesTx(tx, inserted); err != nil {
+	if err := insertNodesTx(tx, changes.inserted); err != nil {
 		return rollback(err)
 	}
-	if err := updateNodesTx(tx, updated); err != nil {
+	if err := updateNodesTx(tx, changes.updated); err != nil {
 		return rollback(err)
 	}
-	if err := applyMembershipChangesTx(tx, membershipsAdded, membershipsRemoved); err != nil {
+	if err := applyMembershipChangesTx(tx, changes.membershipsAdded, changes.membershipsRemoved); err != nil {
 		return rollback(err)
 	}
-	if err := deleteNodesTx(tx, removedNodes); err != nil {
+	if err := deleteNodesTx(tx, changes.removedNodes); err != nil {
 		return rollback(err)
 	}
-	if err := updateNodePositionsTx(tx, positionChanges); err != nil {
+	if err := updateNodePositionsTx(tx, changes.positionChanges); err != nil {
 		return rollback(err)
 	}
-	if err := updateSubscriptionCountsTx(tx, affectedSourceIDs); err != nil {
+	if err := updateSubscriptionCountsTx(tx, changes.affectedSourceIDs); err != nil {
 		return rollback(err)
 	}
 	if err := tx.Commit(); err != nil {

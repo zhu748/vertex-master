@@ -979,6 +979,70 @@ func TestReplaceManualNodesIsAtomicAndPreservesSubscriptionNodes(t *testing.T) {
 	}
 }
 
+func TestReplaceManualNodesPersistsIndexedUpdatesAndPositions(t *testing.T) {
+	setupFailureTestDB(t, "replace-manual-indexed.db")
+	oldManualURI := "http://8.8.8.8:8410"
+	if err := MergeNodes([]Node{{
+		Type: "http", Name: "old manual", RawURI: oldManualURI,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	subscription := createFailureTestSubscription(t)
+	overlapURI := "http://9.9.9.9:8411"
+	if _, err := SyncSubscriptionNodesAndMarkRefreshed(subscription.ID, []Node{{
+		Type: "http", Name: "subscription", RawURI: overlapURI,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ReplaceManualNodes([]Node{{
+		Type: "http", Name: "manual overlap", RawURI: overlapURI,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	loaded := LoadNodes()
+	if len(loaded) != 1 || loaded[0].RawURI != overlapURI || loaded[0].Name != "manual overlap" ||
+		loaded[0].SourceID != 0 || loaded[0].SubscriptionSourceCount != 1 {
+		t.Fatalf("indexed manual replacement state=%#v", loaded)
+	}
+
+	var persistedName string
+	var sourceID int64
+	var sortOrder int
+	if err := db.CurrentDB().QueryRow(
+		"SELECT name, source_id, sort_order FROM nodes WHERE raw_uri = ?",
+		overlapURI,
+	).Scan(&persistedName, &sourceID, &sortOrder); err != nil {
+		t.Fatal(err)
+	}
+	if persistedName != "manual overlap" || sourceID != 0 || sortOrder != 0 {
+		t.Fatalf(
+			"persisted indexed replacement name=%q source=%d order=%d",
+			persistedName,
+			sourceID,
+			sortOrder,
+		)
+	}
+	var oldCount, relationCount int
+	if err := db.CurrentDB().QueryRow(
+		"SELECT COUNT(*) FROM nodes WHERE raw_uri = ?",
+		oldManualURI,
+	).Scan(&oldCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CurrentDB().QueryRow(
+		"SELECT COUNT(*) FROM proxy_subscription_nodes WHERE subscription_id = ? AND raw_uri = ?",
+		subscription.ID,
+		overlapURI,
+	).Scan(&relationCount); err != nil {
+		t.Fatal(err)
+	}
+	if oldCount != 0 || relationCount != 1 {
+		t.Fatalf("indexed replacement old_count=%d relation_count=%d", oldCount, relationCount)
+	}
+}
+
 func TestDedupNodesMigratesSubscriptionMembershipsAndCounts(t *testing.T) {
 	setupFailureTestDB(t, "dedup-memberships.db")
 	firstSubscription := createFailureTestSubscription(t)

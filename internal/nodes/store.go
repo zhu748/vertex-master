@@ -965,7 +965,7 @@ func ReplaceManualNodes(newNodes []Node) error {
 		}
 	}
 	nodeList = nextNodes
-	if err := persistNodeSnapshotDiffUnsafe(previousNodes, nil); err != nil {
+	if err := persistIndexedNodeReplacementUnsafe(previousNodes, removedURIs); err != nil {
 		nodeList = previousNodes
 		restoreNodeRuntimeStatesUnsafe(detachedStates)
 		mu.Unlock()
