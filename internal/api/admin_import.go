@@ -3,7 +3,6 @@ package api
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"log"
 	"net"
@@ -14,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bsfdsagfadg/vertex/internal/base64x"
 	"github.com/bsfdsagfadg/vertex/internal/netx"
 	"github.com/bsfdsagfadg/vertex/internal/nodes"
 	"github.com/bsfdsagfadg/vertex/internal/transport"
@@ -178,11 +178,7 @@ func extractImportedNodeName(raw string, out map[string]any) string {
 		if idx := strings.Index(b64Str, "#"); idx != -1 {
 			b64Str = b64Str[:idx]
 		}
-		b64Str = strings.ReplaceAll(strings.ReplaceAll(b64Str, "-", "+"), "_", "/")
-		if pad := len(b64Str) % 4; pad != 0 {
-			b64Str += strings.Repeat("=", 4-pad)
-		}
-		if b, err := base64.StdEncoding.DecodeString(b64Str); err == nil {
+		if b, err := base64x.DecodeString(b64Str); err == nil {
 			var d map[string]any
 			if errUnm := json.Unmarshal(b, &d); errUnm == nil {
 				if ps, ok := d["ps"].(string); ok {

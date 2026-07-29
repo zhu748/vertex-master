@@ -1,21 +1,14 @@
 package transport
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/url"
 	"strconv"
 	"strings"
-)
 
-func padB64(s string) string {
-	s = strings.ReplaceAll(strings.ReplaceAll(s, "-", "+"), "_", "/")
-	if pad := len(s) % 4; pad != 0 {
-		s += strings.Repeat("=", 4-pad)
-	}
-	return s
-}
+	"github.com/bsfdsagfadg/vertex/internal/base64x"
+)
 
 // ParseURI 解析各种协议的节点链接
 func ParseURI(uri string) (map[string]any, error) {
@@ -41,7 +34,7 @@ func ParseURI(uri string) (map[string]any, error) {
 		return parseSimple(uri, "tuic")
 	}
 	if strings.HasPrefix(uri, "clash://") {
-		b, _ := base64.StdEncoding.DecodeString(padB64(uri[8:]))
+		b, _ := base64x.DecodeString(uri[8:])
 		var d map[string]any
 		_ = json.Unmarshal(b, &d)
 		return d, nil
@@ -236,7 +229,7 @@ func parseVmess(uri string) (map[string]any, error) {
 	if idx := strings.Index(b64Str, "#"); idx != -1 {
 		b64Str = b64Str[:idx]
 	}
-	b, err := base64.StdEncoding.DecodeString(padB64(b64Str))
+	b, err := base64x.DecodeString(b64Str)
 	if err != nil {
 		return nil, fmt.Errorf("解码 vmess 节点 base64 载荷: %w", err)
 	}
@@ -384,15 +377,15 @@ func decodeSSUserInfo(user *url.Userinfo) (string, string, error) {
 
 func decodeSSCredentials(userInfo string) (string, string, error) {
 	if colonIdx := strings.Index(userInfo, ":"); colonIdx != -1 {
-		mBytes, errM := base64.StdEncoding.DecodeString(padB64(userInfo[:colonIdx]))
-		pBytes, errP := base64.StdEncoding.DecodeString(padB64(userInfo[colonIdx+1:]))
+		mBytes, errM := base64x.DecodeString(userInfo[:colonIdx])
+		pBytes, errP := base64x.DecodeString(userInfo[colonIdx+1:])
 		if errM == nil && errP == nil {
 			return string(mBytes), string(pBytes), nil
 		}
 		return userInfo[:colonIdx], userInfo[colonIdx+1:], nil
 	}
 
-	b, err := base64.StdEncoding.DecodeString(padB64(userInfo))
+	b, err := base64x.DecodeString(userInfo)
 	if err == nil {
 		parts := strings.SplitN(string(b), ":", 2)
 		if len(parts) == 2 {
@@ -462,8 +455,8 @@ func parseSS(uri string) (map[string]any, error) {
 		// 适配两种形式的 Shadowsocks Base64 用户信息表达
 		if colonIdx := strings.Index(userInfo, ":"); colonIdx != -1 {
 			// 形式 A: base64(method) : base64(password)
-			mBytes, errM := base64.StdEncoding.DecodeString(padB64(userInfo[:colonIdx]))
-			pBytes, errP := base64.StdEncoding.DecodeString(padB64(userInfo[colonIdx+1:]))
+			mBytes, errM := base64x.DecodeString(userInfo[:colonIdx])
+			pBytes, errP := base64x.DecodeString(userInfo[colonIdx+1:])
 			if errM == nil && errP == nil {
 				method = string(mBytes)
 				password = string(pBytes)
@@ -472,7 +465,7 @@ func parseSS(uri string) (map[string]any, error) {
 
 		if method == "" || password == "" {
 			// 形式 B: 传统的整个 method:password 一起进行 base64 编码
-			b, err := base64.StdEncoding.DecodeString(padB64(userInfo))
+			b, err := base64x.DecodeString(userInfo)
 			if err == nil {
 				parts := strings.SplitN(string(b), ":", 2)
 				if len(parts) == 2 {

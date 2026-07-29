@@ -1,6 +1,7 @@
 package nodes
 
 import (
+	"encoding/base64"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -20,7 +21,36 @@ var (
 	benchmarkNodePoolSnapshot NodePoolSnapshot       //nolint:gochecknoglobals
 	benchmarkNodePageSnapshot NodePoolPageSnapshot   //nolint:gochecknoglobals
 	benchmarkNodeURIs         []string               //nolint:gochecknoglobals
+	benchmarkIdentityScheme   string                 //nolint:gochecknoglobals
+	benchmarkIdentityUser     string                 //nolint:gochecknoglobals
+	benchmarkIdentityHost     string                 //nolint:gochecknoglobals
+	benchmarkIdentityPort     int                    //nolint:gochecknoglobals
+	benchmarkIdentityOK       bool                   //nolint:gochecknoglobals
 )
+
+func BenchmarkParseNodeIdentityBase64Variants(b *testing.B) {
+	payload := []byte(`{"add":"vmess.example.com","port":443,"id":"12345678-1234-1234-1234-123456789012","ps":"demo"}`)
+	credentials := []byte("aes-256-gcm:benchmark-password")
+	for name, uri := range map[string]string{
+		"vmess_standard": "vmess://" + base64.StdEncoding.EncodeToString(payload),
+		"vmess_url_raw":  "vmess://" + base64.RawURLEncoding.EncodeToString(payload),
+		"ss_standard": "ss://" + base64.StdEncoding.EncodeToString(credentials) +
+			"@proxy.example.com:8388",
+		"ss_url_raw": "ss://" + base64.RawURLEncoding.EncodeToString(credentials) +
+			"@proxy.example.com:8388",
+	} {
+		b.Run(name, func(b *testing.B) {
+			b.ReportAllocs()
+			for range b.N {
+				benchmarkIdentityScheme, benchmarkIdentityUser, benchmarkIdentityHost,
+					benchmarkIdentityPort, benchmarkIdentityOK = parseNodeIdentity(uri)
+				if !benchmarkIdentityOK || benchmarkIdentityScheme == "" {
+					b.Fatal("identity was not parsed")
+				}
+			}
+		})
+	}
+}
 
 func resetState() {
 	mu.Lock()
@@ -706,6 +736,34 @@ func TestParseNodeIdentity(t *testing.T) {
 			}
 			if port != tt.wantPort {
 				t.Errorf("parseNodeIdentity() port = %d, want %d", port, tt.wantPort)
+			}
+		})
+	}
+}
+
+func TestParseNodeIdentityVMessPortVariants(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		portJSON string
+		wantPort int
+	}{
+		{name: "string", portJSON: `"443"`, wantPort: 443},
+		{name: "escaped string", portJSON: `"4\u00343"`, wantPort: 443},
+		{name: "number", portJSON: `443`, wantPort: 443},
+		{name: "exponent", portJSON: `4.43e2`, wantPort: 443},
+		{name: "fraction", portJSON: `443.5`, wantPort: 0},
+		{name: "null", portJSON: `null`, wantPort: 0},
+		{name: "object", portJSON: `{}`, wantPort: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			payload := fmt.Sprintf(
+				`{"add":"vmess.example.com","port":%s,"id":"uuid"}`,
+				test.portJSON,
+			)
+			uri := "vmess://" + base64.RawURLEncoding.EncodeToString([]byte(payload))
+			scheme, user, host, port, ok := parseNodeIdentity(uri)
+			if !ok || scheme != "vmess" || user != "uuid" || host != "vmess.example.com" || port != test.wantPort {
+				t.Fatalf("identity=(%q, %q, %q, %d, %v), want port %d", scheme, user, host, port, ok, test.wantPort)
 			}
 		})
 	}

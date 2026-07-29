@@ -5,6 +5,32 @@ import (
 	"testing"
 )
 
+var benchmarkParsedURI map[string]any //nolint:gochecknoglobals
+
+func BenchmarkParseURIBase64Variants(b *testing.B) {
+	payload := []byte(`{"v":"2","ps":"demo","add":"vmess.example.com","port":"443","id":"12345678-1234-1234-1234-123456789012","aid":"0","net":"ws","host":"edge.example.com","path":"/ws","tls":"tls"}`)
+	credentials := []byte("aes-256-gcm:benchmark-password")
+	for name, uri := range map[string]string{
+		"vmess_standard": "vmess://" + base64.StdEncoding.EncodeToString(payload),
+		"vmess_url_raw":  "vmess://" + base64.RawURLEncoding.EncodeToString(payload),
+		"ss_standard": "ss://" + base64.StdEncoding.EncodeToString(credentials) +
+			"@proxy.example.com:8388#demo",
+		"ss_url_raw": "ss://" + base64.RawURLEncoding.EncodeToString(credentials) +
+			"@proxy.example.com:8388#demo",
+	} {
+		b.Run(name, func(b *testing.B) {
+			b.ReportAllocs()
+			for range b.N {
+				var err error
+				benchmarkParsedURI, err = ParseURI(uri)
+				if err != nil || benchmarkParsedURI["type"] == nil {
+					b.Fatalf("parsed=%#v, err=%v", benchmarkParsedURI, err)
+				}
+			}
+		})
+	}
+}
+
 func TestParseURIShadowsocksKeepsPortAndPlugin(t *testing.T) {
 	raw := "ss://YWVzLTEyOC1nY206aGFNTE1YaXJCeW42ckdWaA@example.com:20111/?plugin=simple-obfs%3Bobfs%3Dhttp%3Bobfs-host%3Dcdn.example.com#demo"
 

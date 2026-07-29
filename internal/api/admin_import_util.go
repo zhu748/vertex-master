@@ -1,13 +1,14 @@
 package api
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/bsfdsagfadg/vertex/internal/base64x"
 )
 
 func errToStr(err error) string {
@@ -29,17 +30,7 @@ func decodeSubBase64(s string) ([]byte, error) {
 	s = strings.ReplaceAll(s, "\r", "")
 	s = strings.ReplaceAll(s, "\n", "")
 	s = strings.ReplaceAll(s, " ", "")
-	if b, err := base64.StdEncoding.DecodeString(s); err == nil {
-		return b, nil
-	}
-	if b, err := base64.URLEncoding.DecodeString(s); err == nil {
-		return b, nil
-	}
-	t := strings.ReplaceAll(strings.ReplaceAll(s, "-", "+"), "_", "/")
-	if pad := len(t) % 4; pad != 0 {
-		t += strings.Repeat("=", 4-pad)
-	}
-	return base64.StdEncoding.DecodeString(t)
+	return base64x.DecodeString(s)
 }
 
 func parseInlineYamlAttrs(s string) map[string]string {

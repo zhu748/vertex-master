@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/bsfdsagfadg/vertex/internal/base64x"
 	"github.com/bsfdsagfadg/vertex/internal/nodes"
 	"gopkg.in/yaml.v3"
 )
@@ -679,12 +680,7 @@ func parseV2RayNNodeLine(line string) (nodes.Node, bool) {
 	}
 
 	encoded := body[slash+1:]
-	encoded = strings.ReplaceAll(strings.ReplaceAll(encoded, "-", "+"), "_", "/")
-	if pad := len(encoded) % 4; pad != 0 {
-		encoded += strings.Repeat("=", 4-pad)
-	}
-
-	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	decoded, err := base64x.DecodeString(encoded)
 	if err != nil {
 		return nodes.Node{}, false
 	}

@@ -3,7 +3,6 @@ package nodes
 import (
 	"context"
 	"database/sql"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +18,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/bsfdsagfadg/vertex/internal/base64x"
 	"github.com/bsfdsagfadg/vertex/internal/db"
 )
 
@@ -1962,12 +1962,52 @@ func EnableNode(uri string) bool {
 	return true
 }
 
-func padB64(s string) string {
-	s = strings.ReplaceAll(strings.ReplaceAll(s, "-", "+"), "_", "/")
-	if pad := len(s) % 4; pad != 0 {
-		s += strings.Repeat("=", 4-pad)
+type vmessIdentityString string
+
+func (value *vmessIdentityString) UnmarshalJSON(encoded []byte) error {
+	if len(encoded) == 0 || encoded[0] != '"' {
+		return nil
 	}
-	return s
+	var decoded string
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		return err
+	}
+	*value = vmessIdentityString(decoded)
+	return nil
+}
+
+type vmessIdentityPort int
+
+func (value *vmessIdentityPort) UnmarshalJSON(encoded []byte) error {
+	if len(encoded) == 0 {
+		return nil
+	}
+	if encoded[0] == '"' {
+		var decoded string
+		if err := json.Unmarshal(encoded, &decoded); err != nil {
+			return err
+		}
+		port, err := strconv.Atoi(decoded)
+		if err == nil {
+			*value = vmessIdentityPort(port)
+		}
+		return nil
+	}
+	number, err := strconv.ParseFloat(string(encoded), 64)
+	if err != nil {
+		return nil
+	}
+	port := int(number)
+	if float64(port) == number {
+		*value = vmessIdentityPort(port)
+	}
+	return nil
+}
+
+type vmessIdentityPayload struct {
+	Address vmessIdentityString `json:"add"`
+	ID      vmessIdentityString `json:"id"`
+	Port    vmessIdentityPort   `json:"port"`
 }
 
 func parseNodeIdentity(rawURI string) (scheme, userinfo, host string, port int, ok bool) {
@@ -1979,15 +2019,10 @@ func parseNodeIdentity(rawURI string) (scheme, userinfo, host string, port int, 
 		if idx := strings.Index(b64Str, "#"); idx != -1 {
 			b64Str = b64Str[:idx]
 		}
-		b64Str = padB64(b64Str)
-		if b, err := base64.StdEncoding.DecodeString(b64Str); err == nil {
-			var d map[string]any
+		if b, err := base64x.DecodeString(b64Str); err == nil {
+			var d vmessIdentityPayload
 			if err := json.Unmarshal(b, &d); err == nil {
-				id, _ := d["id"].(string)
-				add, _ := d["add"].(string)
-				portStr := fmt.Sprintf("%v", d["port"])
-				p, _ := strconv.Atoi(portStr)
-				return "vmess", id, add, p, true
+				return "vmess", string(d.ID), string(d.Address), int(d.Port), true
 			}
 		}
 		return "", "", "", 0, false
@@ -1998,7 +2033,7 @@ func parseNodeIdentity(rawURI string) (scheme, userinfo, host string, port int, 
 			body = body[:idx]
 		}
 		if idx := strings.Index(body, "@"); idx != -1 {
-			b, err := base64.StdEncoding.DecodeString(padB64(body[:idx]))
+			b, err := base64x.DecodeString(body[:idx])
 			if err == nil {
 				parts := strings.SplitN(string(b), ":", 2)
 				if len(parts) >= 2 {
