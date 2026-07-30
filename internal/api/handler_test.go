@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -8,6 +9,18 @@ import (
 
 	"github.com/bsfdsagfadg/vertex/internal/vertex"
 )
+
+func TestReqID24WithPrefixFormat(t *testing.T) {
+	for _, prefix := range []string{"chatcmpl-", "msg_", "req_", "call_", "resp_", "fc_"} {
+		id := reqID24WithPrefix(prefix)
+		if !strings.HasPrefix(id, prefix) || len(id) != len(prefix)+24 {
+			t.Fatalf("prefix=%q generated ID=%q", prefix, id)
+		}
+		if _, err := hex.DecodeString(id[len(prefix):]); err != nil {
+			t.Fatalf("prefix=%q generated non-hex ID=%q: %v", prefix, id, err)
+		}
+	}
+}
 
 func TestWriteJSONUsesUnescapedEncoding(t *testing.T) {
 	recorder := httptest.NewRecorder()

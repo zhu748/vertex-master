@@ -470,7 +470,7 @@ func protocolToolCallsToStreamDelta(toolCalls []protocolToolCall) []any {
 	for index, toolCall := range toolCalls {
 		id := toolCall.ID
 		if id == "" {
-			id = "call_" + reqID24()
+			id = reqID24WithPrefix("call_")
 		}
 		deltas = append(deltas, map[string]any{
 			"index": index,

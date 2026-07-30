@@ -91,7 +91,7 @@ func (h *ResponsesHandler) handleResponses(w http.ResponseWriter, r *http.Reques
 	)
 	out = completeProtocolUsageWithCountTokens(r.Context(), h.vc, model, payload, out)
 	restoreResponsesToolNamespaces(&out, namespaceTools)
-	writeJSON(w, http.StatusOK, buildResponsesResponse(body, rawModel, "resp_"+reqID24(), out))
+	writeJSON(w, http.StatusOK, buildResponsesResponse(body, rawModel, reqID24WithPrefix("resp_"), out))
 }
 
 func responsesToChatRequest(body map[string]any) (map[string]any, error) {
@@ -815,7 +815,7 @@ func (h *ResponsesHandler) streamResponses(
 	aggregate bool,
 ) {
 	sw := newSSEWriter(w, "text/event-stream")
-	id := "resp_" + reqID24()
+	id := reqID24WithPrefix("resp_")
 	state := &responsesStreamState{
 		sw: sw, id: id, model: displayModel, request: request, namespaceTools: namespaceTools,
 	}
@@ -1413,7 +1413,7 @@ func (s *responsesStreamState) consume(chunk protocolOutput) {
 	if chunk.Text != "" {
 		if !s.textOpen {
 			s.textOpen = true
-			s.textID = "msg_" + reqID24()
+			s.textID = reqID24WithPrefix("msg_")
 			s.text.Reset()
 			s.emitTextBlockStart()
 			if s.streamFailed() {
@@ -1440,7 +1440,7 @@ func (s *responsesStreamState) consume(chunk protocolOutput) {
 			return
 		}
 		s.closeText()
-		itemID := "fc_" + reqID24()
+		itemID := reqID24WithPrefix("fc_")
 		s.emitFunctionCallItem("response.output_item.added", "in_progress", itemID, tc, "")
 		s.emitFunctionCallArguments("response.function_call_arguments.delta", itemID, tc.Arguments)
 		s.emitFunctionCallArguments("response.function_call_arguments.done", itemID, tc.Arguments)

@@ -17,28 +17,33 @@ const FinishReasonUnspecified = "FINISH_REASON_UNSPECIFIED"
 
 var streamCounter uint64 //nolint:gochecknoglobals
 
-// reqID 生成唯一 ID。
-func reqID() string {
+// reqIDWithPrefix 生成带协议前缀的唯一 ID，避免先编码后拼接产生第二个字符串。
+func reqIDWithPrefix(prefix string) string {
 	var buf [12]byte
 	if _, err := cryptorand.Read(buf[:]); err != nil {
 		now := time.Now().UnixNano()
 		count := atomic.AddUint64(&streamCounter, 1)
-		var fallback [12]byte
-		fallback[0] = byte(now >> 56)
-		fallback[1] = byte(now >> 48)
-		fallback[2] = byte(now >> 40)
-		fallback[3] = byte(now >> 32)
-		fallback[4] = byte(now >> 24)
-		fallback[5] = byte(now >> 16)
-		fallback[6] = byte(now >> 8)
-		fallback[7] = byte(now)
-		fallback[8] = byte(count >> 24)
-		fallback[9] = byte(count >> 16)
-		fallback[10] = byte(count >> 8)
-		fallback[11] = byte(count)
-		return hex.EncodeToString(fallback[:])
+		buf[0] = byte(now >> 56)
+		buf[1] = byte(now >> 48)
+		buf[2] = byte(now >> 40)
+		buf[3] = byte(now >> 32)
+		buf[4] = byte(now >> 24)
+		buf[5] = byte(now >> 16)
+		buf[6] = byte(now >> 8)
+		buf[7] = byte(now)
+		buf[8] = byte(count >> 24)
+		buf[9] = byte(count >> 16)
+		buf[10] = byte(count >> 8)
+		buf[11] = byte(count)
 	}
-	return hex.EncodeToString(buf[:])
+
+	var encoded [24]byte
+	hex.Encode(encoded[:], buf[:])
+	var id strings.Builder
+	id.Grow(len(prefix) + len(encoded))
+	id.WriteString(prefix)
+	_, _ = id.Write(encoded[:])
+	return id.String()
 }
 
 // sseLine 把对象序列化成一条 SSE 数据行。
@@ -401,7 +406,7 @@ func extractParts(
 			}
 			id := toString(fc["id"])
 			if id == "" {
-				id = "call_" + reqID()
+				id = reqIDWithPrefix("call_")
 			}
 			name := toString(fc["name"])
 			switch toolCallMode {

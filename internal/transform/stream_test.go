@@ -1,12 +1,25 @@
 package transform
 
 import (
+	"encoding/hex"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/bsfdsagfadg/vertex/internal/jsonx"
 )
+
+func TestReqIDWithPrefixFormat(t *testing.T) {
+	for _, prefix := range []string{"chatcmpl-", "call_"} {
+		id := reqIDWithPrefix(prefix)
+		if !strings.HasPrefix(id, prefix) || len(id) != len(prefix)+24 {
+			t.Fatalf("prefix=%q generated ID=%q", prefix, id)
+		}
+		if _, err := hex.DecodeString(id[len(prefix):]); err != nil {
+			t.Fatalf("prefix=%q generated non-hex ID=%q: %v", prefix, id, err)
+		}
+	}
+}
 
 var benchmarkSSELineResult string                      //nolint:gochecknoglobals
 var benchmarkRealtimeChunkResult []string              //nolint:gochecknoglobals

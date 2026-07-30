@@ -251,7 +251,7 @@ func isSafetyBlock(e *vertex.VertexError) bool {
 
 func oaiSafetyResponse(model string) map[string]any {
 	return map[string]any{
-		"id":      "chatcmpl-" + reqID24(),
+		"id":      reqID24WithPrefix("chatcmpl-"),
 		"object":  "chat.completion",
 		"created": time.Now().Unix(),
 		"model":   model,

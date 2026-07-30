@@ -71,7 +71,7 @@ func (h *AnthropicHandler) handleMessages(w http.ResponseWriter, r *http.Request
 		transform.AssistantPrefillFromPayload(payload),
 	)
 	out = completeProtocolUsageWithCountTokens(r.Context(), h.vc, model, payload, out)
-	writeJSON(w, http.StatusOK, anthropicMessage(rawModel, "msg_"+reqID24(), out))
+	writeJSON(w, http.StatusOK, anthropicMessage(rawModel, reqID24WithPrefix("msg_"), out))
 }
 
 func (h *AnthropicHandler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
@@ -633,7 +633,7 @@ func (h *AnthropicHandler) streamMessages(
 	aggregate bool,
 ) {
 	state := &anthropicStreamState{
-		sw: newSSEWriter(w, "text/event-stream"), id: "msg_" + reqID24(), model: displayModel,
+		sw: newSSEWriter(w, "text/event-stream"), id: reqID24WithPrefix("msg_"), model: displayModel,
 	}
 	state.start()
 	if !state.connected() {
@@ -1142,7 +1142,7 @@ func (s *anthropicStreamState) fail(err *vertex.VertexError) {
 func (h *AnthropicHandler) anthropicError(w http.ResponseWriter, status int, typ, message string) {
 	writeJSON(w, status, map[string]any{
 		"type": "error", "error": map[string]any{"type": typ, "message": message},
-		"request_id": "req_" + reqID24(),
+		"request_id": reqID24WithPrefix("req_"),
 	})
 }
 

@@ -420,7 +420,7 @@ func outputFromOAI(resp map[string]any) protocolOutput {
 			if tc, ok := raw.(transform.CanonicalOAIResponseToolCall); ok {
 				id := tc.ID
 				if id == "" {
-					id = "call_" + reqID24()
+					id = reqID24WithPrefix("call_")
 				}
 				out.ToolCalls = append(out.ToolCalls, protocolToolCall{
 					ID: id, Name: tc.Function.Name, Arguments: tc.Function.Arguments,
@@ -432,7 +432,7 @@ func outputFromOAI(resp map[string]any) protocolOutput {
 			fn, _ := tc["function"].(map[string]any)
 			id := stringValue(tc["id"])
 			if id == "" {
-				id = "call_" + reqID24()
+				id = reqID24WithPrefix("call_")
 			}
 			arguments, argumentsCanonical := jsonStringWithCanonical(fn["arguments"])
 			out.ToolCalls = append(out.ToolCalls, protocolToolCall{
@@ -581,7 +581,7 @@ func outputFromGeminiChunkWithUsage(
 				}
 				id := stringValue(fc["id"])
 				if id == "" {
-					id = "call_" + reqID24()
+					id = reqID24WithPrefix("call_")
 				}
 				arguments, argumentsCanonical := jsonStringWithCanonical(fc["args"])
 				out.ToolCalls = append(out.ToolCalls, protocolToolCall{

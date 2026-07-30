@@ -59,7 +59,7 @@ func GeminiJSONToOAIJSON(geminiResp map[string]any, model string) map[string]any
 	}
 
 	result := map[string]any{
-		"id":      "chatcmpl-" + reqID(),
+		"id":      reqIDWithPrefix("chatcmpl-"),
 		"object":  "chat.completion",
 		"created": time.Now().Unix(),
 		"model":   model,
@@ -115,7 +115,7 @@ func GeminiResponsesToOAIJSON(geminiResponses []map[string]any, model string) ma
 	}
 
 	result := map[string]any{
-		"id":      "chatcmpl-" + reqID(),
+		"id":      reqIDWithPrefix("chatcmpl-"),
 		"object":  "chat.completion",
 		"created": time.Now().Unix(),
 		"model":   model,

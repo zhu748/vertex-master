@@ -276,7 +276,7 @@ func isAnthropicPath(path string) bool {
 func writeAnthropicMiddlewareError(w http.ResponseWriter, status int, typ, message string) {
 	writeJSON(w, status, map[string]any{
 		"type": "error", "error": map[string]any{"type": typ, "message": message},
-		"request_id": "req_" + reqID24(),
+		"request_id": reqID24WithPrefix("req_"),
 	})
 }
 
