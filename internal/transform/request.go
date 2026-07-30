@@ -129,7 +129,7 @@ func ConvertChatRequest(body map[string]any, cfg config.ConfigProvider) (string,
 				if err := validateConvertibleMessageContent(content); err != nil {
 					return "", nil, fmt.Errorf("messages[%d] assistant %w", messageIndex, err)
 				}
-				parts = append(parts, splitAssistantContent(content)...)
+				parts = splitAssistantContent(content)
 			}
 			contentConverted := convertedPartsHaveUsableContent(parts)
 			if !contentConverted && contentNeedsConversion(content) {

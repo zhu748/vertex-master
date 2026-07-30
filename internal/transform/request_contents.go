@@ -78,7 +78,7 @@ func convertUserContent(content any) []any {
 		return nil
 	}
 
-	var parts []any
+	parts := make([]any, 0, len(list))
 	for _, itemRaw := range list {
 		if s, ok := itemRaw.(string); ok {
 			parts = append(parts, map[string]any{"text": s})
@@ -143,11 +143,14 @@ func splitAssistantContent(content any) []any {
 	if !ok {
 		return []any{map[string]any{"text": content}}
 	}
+	if !strings.Contains(s, "data:") || !strings.Contains(s, "![") {
+		return []any{map[string]any{"text": s}}
+	}
 	locs := assistantImageMarkdownRe.FindAllStringSubmatchIndex(s, -1)
 	if len(locs) == 0 {
 		return []any{map[string]any{"text": s}}
 	}
-	var parts []any
+	parts := make([]any, 0, len(locs)*2+1)
 	last := 0
 	for _, m := range locs {
 		if pre := strings.TrimSpace(s[last:m[0]]); pre != "" {

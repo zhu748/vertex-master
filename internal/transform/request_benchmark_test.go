@@ -24,6 +24,10 @@ func BenchmarkConvertChatRequest(b *testing.B) {
 		}
 		messages[index] = map[string]any{"role": role, "content": text}
 	}
+	contentParts := make([]any, 16)
+	for index := range contentParts {
+		contentParts[index] = map[string]any{"type": "text", "text": text}
+	}
 	for _, test := range []struct {
 		name string
 		body map[string]any
@@ -38,6 +42,15 @@ func BenchmarkConvertChatRequest(b *testing.B) {
 		{
 			name: "sixteen_messages",
 			body: map[string]any{"model": "gemini-3.1-flash", "messages": messages},
+		},
+		{
+			name: "sixteen_content_parts",
+			body: map[string]any{
+				"model": "gemini-3.1-flash",
+				"messages": []any{map[string]any{
+					"role": "user", "content": contentParts,
+				}},
+			},
 		},
 		{
 			name: "large_tool_schema",
