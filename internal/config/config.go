@@ -35,7 +35,7 @@ type AppConfig struct { //nolint:govet
 	MaxConcurrentRequests     int               `json:"max_concurrent_requests"`
 	RequestTimeout            int               `json:"request_timeout"`
 
-	// Claude Messages 顶层 system 提示词处理
+	// Claude Messages 顶层及中途 system 提示词处理
 	ClaudePromptInjectionEnabled   bool                          `json:"claude_prompt_injection_enabled"`
 	ClaudePromptInjectionPosition  string                        `json:"claude_prompt_injection_position"`
 	ClaudePromptInjectionText      string                        `json:"claude_prompt_injection_text"`

@@ -110,11 +110,11 @@ function claudePromptSettingsHTML() {
         </div>
         <div class="claude-rule-fields" id="claudeReplacementFields">
           <div class="claude-replacement-toolbar">
-            <div class="desc">区分大小写、空白和换行；每条规则会替换所有匹配。前一条规则的结果可继续被后一条匹配，最多 ${CLAUDE_PROMPT_MAX_RULES} 条。</div>
+            <div class="desc">区分大小写、空白和换行；每条规则会替换所有真正的 system/developer 内容。role=user 中名字类似 &lt;system-reminder&gt; 的文本仍属于用户消息，不会被改写。前一条规则的结果可继续被后一条匹配，最多 ${CLAUDE_PROMPT_MAX_RULES} 条。</div>
             <button type="button" class="btn ghost" data-click-action="addClaudeReplacementRule">添加规则</button>
           </div>
           <div class="claude-replacement-list" id="claudeReplacementRules">${claudeReplacementRowsHTML()}</div>
-          <div class="desc">所有替换完成后才执行提示词注入，所以规则不会改写新注入的内容。</div>
+          <div class="desc">所有替换完成后才执行提示词注入，所以规则不会改写新注入的内容。顶层与中途 system 会尽量保持为独立片段及原有先后顺序；只有规则跨片段匹配时才合并。</div>
         </div>
       </div>
 
@@ -130,8 +130,8 @@ function claudePromptSettingsHTML() {
           <div class="field">
             <label for="set_claude_prompt_injection_position">注入位置</label>
             <select id="set_claude_prompt_injection_position">
-              <option value="prepend" ${position === 'prepend' ? 'selected' : ''}>前置到原 system 提示词之前</option>
-              <option value="append" ${position === 'append' ? 'selected' : ''}>后置到原 system 提示词之后</option>
+              <option value="prepend" ${position === 'prepend' ? 'selected' : ''}>作为独立片段，前置到全部原 system 之前</option>
+              <option value="append" ${position === 'append' ? 'selected' : ''}>作为独立片段，后置到全部原 system 之后</option>
             </select>
           </div>
           <div class="field">

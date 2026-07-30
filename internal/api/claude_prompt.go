@@ -79,22 +79,19 @@ func applyClaudePromptPolicy(
 	}
 	messages, _ := chatBody["messages"].([]any)
 	systemTexts := make([]string, 0, 2)
-	nonSystemMessages := make([]any, 0, len(messages))
 	hadSystem := false
 	for _, rawMessage := range messages {
 		message, _ := rawMessage.(map[string]any)
 		role := stringValue(message["role"])
 		if message != nil && (role == "system" || role == "developer") {
 			hadSystem = true
-			if text, ok := message["content"].(string); ok && text != "" {
-				systemTexts = append(systemTexts, text)
-			}
+			text, _ := message["content"].(string)
+			systemTexts = append(systemTexts, text)
 			continue
 		}
-		nonSystemMessages = append(nonSystemMessages, rawMessage)
 	}
 
-	original := strings.Join(systemTexts, "\n\n")
+	original := joinClaudeSystemPromptSegments(systemTexts)
 	result := claudePromptPolicyResult{
 		OriginalPrompt:  original,
 		EffectivePrompt: original,
@@ -115,7 +112,9 @@ func applyClaudePromptPolicy(
 		))
 	}
 
+	effectiveSegments := append([]string(nil), systemTexts...)
 	effective := original
+	collapsedSegments := false
 	if policy.ReplacementEnabled {
 		rules := policy.ReplacementRules
 		result.ReplacementRules = len(rules)
@@ -128,7 +127,11 @@ func applyClaudePromptPolicy(
 			}
 			result.ApplicableRules++
 			result.RuleApplicable[index] = true
-			nextWorkBytes, withinWorkLimit := addClaudeReplacementWork(workBytes, len(effective))
+			replacementInputBytes := len(effective)
+			nextWorkBytes, withinWorkLimit := addClaudeReplacementWork(
+				workBytes,
+				replacementInputBytes,
+			)
 			if !withinWorkLimit {
 				return result, claudePromptLimitError(fmt.Sprintf(
 					"claude prompt replacement work exceeds %d bytes at rule %d",
@@ -157,11 +160,61 @@ func applyClaudePromptPolicy(
 			result.ReplacementCount += matches
 			result.MatchedRules++
 			effective = replaced
+
+			if len(effectiveSegments) == 1 {
+				effectiveSegments[0] = replaced
+				continue
+			}
+			nextWorkBytes, withinWorkLimit = addClaudeReplacementWork(
+				workBytes,
+				replacementInputBytes,
+			)
+			if !withinWorkLimit {
+				return result, claudePromptLimitError(fmt.Sprintf(
+					"claude prompt replacement work exceeds %d bytes at rule %d",
+					maxClaudeReplacementWorkBytes,
+					index+1,
+				))
+			}
+			workBytes = nextWorkBytes
+
+			// Preserve individual top-level and mid-conversation system
+			// messages whenever every match is contained in one segment. This
+			// keeps their order visible to the Gemini systemInstruction parts.
+			// A legacy rule that intentionally spans the "\n\n" separator still
+			// works, but necessarily falls back to one combined segment.
+			replacedSegments := make([]string, len(effectiveSegments))
+			segmentMatches := 0
+			for segmentIndex, segment := range effectiveSegments {
+				replacedSegment, count, segmentErr := replaceAllClaudeLiteralWithinLimit(
+					segment,
+					rule.From,
+					rule.To,
+					limit,
+				)
+				if segmentErr != nil {
+					return result, claudePromptLimitError(fmt.Sprintf(
+						"claude system prompt exceeds %d bytes after replacement rule %d",
+						limit,
+						index+1,
+					))
+				}
+				replacedSegments[segmentIndex] = replacedSegment
+				segmentMatches += count
+			}
+			if segmentMatches == matches &&
+				joinClaudeSystemPromptSegments(replacedSegments) == replaced {
+				effectiveSegments = replacedSegments
+			} else {
+				effectiveSegments = []string{replaced}
+				collapsedSegments = true
+			}
 		}
 	}
 
+	injection := ""
 	if policy.InjectionEnabled {
-		injection := policy.InjectionText
+		injection = policy.InjectionText
 		if injection != "" {
 			result.InjectionApplied = true
 			var combined string
@@ -190,15 +243,86 @@ func applyClaudePromptPolicy(
 	if effective == original {
 		return result, nil
 	}
-	rewritten := make([]any, 0, len(nonSystemMessages)+1)
-	if effective != "" {
-		rewritten = append(rewritten, map[string]any{
-			"role": "system", "content": effective,
-		})
-	}
-	rewritten = append(rewritten, nonSystemMessages...)
-	chatBody["messages"] = rewritten
+	chatBody["messages"] = rewriteClaudeSystemPromptMessages(
+		messages,
+		effectiveSegments,
+		collapsedSegments,
+		injection,
+		policy.InjectionPosition,
+	)
 	return result, nil
+}
+
+func joinClaudeSystemPromptSegments(segments []string) string {
+	var joined string
+	for _, segment := range segments {
+		joined = joinClaudeSystemPrompts(joined, segment)
+	}
+	return joined
+}
+
+func rewriteClaudeSystemPromptMessages(
+	messages []any,
+	replacementSegments []string,
+	collapsed bool,
+	injection string,
+	injectionPosition string,
+) []any {
+	extra := 0
+	if injection != "" {
+		extra = 1
+	}
+	rewritten := make([]any, 0, len(messages)+extra)
+	appendSystem := func(text string) {
+		if text != "" {
+			rewritten = append(rewritten, map[string]any{
+				"role": "system", "content": text,
+			})
+		}
+	}
+	if injection != "" && injectionPosition == "prepend" {
+		appendSystem(injection)
+	}
+
+	segmentIndex := 0
+	collapsedPlaced := false
+	for _, rawMessage := range messages {
+		message, _ := rawMessage.(map[string]any)
+		role := stringValue(message["role"])
+		if message == nil || (role != "system" && role != "developer") {
+			rewritten = append(rewritten, rawMessage)
+			continue
+		}
+
+		if collapsed {
+			if !collapsedPlaced {
+				if len(replacementSegments) > 0 {
+					appendSystem(replacementSegments[0])
+				}
+				collapsedPlaced = true
+			}
+			continue
+		}
+		if segmentIndex >= len(replacementSegments) {
+			continue
+		}
+		text := replacementSegments[segmentIndex]
+		segmentIndex++
+		if text == "" {
+			continue
+		}
+		cloned := make(map[string]any, len(message))
+		for key, value := range message {
+			cloned[key] = value
+		}
+		cloned["content"] = text
+		rewritten = append(rewritten, cloned)
+	}
+
+	if injection != "" && injectionPosition != "prepend" {
+		appendSystem(injection)
+	}
+	return rewritten
 }
 
 func validateClaudePromptPolicyConfig(policy config.ClaudePromptPolicyConfig) error {

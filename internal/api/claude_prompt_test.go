@@ -57,8 +57,136 @@ func TestClaudePromptPolicyReplacesBeforeAppendingInjection(t *testing.T) {
 	}
 	system, _ := payload["systemInstruction"].(map[string]any)
 	parts, _ := system["parts"].([]any)
-	if len(parts) != 1 || parts[0].(map[string]any)["text"] != effective {
-		t.Fatalf("upstream system prompt=%#v, want %q", system, effective)
+	if len(parts) != 2 ||
+		parts[0].(map[string]any)["text"] != "Keep REPLACED\nCHANGED and REPLACED again" ||
+		parts[1].(map[string]any)["text"] != "INJECTED" {
+		t.Fatalf("upstream system prompt did not preserve replacement/injection parts: %#v", system)
+	}
+}
+
+func TestClaudePromptPolicyPreservesMidConversationSystemOrder(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ClaudePromptReplacementEnabled = true
+	cfg.ClaudePromptReplacements = []config.ClaudePromptReplacementRule{
+		{From: "TOP_OLD", To: "TOP_NEW"},
+		{From: "MID_OLD", To: "MID_NEW"},
+	}
+	cfg.ClaudePromptInjectionEnabled = true
+	cfg.ClaudePromptInjectionPosition = "prepend"
+	cfg.ClaudePromptInjectionText = "INJECTED"
+	provider := config.StaticProvider(cfg)
+	chatBody, err := anthropicToChatRequest(map[string]any{
+		"system": []any{
+			map[string]any{"type": "text", "text": "TOP_OLD"},
+			map[string]any{"type": "text", "text": "TOP_SECOND"},
+		},
+		"messages": []any{
+			map[string]any{"role": "user", "content": "first user"},
+			map[string]any{"role": "system", "content": "MID_OLD"},
+			map[string]any{"role": "assistant", "content": "prior answer"},
+			map[string]any{"role": "user", "content": "next user"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	chatBody["model"] = "gemini-3.6-flash"
+
+	result, err := applyClaudePromptPolicy(chatBody, provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.OriginalPrompt != "TOP_OLD\nTOP_SECOND\n\nMID_OLD" ||
+		result.EffectivePrompt != "INJECTED\n\nTOP_NEW\nTOP_SECOND\n\nMID_NEW" ||
+		result.ReplacementCount != 2 || !result.InjectionApplied {
+		t.Fatalf("unexpected segmented policy result: %#v", result)
+	}
+
+	messages := chatBody["messages"].([]any)
+	wantRoles := []string{"system", "system", "user", "system", "assistant", "user"}
+	if len(messages) != len(wantRoles) {
+		t.Fatalf("rewritten messages=%#v", messages)
+	}
+	for index, wantRole := range wantRoles {
+		if got := messages[index].(map[string]any)["role"]; got != wantRole {
+			t.Fatalf("messages[%d].role=%v, want %s", index, got, wantRole)
+		}
+	}
+	if messages[0].(map[string]any)["content"] != "INJECTED" ||
+		messages[1].(map[string]any)["content"] != "TOP_NEW\nTOP_SECOND" ||
+		messages[3].(map[string]any)["content"] != "MID_NEW" {
+		t.Fatalf("system segments were reordered or collapsed: %#v", messages)
+	}
+
+	_, payload, err := transform.ConvertChatRequest(chatBody, provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	system := payload["systemInstruction"].(map[string]any)
+	parts := system["parts"].([]any)
+	wantParts := []string{"INJECTED", "TOP_NEW\nTOP_SECOND", "MID_NEW"}
+	if len(parts) != len(wantParts) {
+		t.Fatalf("systemInstruction parts=%#v", parts)
+	}
+	for index, want := range wantParts {
+		if got := parts[index].(map[string]any)["text"]; got != want {
+			t.Fatalf("systemInstruction.parts[%d]=%v, want %q", index, got, want)
+		}
+	}
+}
+
+func TestClaudePromptPolicyFallsBackForCrossSegmentReplacement(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ClaudePromptReplacementEnabled = true
+	cfg.ClaudePromptReplacements = []config.ClaudePromptReplacementRule{{
+		From: "TOP\n\nMID",
+		To:   "COMBINED",
+	}}
+	chatBody := map[string]any{"messages": []any{
+		map[string]any{"role": "system", "content": "TOP"},
+		map[string]any{"role": "user", "content": "hello"},
+		map[string]any{"role": "system", "content": "MID"},
+	}}
+
+	result, err := applyClaudePromptPolicy(chatBody, config.StaticProvider(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.EffectivePrompt != "COMBINED" || result.ReplacementCount != 1 {
+		t.Fatalf("unexpected cross-segment result: %#v", result)
+	}
+	messages := chatBody["messages"].([]any)
+	if len(messages) != 2 ||
+		messages[0].(map[string]any)["role"] != "system" ||
+		messages[0].(map[string]any)["content"] != "COMBINED" ||
+		messages[1].(map[string]any)["role"] != "user" {
+		t.Fatalf("cross-segment replacement should collapse at the first system position: %#v", messages)
+	}
+}
+
+func TestClaudePromptPolicyDoesNotRewriteUserSystemReminder(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ClaudePromptReplacementEnabled = true
+	cfg.ClaudePromptReplacements = []config.ClaudePromptReplacementRule{{
+		From: "private instruction",
+		To:   "rewritten",
+	}}
+	const reminder = "<system-reminder>private instruction</system-reminder>"
+	chatBody := map[string]any{"messages": []any{
+		map[string]any{"role": "system", "content": "top policy"},
+		map[string]any{"role": "user", "content": reminder},
+	}}
+
+	result, err := applyClaudePromptPolicy(chatBody, config.StaticProvider(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ReplacementCount != 0 || result.EffectivePrompt != "top policy" {
+		t.Fatalf("user reminder unexpectedly affected policy result: %#v", result)
+	}
+	messages := chatBody["messages"].([]any)
+	if messages[1].(map[string]any)["content"] != reminder {
+		t.Fatalf("user system-reminder was unexpectedly rewritten: %#v", messages)
 	}
 }
 
