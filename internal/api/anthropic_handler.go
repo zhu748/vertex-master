@@ -563,10 +563,12 @@ func anthropicMessage(model, id string, out protocolOutput) *anthropicMessageRes
 	if out.Text != "" || len(out.ToolCalls) == 0 {
 		message.Content = append(message.Content, &anthropicTextContent{Text: out.Text, Type: "text"})
 	}
-	for _, tc := range out.ToolCalls {
-		message.Content = append(message.Content, &anthropicToolUseContent{
+	toolContent := make([]anthropicToolUseContent, len(out.ToolCalls))
+	for index, tc := range out.ToolCalls {
+		toolContent[index] = anthropicToolUseContent{
 			ID: tc.ID, Input: anthropicToolInput(tc), Name: tc.Name, Type: "tool_use",
-		})
+		}
+		message.Content = append(message.Content, &toolContent[index])
 	}
 	message.StopReason = anthropicStopReason(out.Finish, len(out.ToolCalls) > 0)
 	fillAnthropicUsage(&message.Usage, out)

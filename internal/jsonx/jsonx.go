@@ -138,11 +138,23 @@ func MarshalString(v any) (string, error) {
 // cycles and unusually deep values so callers can fall back to Marshal.
 func MarshalJSONValue(value any) (encoded []byte, ok bool) {
 	buffer := make([]byte, 0, 64)
-	buffer, ok = appendJSONValue(buffer, value, 0)
+	buffer, ok = AppendJSONValue(buffer, value)
 	if !ok {
 		return nil, false
 	}
 	return buffer, true
+}
+
+// AppendJSONValue appends the finite decoded-JSON value set supported by
+// MarshalJSONValue to dst. On failure it returns dst unchanged. Callers can
+// therefore pack several independent values into one backing buffer and retain
+// read-only slices for each encoded value.
+func AppendJSONValue(dst []byte, value any) (encoded []byte, ok bool) {
+	encoded, ok = appendJSONValue(dst, value, 0)
+	if !ok {
+		return dst, false
+	}
+	return encoded, true
 }
 
 // MarshalJSONValueString is the string-returning form of MarshalJSONValue. It

@@ -502,14 +502,24 @@ func outputFromCanonicalResponse(
 	}
 	if len(response.ToolCalls) > 0 {
 		out.ToolCalls = make([]protocolToolCall, len(response.ToolCalls))
+		var rawArguments []byte
+		if !materializeArguments {
+			// Most tool arguments are small decoded JSON objects. Pack their
+			// immutable encodings into one backing array instead of allocating
+			// a separate byte slice for every tool call.
+			rawArguments = make([]byte, 0, len(response.ToolCalls)*64)
+		}
 		for index, toolCall := range response.ToolCalls {
 			protocolCall := protocolToolCall{ID: toolCall.ID, Name: toolCall.Name}
 			if materializeArguments {
 				protocolCall.Arguments, protocolCall.argumentsCanonical = jsonStringWithCanonical(toolCall.Arguments)
 			} else {
 				arguments := normalizedIntermediateJSONValue(toolCall.Arguments)
-				if encoded, ok := jsonx.MarshalJSONValue(arguments); ok {
-					protocolCall.argumentsRaw = encoded
+				start := len(rawArguments)
+				if encoded, ok := jsonx.AppendJSONValue(rawArguments, arguments); ok {
+					rawArguments = encoded
+					end := len(rawArguments)
+					protocolCall.argumentsRaw = rawArguments[start:end:end]
 				} else {
 					protocolCall.argumentsValue = arguments
 				}

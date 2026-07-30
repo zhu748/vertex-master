@@ -392,6 +392,30 @@ func TestMarshalJSONValueStringFallsBackForUnsupportedValues(t *testing.T) {
 	}
 }
 
+func TestAppendJSONValuePreservesPrefixAndRollsBackFailure(t *testing.T) {
+	prefix := []byte("prefix:")
+	encoded, ok := AppendJSONValue(prefix, map[string]any{
+		"nested": []any{float64(1), "two"},
+	})
+	if !ok || string(encoded) != `prefix:{"nested":[1,"two"]}` {
+		t.Fatalf("AppendJSONValue=%q, ok=%v", encoded, ok)
+	}
+
+	before := string(encoded)
+	rolledBack, ok := AppendJSONValue(encoded, map[string]any{
+		"supported": float64(1),
+		"unsupported": map[string]any{
+			"value": 1,
+		},
+	})
+	if ok {
+		t.Fatal("unsupported nested integer unexpectedly used the fast path")
+	}
+	if string(rolledBack) != before {
+		t.Fatalf("failed append changed prefix: got %q, want %q", rolledBack, before)
+	}
+}
+
 func TestMarshalJSONValueStringRandomizedEquivalence(t *testing.T) {
 	random := rand.New(rand.NewSource(1)) //nolint:gosec
 	for iteration := range 2000 {

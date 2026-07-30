@@ -5,6 +5,7 @@ import (
 	"math"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -272,6 +273,46 @@ func TestOutputFromCanonicalResponseRawArgumentsFallback(t *testing.T) {
 	}
 	if !reflect.DeepEqual(toolCall.argumentsValue, arguments) {
 		t.Fatalf("fallback arguments = %#v, want %#v", toolCall.argumentsValue, arguments)
+	}
+}
+
+func TestOutputFromCanonicalResponsePacksMixedRawArguments(t *testing.T) {
+	arguments := []any{
+		map[string]any{"query": "first", "limit": float64(1)},
+		map[string]any{"unsupported_integer": 2},
+		map[string]any{"query": "third", "nested": []any{true, nil}},
+	}
+	toolCalls := make([]transform.CanonicalToolCall, len(arguments))
+	for index, argument := range arguments {
+		toolCalls[index] = transform.CanonicalToolCall{
+			ID:        "toolu_" + strconv.Itoa(index),
+			Name:      "lookup",
+			Arguments: argument,
+		}
+	}
+
+	out := outputFromCanonicalResponse(transform.CanonicalResponse{ToolCalls: toolCalls}, false)
+	if len(out.ToolCalls) != len(arguments) {
+		t.Fatalf("tool calls = %d, want %d", len(out.ToolCalls), len(arguments))
+	}
+	for _, index := range []int{0, 2} {
+		want, err := jsonx.Marshal(arguments[index])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(out.ToolCalls[index].argumentsRaw) != string(want) ||
+			out.ToolCalls[index].argumentsValue != nil {
+			t.Fatalf("tool %d raw arguments=%q value=%#v, want %s",
+				index,
+				out.ToolCalls[index].argumentsRaw,
+				out.ToolCalls[index].argumentsValue,
+				want,
+			)
+		}
+	}
+	if len(out.ToolCalls[1].argumentsRaw) != 0 ||
+		!reflect.DeepEqual(out.ToolCalls[1].argumentsValue, arguments[1]) {
+		t.Fatalf("unsupported middle argument changed: %#v", out.ToolCalls[1])
 	}
 }
 
