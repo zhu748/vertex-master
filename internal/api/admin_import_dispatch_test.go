@@ -2,8 +2,30 @@ package api
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"testing"
 )
+
+func TestEncodeClashProxyURIMatchesCanonicalEncoding(t *testing.T) {
+	proxy := map[string]any{
+		"name":    "node <one>",
+		"type":    "http",
+		"server":  "proxy.example.com",
+		"port":    8080,
+		"headers": map[string]any{"X-Test": "a&b"},
+	}
+	body, err := json.Marshal(proxy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "clash://" + base64.StdEncoding.EncodeToString(body)
+	if got := buildClashURI(proxy); got != want {
+		t.Fatalf("buildClashURI()=%q, want %q", got, want)
+	}
+	if got := clashProxyObjectToURI(proxy); got != want {
+		t.Fatalf("clashProxyObjectToURI()=%q, want %q", got, want)
+	}
+}
 
 func TestParseImportedNodesDecodesJSONSubscription(t *testing.T) {
 	payload := `[{"type":"http","name":"encoded","server":"proxy.example.com","port":8080}]`

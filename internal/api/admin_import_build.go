@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"unsafe"
 
 	"github.com/bsfdsagfadg/vertex/internal/base64x"
 	"github.com/bsfdsagfadg/vertex/internal/nodes"
@@ -119,11 +120,22 @@ func applyImportedTLSFields(proxy map[string]any, obj map[string]any) {
 }
 
 func buildClashURI(proxy map[string]any) string {
+	return encodeClashProxyURI(proxy)
+}
+
+func encodeClashProxyURI(proxy map[string]any) string {
 	body, err := json.Marshal(proxy)
 	if err != nil {
 		return ""
 	}
-	return "clash://" + base64.StdEncoding.EncodeToString(body)
+	const prefix = "clash://"
+	encoded := make([]byte, len(prefix)+base64.StdEncoding.EncodedLen(len(body)))
+	copy(encoded, prefix)
+	base64.StdEncoding.Encode(encoded[len(prefix):], body)
+	// encoded is freshly allocated and never mutated after publication. Reusing
+	// its backing storage avoids a temporary Base64 string plus a second prefix
+	// concatenation allocation for every imported node.
+	return unsafe.String(unsafe.SliceData(encoded), len(encoded))
 }
 
 func v2rayNConfigType(v any) int {
@@ -646,7 +658,11 @@ func parseJSONImportedNodes(text string) []nodes.Node {
 	}
 
 	var raw any
-	if err := json.Unmarshal([]byte(text), &raw); err != nil {
+	// json.Unmarshal only reads its input and never retains it when decoding
+	// into interface containers. The view therefore avoids copying the complete
+	// subscription string before parsing while remaining valid for this call.
+	input := unsafe.Slice(unsafe.StringData(text), len(text))
+	if err := json.Unmarshal(input, &raw); err != nil {
 		return nil
 	}
 
@@ -1041,9 +1057,5 @@ func importedClashNode(proxy map[string]any, rawURI string) (nodes.Node, bool) {
 }
 
 func clashProxyObjectToURI(proxy map[string]any) string {
-	body, err := json.Marshal(proxy)
-	if err != nil {
-		return ""
-	}
-	return "clash://" + base64.StdEncoding.EncodeToString(body)
+	return encodeClashProxyURI(proxy)
 }
