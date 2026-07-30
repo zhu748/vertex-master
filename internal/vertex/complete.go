@@ -82,7 +82,9 @@ func (c *VertexAIClient) runSingleCandidatePrepared(
 			}
 			return false
 		}
-		if chunk.Data != nil {
+		if chunk.HasCanonicalText {
+			collector.AddCanonicalText(chunk.CanonicalText)
+		} else if chunk.Data != nil {
 			collector.Add(chunk.Data)
 		}
 		return true

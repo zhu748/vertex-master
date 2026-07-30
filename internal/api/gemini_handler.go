@@ -166,9 +166,35 @@ func (g *GeminiHandler) handleGeminiStreamGenerate(w http.ResponseWriter, r *htt
 			return false
 		}
 		gotChunk = true
+		if ch.HasCanonicalText &&
+			(!ch.CanonicalText.HasFinishReason || ch.CanonicalText.FinishReason != "") {
+			text, tail := prefillFilter.FilterTextChunkParts(
+				0,
+				ch.CanonicalText.Text,
+				ch.CanonicalText.FinishReason,
+			)
+			output := protocolOutput{
+				Text: text + tail, Finish: ch.CanonicalText.FinishReason,
+			}
+			streamOutput.Add(output)
+			finishReason := output.Finish
+			if finishReason == transform.FinishReasonUnspecified {
+				finishReason = ""
+			} else if finishReason != "" {
+				hasFinish = true
+			}
+			return textStreamEncoder.writeCanonical(
+				sw,
+				text,
+				tail,
+				finishReason,
+				ch.CanonicalText.HasIndex,
+				ch.CanonicalText.Dirty,
+			)
+		}
 		// StreamChunk 把胜出节点 chunk 的所有权交给当前单一消费者，可直接
 		// 就地清理和补齐字段，避免每帧递归复制整棵响应对象。
-		data := ch.Data
+		data := ch.GeminiData()
 		prefillFilter.FilterGeminiChunk(data)
 		normalizedUsage, hasUsage := normalizeStreamingGeminiUsage(data, &lastCandidateTokenCount)
 		streamOutput.Add(outputFromGeminiChunkWithUsage(data, normalizedUsage, hasUsage))
@@ -512,7 +538,7 @@ func cleanGeminiFinishReason(data map[string]any) string {
 // 这里在透传前删除这个无害的占位符；只有真正的拦截原因（SAFETY / RECITATION 等）才保留。
 // 真正被拦截时 vertex 层会走 isSafetyBlock 分支返回 geminiSafetyResponse，不会走到这里。
 //
-// StreamChunk.Data 的所有权已转移给当前消费者，因此这里可以安全地就地清理。
+// StreamChunk.GeminiData 返回值的所有权已转移给当前消费者，因此可安全就地清理。
 func cleanGeminiPromptFeedback(data map[string]any) {
 	feedback, ok := data["promptFeedback"].(map[string]any)
 	if !ok {

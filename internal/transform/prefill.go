@@ -409,6 +409,34 @@ func (f *AssistantPrefillStreamFilter) FilterGeminiChunk(chunk map[string]any) {
 	}
 }
 
+// FilterTextChunk 对已验证的单候选普通文本帧执行与 FilterGeminiChunk 相同的
+// 前缀过滤，并在真实 finishReason 到达时释放仍未决的部分前缀。
+func (f *AssistantPrefillStreamFilter) FilterTextChunk(
+	candidateIndex int,
+	text, finishReason string,
+) string {
+	filtered, tail := f.FilterTextChunkParts(candidateIndex, text, finishReason)
+	return filtered + tail
+}
+
+// FilterTextChunkParts 与 FilterTextChunk 等价，但把结束帧释放的未决前缀
+// 单独返回，供需要保持 Gemini parts 边界的原生流编码器使用。
+func (f *AssistantPrefillStreamFilter) FilterTextChunkParts(
+	candidateIndex int,
+	text, finishReason string,
+) (filtered, tail string) {
+	if f == nil || f.prefill == "" {
+		return text, ""
+	}
+	if text != "" {
+		filtered = f.filterCandidateText(candidateIndex, text, false)
+	}
+	if finishReason != "" && finishReason != FinishReasonUnspecified {
+		tail = f.filterCandidateText(candidateIndex, "", true)
+	}
+	return filtered, tail
+}
+
 func geminiCandidateFilterIndex(candidate map[string]any, fallback int) int {
 	const maximumCandidateIndex = 1 << 30
 	switch index := candidate["index"].(type) {

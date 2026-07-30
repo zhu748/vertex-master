@@ -255,6 +255,40 @@ func TestAssistantPrefillStreamFilterAcrossChunks(t *testing.T) {
 	}
 }
 
+func TestAssistantPrefillFilterTextChunkMatchesGeminiMapPath(t *testing.T) {
+	mapFilter := NewAssistantPrefillStreamFilter("Alice:")
+	textFilter := NewAssistantPrefillStreamFilter("Alice:")
+	for index, chunk := range []struct {
+		text   string
+		finish string
+	}{
+		{text: "Ali", finish: FinishReasonUnspecified},
+		{text: "ce: hello", finish: FinishReasonUnspecified},
+		{text: " world", finish: "STOP"},
+	} {
+		gemini := prefillTestChunk(chunk.text, chunk.finish)
+		mapFilter.FilterGeminiChunk(gemini)
+		want := prefillTestText(gemini)
+		if got := textFilter.FilterTextChunk(0, chunk.text, chunk.finish); got != want {
+			t.Fatalf("chunk %d direct filter=%q, map filter=%q", index, got, want)
+		}
+	}
+	if textFilter.SawText() != mapFilter.SawText() {
+		t.Fatalf("SawText differs: direct=%v map=%v", textFilter.SawText(), mapFilter.SawText())
+	}
+
+	mapFilter = NewAssistantPrefillStreamFilter("Alice:")
+	textFilter = NewAssistantPrefillStreamFilter("Alice:")
+	gemini := prefillTestChunk("Ali", "STOP")
+	mapFilter.FilterGeminiChunk(gemini)
+	parts := gemini["candidates"].([]any)[0].(map[string]any)["content"].(map[string]any)["parts"].([]any)
+	filtered, tail := textFilter.FilterTextChunkParts(0, "Ali", "STOP")
+	if filtered != parts[0].(map[string]any)["text"] ||
+		tail != parts[1].(map[string]any)["text"] {
+		t.Fatalf("direct parts=(%q,%q), map parts=%#v", filtered, tail, parts)
+	}
+}
+
 func TestAssistantPrefillStreamFilterSeparatesCandidateState(t *testing.T) {
 	filter := NewAssistantPrefillStreamFilter("ABC")
 	first := map[string]any{"candidates": []any{

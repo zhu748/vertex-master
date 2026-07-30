@@ -18,6 +18,15 @@ type StreamEventEncoder interface {
 	Emit(chunk map[string]any, isFirst bool, emit func(payload any) bool) (StreamEventResult, bool)
 }
 
+// TextStreamEventEncoder 是严格单文本帧的可选零 map 快速路径。
+type TextStreamEventEncoder interface {
+	EmitText(
+		text, finishReason string,
+		isFirst bool,
+		emit func(payload any) bool,
+	) (StreamEventResult, bool)
+}
+
 type StreamEventResult struct {
 	HasContent bool
 	HasFinish  bool

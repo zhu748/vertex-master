@@ -87,6 +87,19 @@ func (c *chunkCollector) Add(chunk map[string]any) {
 	}
 }
 
+func (c *chunkCollector) AddCanonicalText(chunk CanonicalTextStreamData) {
+	c.count++
+	if chunk.HasFinishReason && chunk.FinishReason != "" {
+		c.result.FinishReason = chunk.FinishReason
+	}
+	if chunk.HasIndex {
+		c.result.CandidateIndex = 0
+	}
+	if chunk.Text != "" {
+		c.parts.AddPlainText(chunk.Text)
+	}
+}
+
 func (c *chunkCollector) Len() int { return c.count }
 
 func (c *chunkCollector) Result() *ParseResult {

@@ -84,7 +84,7 @@ func BenchmarkProcessStreamFrames(b *testing.B) {
 	for range b.N {
 		emitted := 0
 		err := scanStreamRaw(bytes.NewReader(payload), func(raw []byte) (bool, error) {
-			return processStreamingJSON(raw, func(map[string]any) bool {
+			return processStreamingJSON(raw, func(StreamChunk) bool {
 				emitted++
 				return true
 			})
@@ -110,7 +110,7 @@ func BenchmarkProcessDirtyTextStreamFrames(b *testing.B) {
 	for range b.N {
 		emitted := 0
 		err := scanStreamRaw(bytes.NewReader(payload), func(raw []byte) (bool, error) {
-			return processStreamingJSON(raw, func(map[string]any) bool {
+			return processStreamingJSON(raw, func(StreamChunk) bool {
 				emitted++
 				return true
 			})
@@ -259,8 +259,8 @@ func TestStreamingCancellationStopsTokenFetch(t *testing.T) {
 // collectStream 把生产使用的原始帧扫描跑到底，收集所有 emit 出来的 chunk。
 func collectStream(t *testing.T, raw string) (emitted []map[string]any, stopped bool, scanErr error) {
 	t.Helper()
-	emit := func(ch map[string]any) bool {
-		emitted = append(emitted, ch)
+	emit := func(ch StreamChunk) bool {
+		emitted = append(emitted, ch.GeminiData())
 		return true
 	}
 	scanErr = scanStreamRaw(strings.NewReader(raw), func(frame []byte) (bool, error) {
@@ -346,10 +346,33 @@ func TestParseCanonicalTextStreamChunkMatchesGenericPath(t *testing.T) {
 			if !ok {
 				t.Fatal("canonical text frame unexpectedly missed fast path")
 			}
-			if !reflect.DeepEqual(got, want) {
-				t.Fatalf("fast path=%#v, generic path=%#v", got, want)
+			materialized := (StreamChunk{
+				CanonicalText: got, HasCanonicalText: true,
+			}).GeminiData()
+			if !reflect.DeepEqual(materialized, want) {
+				t.Fatalf("fast path=%#v, generic path=%#v", materialized, want)
 			}
 		})
+	}
+}
+
+func TestProcessStreamingJSONKeepsCanonicalTextUnmaterialized(t *testing.T) {
+	raw := []byte(wrap(
+		`{"candidates":[{"content":{"parts":[{"text":"hello"}],"role":"model"},"finishReason":"FINISH_REASON_UNSPECIFIED"}]}`,
+	))
+	var emitted StreamChunk
+	stop, err := processStreamingJSON(raw, func(chunk StreamChunk) bool {
+		emitted = chunk
+		return true
+	})
+	if err != nil || stop {
+		t.Fatalf("canonical stream stop=%v err=%v", stop, err)
+	}
+	if !emitted.HasCanonicalText || emitted.Data != nil || emitted.CanonicalText.Text != "hello" {
+		t.Fatalf("canonical stream was materialized early: %#v", emitted)
+	}
+	if got := firstPartText(emitted.GeminiData()); got != "hello" {
+		t.Fatalf("materialized canonical text=%q", got)
 	}
 }
 
@@ -467,8 +490,8 @@ func TestScanStream_SplitAcrossReads(t *testing.T) {
 	// 逐字节投喂（最极端的分片），状态机必须能正确续扫。
 	emitted := []map[string]any{}
 	err := scanStreamRaw(&splitReader{data: []byte(raw), chunk: 1}, func(frame []byte) (bool, error) {
-		stop, err := processStreamingJSON(frame, func(ch map[string]any) bool {
-			emitted = append(emitted, ch)
+		stop, err := processStreamingJSON(frame, func(ch StreamChunk) bool {
+			emitted = append(emitted, ch.GeminiData())
 			return true
 		})
 		return stop, err
@@ -502,7 +525,7 @@ func TestScanStream_BracesInsideString(t *testing.T) {
 func TestProcessStreamingJSONFallbackPreservesErrorsAndAlternateFormatting(t *testing.T) {
 	_, err := processStreamingJSON(
 		[]byte(`{"results":[{"errors":[{"message":"Failed to verify action"}]}]}`),
-		func(map[string]any) bool { return true },
+		func(StreamChunk) bool { return true },
 	)
 	if ve := asVertexError(err); ve == nil || ve.Kind != "auth" {
 		t.Fatalf("fallback error=%v, want auth", err)
@@ -510,8 +533,8 @@ func TestProcessStreamingJSONFallbackPreservesErrorsAndAlternateFormatting(t *te
 
 	formatted := []byte(` { "results": [ { "data": { "ui": { "streamGenerateContentAnonymous": { "candidates": [ { "content": { "parts": [ { "text": "formatted" } ] } } ] } } } } ] } `)
 	var emitted map[string]any
-	stop, err := processStreamingJSON(formatted, func(chunk map[string]any) bool {
-		emitted = chunk
+	stop, err := processStreamingJSON(formatted, func(chunk StreamChunk) bool {
+		emitted = chunk.GeminiData()
 		return true
 	})
 	if err != nil || stop || emitted == nil || firstPartText(emitted) != "formatted" {

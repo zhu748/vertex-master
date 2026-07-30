@@ -6,7 +6,7 @@ package api
 type geminiTextStreamEncoder struct {
 	event      geminiTextStreamEvent
 	candidates [1]geminiTextStreamCandidate
-	parts      [1]geminiTextStreamPart
+	parts      [2]geminiTextStreamPart
 	index      int
 	thought    bool
 	signature  string
@@ -44,6 +44,30 @@ func (e *geminiTextStreamEncoder) writeData(sw *sseWriter, data map[string]any) 
 		return sw.writeData(&e.event)
 	}
 	return sw.writeData(data)
+}
+
+func (e *geminiTextStreamEncoder) writeCanonical(
+	sw *sseWriter,
+	text, tail, finishReason string,
+	hasIndex, dirty bool,
+) bool {
+	if e == nil || sw == nil {
+		return false
+	}
+	e.reset(text)
+	e.candidates[0].FinishReason = finishReason
+	if hasIndex {
+		e.candidates[0].Index = &e.index
+	}
+	if dirty {
+		e.parts[0].Thought = &e.thought
+		e.parts[0].ThoughtSignature = &e.signature
+	}
+	if tail != "" {
+		e.parts[1].Text = tail
+		e.candidates[0].Content.Parts = e.parts[:2]
+	}
+	return sw.writeData(&e.event)
 }
 
 func (e *geminiTextStreamEncoder) prepare(data map[string]any) bool {
@@ -91,11 +115,7 @@ func (e *geminiTextStreamEncoder) prepare(data map[string]any) bool {
 		return false
 	}
 
-	e.candidates[0].FinishReason = ""
-	e.candidates[0].Index = nil
-	e.parts[0].Text = text
-	e.parts[0].Thought = nil
-	e.parts[0].ThoughtSignature = nil
+	e.reset(text)
 
 	if rawFinish, exists := candidate["finishReason"]; exists {
 		finishReason, ok := rawFinish.(string)
@@ -108,7 +128,6 @@ func (e *geminiTextStreamEncoder) prepare(data map[string]any) bool {
 		if !isZeroGeminiCandidateIndex(rawIndex) {
 			return false
 		}
-		e.index = 0
 		e.candidates[0].Index = &e.index
 	}
 	if rawThought, exists := part["thought"]; exists {
@@ -128,6 +147,19 @@ func (e *geminiTextStreamEncoder) prepare(data map[string]any) bool {
 		e.parts[0].ThoughtSignature = &e.signature
 	}
 	return true
+}
+
+func (e *geminiTextStreamEncoder) reset(text string) {
+	e.index = 0
+	e.thought = false
+	e.signature = ""
+	e.candidates[0].FinishReason = ""
+	e.candidates[0].Index = nil
+	e.candidates[0].Content.Parts = e.parts[:1]
+	e.parts[0].Text = text
+	e.parts[0].Thought = nil
+	e.parts[0].ThoughtSignature = nil
+	e.parts[1] = geminiTextStreamPart{}
 }
 
 func isZeroGeminiCandidateIndex(value any) bool {

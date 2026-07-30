@@ -431,6 +431,16 @@ func outputFromGeminiChunk(chunk map[string]any) protocolOutput {
 	return outputFromGeminiChunkWithUsage(chunk, transform.NormalizedUsage{}, false)
 }
 
+func outputFromCanonicalTextStreamData(
+	chunk vertex.CanonicalTextStreamData,
+	prefillFilter *transform.AssistantPrefillStreamFilter,
+) protocolOutput {
+	return protocolOutput{
+		Text:   prefillFilter.FilterTextChunk(0, chunk.Text, chunk.FinishReason),
+		Finish: chunk.FinishReason,
+	}
+}
+
 func outputFromGeminiChunkWithUsage(
 	chunk map[string]any,
 	normalizedUsage transform.NormalizedUsage,

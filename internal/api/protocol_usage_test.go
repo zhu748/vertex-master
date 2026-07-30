@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/bsfdsagfadg/vertex/internal/transform"
+	"github.com/bsfdsagfadg/vertex/internal/vertex"
 )
 
 func TestOutputFromGeminiChunkUsageOnly(t *testing.T) {
@@ -37,6 +38,22 @@ func TestOutputFromGeminiChunkUsesRealCandidateCountWithoutUsage(t *testing.T) {
 	})
 	if out.Input != 0 || out.Output != 8 || out.Total != 0 {
 		t.Fatalf("candidate tokenCount 应只作为真实输出统计，不能估算输入或总量: %+v", out)
+	}
+}
+
+func TestOutputFromCanonicalTextStreamDataAppliesPrefill(t *testing.T) {
+	filter := transform.NewAssistantPrefillStreamFilter("Alice:")
+	first := outputFromCanonicalTextStreamData(vertex.CanonicalTextStreamData{
+		Text: "Ali", FinishReason: transform.FinishReasonUnspecified,
+	}, filter)
+	if first.Text != "" || first.Finish != transform.FinishReasonUnspecified {
+		t.Fatalf("partial canonical prefill=%+v", first)
+	}
+	second := outputFromCanonicalTextStreamData(vertex.CanonicalTextStreamData{
+		Text: "ce: hello", FinishReason: "STOP",
+	}, filter)
+	if second.Text != " hello" || second.Finish != "STOP" {
+		t.Fatalf("completed canonical prefill=%+v", second)
 	}
 }
 

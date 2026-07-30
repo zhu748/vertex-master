@@ -87,6 +87,26 @@ func TestChunkCollectorNormalizesOwnedTextPartsInPlace(t *testing.T) {
 	}
 }
 
+func TestChunkCollectorAggregatesCanonicalText(t *testing.T) {
+	collector := newChunkCollector()
+	collector.AddCanonicalText(CanonicalTextStreamData{
+		Text: "hel", FinishReason: "FINISH_REASON_UNSPECIFIED", HasFinishReason: true,
+	})
+	collector.AddCanonicalText(CanonicalTextStreamData{
+		Text: "lo", FinishReason: "STOP", HasFinishReason: true, HasIndex: true,
+	})
+	collector.AddCanonicalText(CanonicalTextStreamData{
+		FinishReason: "", HasFinishReason: true,
+	})
+	result := collector.Result()
+	if collector.Len() != 3 || len(result.Parts) != 1 || result.Parts[0]["text"] != "hello" {
+		t.Fatalf("canonical parts/count mismatch: count=%d parts=%#v", collector.Len(), result.Parts)
+	}
+	if result.FinishReason != "STOP" || result.CandidateIndex != 0 {
+		t.Fatalf("canonical candidate metadata mismatch: %#v", result)
+	}
+}
+
 func BenchmarkChunkCollection(b *testing.B) {
 	chunks := make([]map[string]any, 4096)
 	for index := range chunks {
@@ -113,6 +133,15 @@ func BenchmarkChunkCollection(b *testing.B) {
 			retained := make([]map[string]any, 0, len(chunks))
 			retained = append(retained, chunks...)
 			benchmarkChunkCollectorResult = collectChunksToParseResult(retained)
+		}
+	})
+	b.Run("canonical_text", func(b *testing.B) {
+		for range b.N {
+			collector := newChunkCollector()
+			for range len(chunks) {
+				collector.AddCanonicalText(CanonicalTextStreamData{Text: "0123456789abcdef"})
+			}
+			benchmarkChunkCollectorResult = collector.Result()
 		}
 	})
 }

@@ -60,7 +60,7 @@ func StreamParallel(ctx context.Context, cfg config.ConfigProvider,
 					}, nil
 				}
 				if len(pending) >= maxStreamRaceMetadataChunks ||
-					!valueFitsBudget(chunk.Data, &remainingBytes) {
+					!streamChunkFitsBudget(chunk, &remainingBytes) {
 					return streamRaceResult{}, NewUnavailableError(
 						"upstream stream metadata lookahead exceeded safe limit",
 					)
@@ -130,7 +130,15 @@ func chooseStreamRaceFallback(results []streamRaceResult) (streamRaceResult, err
 }
 
 func streamChunkHasPayload(chunk StreamChunk) bool {
-	if chunk.Err != nil || chunk.Data == nil {
+	if chunk.Err != nil {
+		return false
+	}
+	if chunk.HasCanonicalText {
+		finishReason := strings.ToUpper(strings.TrimSpace(chunk.CanonicalText.FinishReason))
+		return chunk.CanonicalText.Text != "" ||
+			(finishReason != "" && !strings.Contains(finishReason, "UNSPECIFIED"))
+	}
+	if chunk.Data == nil {
 		return false
 	}
 	data := chunk.Data
@@ -174,4 +182,17 @@ func streamChunkHasPayload(chunk StreamChunk) bool {
 		}
 	}
 	return false
+}
+
+func streamChunkFitsBudget(chunk StreamChunk, remainingBytes *int) bool {
+	if remainingBytes == nil {
+		return false
+	}
+	if !chunk.HasCanonicalText {
+		return valueFitsBudget(chunk.Data, remainingBytes)
+	}
+	// 与物化后的单候选文本树相比略微高估固定结构开销，保持预算保守。
+	*remainingBytes -= len(chunk.CanonicalText.Text) +
+		len(chunk.CanonicalText.FinishReason) + 96
+	return *remainingBytes >= 0
 }

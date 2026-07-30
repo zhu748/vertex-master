@@ -658,7 +658,11 @@ func (h *AnthropicHandler) streamMessages(
 			failed = true
 			return false
 		}
-		data := chunk.Data
+		if chunk.HasCanonicalText {
+			state.consume(outputFromCanonicalTextStreamData(chunk.CanonicalText, prefillFilter))
+			return state.connected()
+		}
+		data := chunk.GeminiData()
 		prefillFilter.FilterGeminiChunk(data)
 		normalizedUsage, hasUsage := normalizeStreamingGeminiUsage(data, &lastCandidateTokenCount)
 		state.consume(outputFromGeminiChunkWithUsage(data, normalizedUsage, hasUsage))

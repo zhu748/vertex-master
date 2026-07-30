@@ -461,6 +461,37 @@ func TestStreamParallelKeepsMetadataFallbackWhenAllCandidatesLackPayload(t *test
 	}
 }
 
+func TestCanonicalStreamChunkPayloadAndBudget(t *testing.T) {
+	unspecified := StreamChunk{
+		HasCanonicalText: true,
+		CanonicalText: CanonicalTextStreamData{
+			FinishReason: "FINISH_REASON_UNSPECIFIED", HasFinishReason: true,
+		},
+	}
+	if streamChunkHasPayload(unspecified) {
+		t.Fatal("empty unspecified canonical frame must remain metadata-only")
+	}
+	withText := unspecified
+	withText.CanonicalText.Text = "answer"
+	if !streamChunkHasPayload(withText) {
+		t.Fatal("canonical text must count as payload")
+	}
+	withFinish := unspecified
+	withFinish.CanonicalText.FinishReason = "STOP"
+	if !streamChunkHasPayload(withFinish) {
+		t.Fatal("canonical real finish must count as payload")
+	}
+
+	remaining := 1024
+	if !streamChunkFitsBudget(unspecified, &remaining) || remaining >= 1024 {
+		t.Fatalf("canonical metadata budget was not charged: remaining=%d", remaining)
+	}
+	remaining = 1
+	if streamChunkFitsBudget(unspecified, &remaining) {
+		t.Fatal("canonical metadata exceeded tiny budget")
+	}
+}
+
 func TestStreamParallelBoundsMetadataLookahead(t *testing.T) {
 	base := config.DefaultConfig()
 	base.ParallelPoolEnabled = false

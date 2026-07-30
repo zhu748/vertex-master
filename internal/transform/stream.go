@@ -180,6 +180,35 @@ func (e *OpenAIStreamEncoder) Emit(
 	return result, e.emitPrepared(prepared, emit)
 }
 
+// EmitText 直接编码已经过 Vertex 严格解析的单文本帧。
+func (e *OpenAIStreamEncoder) EmitText(
+	text, finishReason string,
+	isFirst bool,
+	emit func(payload any) bool,
+) (StreamEventResult, bool) {
+	if e == nil || emit == nil {
+		return StreamEventResult{}, false
+	}
+	hasFinish := finishReason != "" && finishReason != FinishReasonUnspecified
+	prepared := openAIStreamPrepared{
+		text:      text,
+		finish:    finishReason,
+		isFirst:   isFirst,
+		hasFinish: hasFinish,
+	}
+	if isFirst {
+		prepared.eventCount++
+	}
+	if text != "" {
+		prepared.eventCount++
+	}
+	if hasFinish {
+		prepared.eventCount++
+	}
+	return StreamEventResult{HasContent: text != "", HasFinish: hasFinish},
+		e.emitPrepared(prepared, emit)
+}
+
 func (e *OpenAIStreamEncoder) emitPrepared(prepared openAIStreamPrepared, emit func(payload any) bool) bool {
 	if prepared.eventCount == 0 {
 		return true

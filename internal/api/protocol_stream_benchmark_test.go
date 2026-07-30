@@ -252,26 +252,70 @@ func BenchmarkGeminiTextDeltaStream(b *testing.B) {
 			}
 		})
 	}
+	b.Run("canonical_plain", func(b *testing.B) {
+		sw := &sseWriter{w: benchmarkResponseWriter{}}
+		var encoder geminiTextStreamEncoder
+		encoder.init()
+		text := strings.Repeat("x", 128)
+		b.ReportAllocs()
+		for range b.N {
+			if !encoder.writeCanonical(sw, text, "", "", false, false) {
+				b.Fatal("write failed")
+			}
+		}
+	})
+	b.Run("canonical_explicit_false_thought", func(b *testing.B) {
+		sw := &sseWriter{w: benchmarkResponseWriter{}}
+		var encoder geminiTextStreamEncoder
+		encoder.init()
+		text := strings.Repeat("x", 128)
+		b.ReportAllocs()
+		for range b.N {
+			if !encoder.writeCanonical(sw, text, "", "", true, true) {
+				b.Fatal("write failed")
+			}
+		}
+	})
 }
 
 func BenchmarkOpenAITextDeltaDirectStream(b *testing.B) {
-	sw := &sseWriter{w: benchmarkResponseWriter{}}
-	encoder := transform.NewOpenAIStreamEncoder("gemini-benchmark", "benchmark")
+	text := strings.Repeat("x", 256)
 	chunk := map[string]any{"candidates": []any{map[string]any{
 		"content": map[string]any{"parts": []any{map[string]any{
-			"text": strings.Repeat("x", 256),
+			"text": text,
 		}}},
 		"finishReason": transform.FinishReasonUnspecified,
 	}}}
-	emit := func(payload any) bool { return sw.writeData(payload) }
-	b.ReportAllocs()
-	b.ResetTimer()
-	for range b.N {
-		result, ok := encoder.Emit(chunk, false, emit)
-		if !ok || !result.HasContent {
-			b.Fatal("direct stream failed")
+
+	b.Run("map", func(b *testing.B) {
+		sw := &sseWriter{w: benchmarkResponseWriter{}}
+		encoder := transform.NewOpenAIStreamEncoder("gemini-benchmark", "benchmark")
+		emit := func(payload any) bool { return sw.writeData(payload) }
+		b.ReportAllocs()
+		for range b.N {
+			result, ok := encoder.Emit(chunk, false, emit)
+			if !ok || !result.HasContent {
+				b.Fatal("map stream failed")
+			}
 		}
-	}
+	})
+	b.Run("canonical_text", func(b *testing.B) {
+		sw := &sseWriter{w: benchmarkResponseWriter{}}
+		encoder := transform.NewOpenAIStreamEncoder("gemini-benchmark", "benchmark")
+		emit := func(payload any) bool { return sw.writeData(payload) }
+		b.ReportAllocs()
+		for range b.N {
+			result, ok := encoder.EmitText(
+				text,
+				transform.FinishReasonUnspecified,
+				false,
+				emit,
+			)
+			if !ok || !result.HasContent {
+				b.Fatal("canonical text stream failed")
+			}
+		}
+	})
 }
 
 func BenchmarkOpenAIUsageDirectStream(b *testing.B) {

@@ -194,6 +194,51 @@ func TestOpenAIStreamEncoderMatchesCompatibilityOutput(t *testing.T) {
 	}
 }
 
+func TestOpenAIStreamEncoderTextFastPathMatchesMapPath(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		text         string
+		finishReason string
+		isFirst      bool
+	}{
+		{name: "first unspecified", text: "hello", finishReason: FinishReasonUnspecified, isFirst: true},
+		{name: "real finish", text: "done", finishReason: "STOP"},
+		{name: "finish only", finishReason: "MAX_TOKENS"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			chunk := map[string]any{"candidates": []any{map[string]any{
+				"content": map[string]any{
+					"parts": []any{map[string]any{"text": test.text}},
+					"role":  "model",
+				},
+				"finishReason": test.finishReason,
+			}}}
+			mapEncoder := NewOpenAIStreamEncoder("m", "r")
+			textEncoder := NewOpenAIStreamEncoder("m", "r")
+			var mapEvents, textEvents []string
+			mapResult, mapOK := mapEncoder.Emit(chunk, test.isFirst, func(payload any) bool {
+				mapEvents = append(mapEvents, sseLine(payload))
+				return true
+			})
+			textResult, textOK := textEncoder.EmitText(
+				test.text,
+				test.finishReason,
+				test.isFirst,
+				func(payload any) bool {
+					textEvents = append(textEvents, sseLine(payload))
+					return true
+				},
+			)
+			if mapOK != textOK || mapResult != textResult || !reflect.DeepEqual(mapEvents, textEvents) {
+				t.Fatalf(
+					"text fast path differs:\n map ok=%v result=%+v events=%q\ntext ok=%v result=%+v events=%q",
+					mapOK, mapResult, mapEvents, textOK, textResult, textEvents,
+				)
+			}
+		})
+	}
+}
+
 func TestConvertRealtimeChunk_UsageOnlyFrame(t *testing.T) {
 	chunk := map[string]any{
 		"usageMetadata": map[string]any{

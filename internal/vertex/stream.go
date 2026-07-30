@@ -18,16 +18,41 @@ import (
 	"github.com/bsfdsagfadg/vertex/internal/transport"
 )
 
-// StreamChunk 是真流式中 yield 的单个增量。要么是 Gemini 数据 chunk，要么是错误。
+// StreamChunk 是真流式中 yield 的单个增量：通用 Gemini map、规范文本值或错误。
 //
-// 正常 yield Gemini dict，所有重试耗尽时 yield {"error": {...}}（routes 层据此
-// 发 OAI error 事件 + [DONE]）。
+// 所有重试耗尽时 Err 携带对外错误（routes 层据此发 error 事件 + [DONE]）。
 type StreamChunk struct {
 	// Data 是清洗后的 Gemini 增量（candidates/usageMetadata/...），Err==nil 时有效。
-	// 所有权随 chunk 转移给单一消费者；回调可以就地修改，发送方不会再复用该 map。
+	// 通用帧的所有权随 chunk 转移给单一消费者；回调可以就地修改。
 	Data map[string]any
+	// CanonicalText 是匿名端点最常见纯文本帧的无 map 表示。HasCanonicalText=true
+	// 时有效；需要原生 Gemini 结构的消费者通过 GeminiData 延迟物化。
+	CanonicalText    CanonicalTextStreamData
+	HasCanonicalText bool
 	// Err 非 nil 表示重试耗尽、对外报错（yield error dict）。
 	Err *VertexError
+}
+
+// CanonicalTextStreamData 只表示 parseCanonicalTextStreamChunk 严格验证过的
+// 单候选文本帧。布尔字段记录 protobuf JSON 中必须保留的显式零值。
+type CanonicalTextStreamData struct {
+	Text            string
+	FinishReason    string
+	HasFinishReason bool
+	HasIndex        bool
+	Dirty           bool
+}
+
+// GeminiData 返回清洗后的 Gemini map。通用帧直接转移原 map；规范文本帧
+// 每次调用都会新建一份，因此调用方应只取一次并继续传递其所有权。
+func (c StreamChunk) GeminiData() map[string]any {
+	if c.Data != nil {
+		return c.Data
+	}
+	if !c.HasCanonicalText {
+		return nil
+	}
+	return materializeCanonicalTextStreamData(c.CanonicalText)
 }
 
 const (
@@ -135,12 +160,12 @@ retryLoop:
 		// BLOCKED_REASON_UNSPECIFIED 字段当成真正拦截，提前 return false 中断流，
 		// 导致后续真正的内容 chunk 永远收不到 —— 客户端表现为 200 OK 但无内容。
 		chunkCount := 0
-		attemptErr := c.executeStreamingAttempt(ctx, sess, model, nodeName, preparedVariables, recaptchaToken, isFirstAuth, func(ch map[string]any) bool {
+		attemptErr := c.executeStreamingAttempt(ctx, sess, model, nodeName, preparedVariables, recaptchaToken, isFirstAuth, func(ch StreamChunk) bool {
 			chunkCount++
-			if streamChunkHasPayload(StreamChunk{Data: ch}) {
+			if streamChunkHasPayload(ch) {
 				payloadYielded = true
 			}
-			return yield(StreamChunk{Data: ch})
+			return yield(ch)
 		})
 
 		if attemptErr == nil {
@@ -249,7 +274,7 @@ func effectiveMaxRetries(configured int, parallelPoolEnabled, parallelPoolRetryE
 // emit 回调把清洗后的 Gemini chunk 推给上层；
 // emit 返回 false（客户端断开）时扫描正常停止、返回 nil（StreamChat 据 chunkCount>0 收尾，不重试）。
 // ctx 绑定 to 上游流连接：ctx 取消时 Body.Read 报错，scanStream 干净结束（返回 nil，不 panic）。
-func (c *VertexAIClient) executeStreamingAttempt(ctx context.Context, sess *transport.Session, model, nodeName string, preparedVariables map[string]any, recaptchaToken string, _ bool, emit func(map[string]any) bool) error {
+func (c *VertexAIClient) executeStreamingAttempt(ctx context.Context, sess *transport.Session, model, nodeName string, preparedVariables map[string]any, recaptchaToken string, _ bool, emit func(StreamChunk) bool) error {
 	reqID := RequestIDFromContext(ctx)
 	log.Printf("[Vertex] [executeStreamingAttempt] 准备发送流式请求: 模型=%s, 请求ID=%s, 代理=%s", model, reqID, nodeName)
 	cfg := c.cfg
@@ -583,7 +608,7 @@ var canonicalFinishReasons = [...]struct { //nolint:gochecknoglobals
 // processStreamingJSON 对匿名 batchGraphql 的常见单结果外壳走严格快路径：外壳
 // 完全匹配时只解码内部 Gemini 对象。结构、字段顺序、错误或多结果有任何变化时，
 // 回退完整动态解析，保持兼容性和错误语义。
-func processStreamingJSON(raw []byte, emit func(map[string]any) bool) (bool, error) {
+func processStreamingJSON(raw []byte, emit func(StreamChunk) bool) (bool, error) {
 	trimmed := bytes.TrimSpace(raw)
 	if bytes.HasPrefix(trimmed, canonicalAnonymousStreamPrefix) &&
 		bytes.HasSuffix(trimmed, canonicalAnonymousStreamSuffix) {
@@ -592,14 +617,14 @@ func processStreamingJSON(raw []byte, emit func(map[string]any) bool) (bool, err
 		inner := bytes.TrimSpace(trimmed[start:end])
 		if len(inner) >= 2 && inner[0] == '{' && inner[len(inner)-1] == '}' {
 			if chunk, ok := parseCanonicalTextStreamChunk(inner); ok {
-				if !emit(chunk) {
+				if !emit(StreamChunk{CanonicalText: chunk, HasCanonicalText: true}) {
 					log.Printf("[Stream] 客户端主动断开，导致流结束")
 					return true, nil
 				}
 				return false, nil
 			}
 			if data := parseJSONObject(inner); data != nil {
-				if chunk := extractChunk(data); chunk != nil && !emit(chunk) {
+				if chunk := extractChunk(data); chunk != nil && !emit(StreamChunk{Data: chunk}) {
 					log.Printf("[Stream] 客户端主动断开，导致流结束")
 					return true, nil
 				}
@@ -612,13 +637,15 @@ func processStreamingJSON(raw []byte, emit func(map[string]any) bool) (bool, err
 	if object == nil {
 		return false, nil
 	}
-	return processStreamingObject(object, emit)
+	return processStreamingObject(object, func(chunk map[string]any) bool {
+		return emit(StreamChunk{Data: chunk})
+	})
 }
 
 // parseCanonicalTextStreamChunk 处理匿名端点最常见的单 candidate 文本帧。
 // 这里只接受字段顺序和值都完全匹配的两种 protobuf JSON 形状；任何扩展字段、
 // 非零 index、思考块或格式变化都会回退通用 json.Unmarshal，避免快路径吞字段。
-func parseCanonicalTextStreamChunk(raw []byte) (map[string]any, bool) {
+func parseCanonicalTextStreamChunk(raw []byte) (CanonicalTextStreamData, bool) {
 	dirty := false
 	switch {
 	case bytes.HasPrefix(raw, canonicalCleanTextPrefix):
@@ -627,26 +654,26 @@ func parseCanonicalTextStreamChunk(raw []byte) (map[string]any, bool) {
 		raw = raw[len(canonicalDirtyTextPrefix):]
 		dirty = true
 	default:
-		return nil, false
+		return CanonicalTextStreamData{}, false
 	}
 
 	text, rest, ok := takeCanonicalJSONString(raw)
 	if !ok {
-		return nil, false
+		return CanonicalTextStreamData{}, false
 	}
 	if dirty {
 		if !bytes.HasPrefix(rest, canonicalDirtyTextSuffix) {
-			return nil, false
+			return CanonicalTextStreamData{}, false
 		}
 		rest = rest[len(canonicalDirtyTextSuffix):]
 	} else {
 		if len(rest) == 0 || rest[0] != '}' {
-			return nil, false
+			return CanonicalTextStreamData{}, false
 		}
 		rest = rest[1:]
 	}
 	if !bytes.HasPrefix(rest, canonicalTextContentSuffix) {
-		return nil, false
+		return CanonicalTextStreamData{}, false
 	}
 	rest = rest[len(canonicalTextContentSuffix):]
 
@@ -656,7 +683,7 @@ func parseCanonicalTextStreamChunk(raw []byte) (map[string]any, bool) {
 		rest = rest[len(canonicalFinishReasonPrefix):]
 		finishReason, rest, ok = takeCanonicalFinishReason(rest)
 		if !ok {
-			return nil, false
+			return CanonicalTextStreamData{}, false
 		}
 		hasFinishReason = true
 	}
@@ -665,24 +692,34 @@ func parseCanonicalTextStreamChunk(raw []byte) (map[string]any, bool) {
 		rest = rest[len(canonicalCandidateIndexZero):]
 	}
 	if !bytes.Equal(rest, canonicalTextChunkSuffix) {
-		return nil, false
+		return CanonicalTextStreamData{}, false
 	}
 
-	part := map[string]any{"text": text}
-	if dirty {
+	return CanonicalTextStreamData{
+		Text:            text,
+		FinishReason:    finishReason,
+		HasFinishReason: hasFinishReason,
+		HasIndex:        hasIndex,
+		Dirty:           dirty,
+	}, true
+}
+
+func materializeCanonicalTextStreamData(chunk CanonicalTextStreamData) map[string]any {
+	part := map[string]any{"text": chunk.Text}
+	if chunk.Dirty {
 		// 与通用 cleanPart 保持一致：移除 protobuf 空对象，但保留显式思考标记。
 		part["thought"] = false
 		part["thoughtSignature"] = ""
 	}
 	content := map[string]any{"parts": []any{part}, "role": "model"}
 	candidate := map[string]any{"content": content}
-	if hasFinishReason {
-		candidate["finishReason"] = finishReason
+	if chunk.HasFinishReason {
+		candidate["finishReason"] = chunk.FinishReason
 	}
-	if hasIndex {
+	if chunk.HasIndex {
 		candidate["index"] = float64(0)
 	}
-	return map[string]any{"candidates": []any{candidate}}, true
+	return map[string]any{"candidates": []any{candidate}}
 }
 
 // takeCanonicalFinishReason 对协议中已知枚举返回共享字符串，避免每个流式帧

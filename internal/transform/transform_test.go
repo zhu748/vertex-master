@@ -427,6 +427,27 @@ func TestContentBlockMergerSingletonNormalization(t *testing.T) {
 	}
 }
 
+func TestContentBlockMergerAddPlainTextMatchesOwnedParts(t *testing.T) {
+	plain := NewContentBlockMerger(2)
+	plain.AddPlainText("Hello ")
+	plain.AddPlainText("World")
+	plain.Add(map[string]any{"text": "thinking", "thought": true})
+	plain.AddPlainText("Done")
+
+	owned := NewContentBlockMerger(2)
+	for _, part := range []map[string]any{
+		{"text": "Hello "},
+		{"text": "World"},
+		{"text": "thinking", "thought": true},
+		{"text": "Done"},
+	} {
+		owned.AddOwned(part)
+	}
+	if got, want := plain.Result(), owned.Result(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("plain text fast path differs:\n got: %#v\nwant: %#v", got, want)
+	}
+}
+
 func BenchmarkMergeContentBlocksTextChunks(b *testing.B) {
 	parts := make([]map[string]any, 4096)
 	for index := range parts {

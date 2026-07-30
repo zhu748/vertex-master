@@ -201,6 +201,10 @@ func (c *ChatHandler) streamChatCompletions(ctx context.Context, w http.Response
 	if converter, ok := c.respConv.(transform.StreamingResponseConverter); ok {
 		streamEncoder = converter.NewStreamEventEncoder(model, requestID)
 	}
+	var textStreamEncoder transform.TextStreamEventEncoder
+	if streamEncoder != nil {
+		textStreamEncoder, _ = streamEncoder.(transform.TextStreamEventEncoder)
+	}
 	writeEvent := func(payload any) bool {
 		if sw.writeData(payload) {
 			return true
@@ -223,7 +227,23 @@ func (c *ChatHandler) streamChatCompletions(ctx context.Context, w http.Response
 			streamErrWritten = true
 			return false
 		}
-		data := ch.Data
+		if ch.HasCanonicalText && textStreamEncoder != nil {
+			output := outputFromCanonicalTextStreamData(ch.CanonicalText, prefillFilter)
+			streamOutput.Add(output)
+			first := isFirst
+			isFirst = false
+			result, ok := textStreamEncoder.EmitText(
+				output.Text,
+				output.Finish,
+				first,
+				writeEvent,
+			)
+			hasFinish = hasFinish || result.HasFinish
+			gotContent = gotContent || result.HasContent
+			return ok
+		}
+
+		data := ch.GeminiData()
 		prefillFilter.FilterGeminiChunk(data)
 		normalizedUsage, hasUsage := normalizeStreamingGeminiUsage(data, &lastCandidateTokenCount)
 		streamOutput.Add(outputFromGeminiChunkWithUsage(data, normalizedUsage, hasUsage))

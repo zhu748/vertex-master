@@ -304,6 +304,50 @@ func TestGeminiTextStreamEncoderResetsOptionalFields(t *testing.T) {
 	}
 }
 
+func TestGeminiTextStreamEncoderCanonicalMatchesCleanedMap(t *testing.T) {
+	var encoder geminiTextStreamEncoder
+	encoder.init()
+	recorder := httptest.NewRecorder()
+	sw := &sseWriter{w: recorder}
+	if !encoder.writeCanonical(sw, "done", "", "STOP", false, false) ||
+		!encoder.writeCanonical(sw, "next", "", "", true, true) {
+		t.Fatal("canonical write returned false")
+	}
+	want := sseEvent(map[string]any{"candidates": []any{map[string]any{
+		"content":      map[string]any{"parts": []any{map[string]any{"text": "done"}}, "role": "model"},
+		"finishReason": "STOP",
+	}}})
+	want += sseEvent(map[string]any{"candidates": []any{map[string]any{
+		"content": map[string]any{"parts": []any{map[string]any{
+			"text": "next", "thought": false, "thoughtSignature": "",
+		}}, "role": "model"},
+		"index": float64(0),
+	}}})
+	if got := recorder.Body.String(); got != want {
+		t.Fatalf("canonical Gemini SSE=%q, generic SSE=%q", got, want)
+	}
+}
+
+func TestGeminiTextStreamEncoderCanonicalPreservesPrefillTailPart(t *testing.T) {
+	var encoder geminiTextStreamEncoder
+	encoder.init()
+	recorder := httptest.NewRecorder()
+	sw := &sseWriter{w: recorder}
+	if !encoder.writeCanonical(sw, "", "Ali", "STOP", false, true) {
+		t.Fatal("canonical write returned false")
+	}
+	want := sseEvent(map[string]any{"candidates": []any{map[string]any{
+		"content": map[string]any{"parts": []any{
+			map[string]any{"text": "", "thought": false, "thoughtSignature": ""},
+			map[string]any{"text": "Ali"},
+		}, "role": "model"},
+		"finishReason": "STOP",
+	}}})
+	if got := recorder.Body.String(); got != want {
+		t.Fatalf("canonical Gemini prefill tail SSE=%q, generic SSE=%q", got, want)
+	}
+}
+
 func TestTypedProtocolDeltasPreserveFieldsAndHTML(t *testing.T) {
 	const text = "<b>你好</b> & ok"
 

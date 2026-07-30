@@ -485,6 +485,26 @@ func (m *ContentBlockMerger) AddOwned(part map[string]any) {
 	m.Add(part)
 }
 
+// AddPlainText 加入已经过协议验证的普通文本，不为每个流帧构造临时 part map。
+func (m *ContentBlockMerger) AddPlainText(text string) {
+	if m == nil || text == "" {
+		return
+	}
+	if m.currentCount > 0 && !m.currentThought {
+		if m.currentCount == 1 {
+			m.text.WriteString(m.currentText)
+		}
+		m.text.WriteString(text)
+		m.currentCount++
+		return
+	}
+	m.flushText()
+	m.currentPart = nil
+	m.currentText = text
+	m.currentCount = 1
+	m.currentThought = false
+}
+
 func normalizeOwnedTextPart(part map[string]any) {
 	thought := isTruthy(part["thought"])
 	for key := range part {
