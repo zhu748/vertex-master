@@ -131,6 +131,49 @@ func TestParseURIVmessKeepsSNIAndFingerprint(t *testing.T) {
 	}
 }
 
+func TestParseURIClashValidatesEncodedObject(t *testing.T) {
+	validJSON := `{"name":"demo","type":"socks5","server":"proxy.example.com","port":1080}`
+	valid := "clash://" + base64.StdEncoding.EncodeToString([]byte(validJSON))
+	out, err := ParseURI(valid)
+	if err != nil {
+		t.Fatalf("ParseURI(valid clash URI): %v", err)
+	}
+	if out["type"] != "socks5" || out["server"] != "proxy.example.com" ||
+		out["port"] != float64(1080) {
+		t.Fatalf("unexpected parsed clash proxy: %#v", out)
+	}
+
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{name: "invalid base64", raw: "clash://%%%"},
+		{
+			name: "invalid JSON",
+			raw:  "clash://" + base64.StdEncoding.EncodeToString([]byte("not-json")),
+		},
+		{
+			name: "null JSON",
+			raw:  "clash://" + base64.StdEncoding.EncodeToString([]byte("null")),
+		},
+		{
+			name: "empty object",
+			raw:  "clash://" + base64.StdEncoding.EncodeToString([]byte("{}")),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			out, err := ParseURI(test.raw)
+			if err == nil {
+				t.Fatalf("ParseURI(%q) returned success with %#v", test.raw, out)
+			}
+			if out != nil {
+				t.Fatalf("ParseURI(%q) returned data on error: %#v", test.raw, out)
+			}
+		})
+	}
+}
+
 func TestParseURIStandardProxies(t *testing.T) {
 	tests := []struct {
 		raw      string

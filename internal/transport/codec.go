@@ -34,9 +34,17 @@ func ParseURI(uri string) (map[string]any, error) {
 		return parseSimple(uri, "tuic")
 	}
 	if strings.HasPrefix(uri, "clash://") {
-		b, _ := base64x.DecodeString(uri[8:])
+		b, err := base64x.DecodeString(uri[8:])
+		if err != nil {
+			return nil, fmt.Errorf("解码 clash 节点 base64 载荷: %w", err)
+		}
 		var d map[string]any
-		_ = json.Unmarshal(b, &d)
+		if err := json.Unmarshal(b, &d); err != nil {
+			return nil, fmt.Errorf("解析 clash 节点 JSON 载荷: %w", err)
+		}
+		if len(d) == 0 {
+			return nil, fmt.Errorf("解析 clash 节点 JSON 载荷: 必须是非空对象")
+		}
 		return d, nil
 	}
 	safeURI := uri
