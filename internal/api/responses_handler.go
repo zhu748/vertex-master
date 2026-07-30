@@ -750,6 +750,9 @@ func cacheResponsesStaticJSON(value any) any {
 	default:
 		return value
 	}
+	if encoded, ok := jsonx.MarshalJSONValue(value); ok {
+		return json.RawMessage(encoded)
+	}
 	encoded, err := jsonx.Marshal(value)
 	if err == nil {
 		return json.RawMessage(encoded)

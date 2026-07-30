@@ -9,8 +9,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bsfdsagfadg/vertex/internal/jsonx"
 	"github.com/bsfdsagfadg/vertex/internal/vertex"
 )
+
+type responsesStaticJSONProbe struct {
+	calls *int
+}
+
+func (probe responsesStaticJSONProbe) MarshalJSON() ([]byte, error) {
+	(*probe.calls)++
+	return []byte(`{"custom":"<ok>"}`), nil
+}
 
 type failingStreamResponseWriter struct {
 	writes    int
@@ -971,6 +981,40 @@ func TestResponsesLifecycleReusesStaticResponseFields(t *testing.T) {
 	}
 	if _, ok := completed.Tools.(json.RawMessage); !ok {
 		t.Fatalf("cached static tools were rebuilt: %T", completed.Tools)
+	}
+}
+
+func TestCacheResponsesStaticJSONFastPathAndFallback(t *testing.T) {
+	standard := map[string]any{
+		"z": "<中文>",
+		"a": []any{float64(1), true, nil},
+	}
+	want, err := jsonx.Marshal(standard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cachedValue := cacheResponsesStaticJSON(standard)
+	cached, ok := cachedValue.(json.RawMessage)
+	if !ok {
+		t.Fatalf("standard JSON was not cached: %T", cachedValue)
+	}
+	if string(cached) != string(want) {
+		t.Fatalf("cached JSON changed wire bytes:\n got: %s\nwant: %s", cached, want)
+	}
+
+	calls := 0
+	custom := map[string]any{"probe": responsesStaticJSONProbe{calls: &calls}}
+	cached, ok = cacheResponsesStaticJSON(custom).(json.RawMessage)
+	if !ok || string(cached) != `{"probe":{"custom":"<ok>"}}` || calls != 1 {
+		t.Fatalf("custom Marshaler fallback failed: cached=%s calls=%d", cached, calls)
+	}
+
+	unsupported := map[string]any{"channel": make(chan int)}
+	if _, ok := cacheResponsesStaticJSON(unsupported).(map[string]any); !ok {
+		t.Fatal("encoding failure did not preserve the original value")
+	}
+	if _, ok := cacheResponsesStaticJSON(map[string]any{}).(map[string]any); !ok {
+		t.Fatal("empty static objects should not be encoded")
 	}
 }
 
