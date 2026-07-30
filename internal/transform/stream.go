@@ -297,8 +297,30 @@ func CanonicalJSONStringValue(value any) (string, bool) {
 	return string(canonical), ok
 }
 
+// CanonicalOAIResponseToolCall is the allocation-light representation used by
+// the non-streaming Gemini response adapter. Its field order matches the
+// encoding/json order of the legacy map representation, preserving wire bytes.
+type CanonicalOAIResponseToolCall struct {
+	Function CanonicalOAIResponseFunctionCall `json:"function"`
+	ID       string                           `json:"id"`
+	Type     string                           `json:"type"`
+}
+
+type CanonicalOAIResponseFunctionCall struct {
+	Arguments string `json:"arguments"`
+	Name      string `json:"name"`
+}
+
 // ExtractParts 从 Gemini parts 提取 (text_content, tool_calls, reasoning_content)。
 func ExtractParts(parts []any, forStream bool) (string, []any, string) {
+	return extractParts(parts, forStream, false)
+}
+
+func extractResponseParts(parts []any) (string, []any, string) {
+	return extractParts(parts, false, true)
+}
+
+func extractParts(parts []any, forStream, canonicalToolCalls bool) (string, []any, string) {
 	// 绝大多数流帧只有一个纯文本 part；先处理这一形状，避免为两个通用
 	// 累积器清零较大的内联存储。工具和图片仍按原优先级走完整路径。
 	if len(parts) == 1 {
@@ -337,12 +359,25 @@ func ExtractParts(parts []any, forStream bool) (string, []any, string) {
 				args = map[string]any{}
 			}
 			arguments, _ := jsonx.MarshalString(args)
+			id := "call_" + reqID()
+			name := toString(fc["name"])
+			if canonicalToolCalls {
+				toolCalls = append(toolCalls, CanonicalOAIResponseToolCall{
+					Function: CanonicalOAIResponseFunctionCall{
+						Arguments: arguments,
+						Name:      name,
+					},
+					ID:   id,
+					Type: "function",
+				})
+				continue
+			}
 			tc := map[string]any{
 				"index": len(toolCalls),
-				"id":    "call_" + reqID(),
+				"id":    id,
 				"type":  "function",
 				"function": map[string]any{
-					"name":      toString(fc["name"]),
+					"name":      name,
 					"arguments": canonicalJSONString(arguments),
 				},
 			}

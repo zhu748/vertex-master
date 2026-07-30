@@ -323,6 +323,50 @@ func TestGeminiJSONToOAIJSON(t *testing.T) {
 	}
 }
 
+func TestGeminiJSONToOAIJSONCanonicalToolCallPreservesWireFormat(t *testing.T) {
+	resp := map[string]any{
+		"candidates": []any{map[string]any{
+			"content": map[string]any{"parts": []any{map[string]any{
+				"functionCall": map[string]any{
+					"name": "lookup",
+					"args": map[string]any{"z": "<tag>", "a": float64(1)},
+				},
+			}}},
+		}},
+	}
+	oai := GeminiJSONToOAIJSON(resp, "gemini-test")
+	choice := oai["choices"].([]any)[0].(map[string]any)
+	message := choice["message"].(map[string]any)
+	toolCalls := message["tool_calls"].([]any)
+	if len(toolCalls) != 1 {
+		t.Fatalf("tool_calls len=%d, want 1", len(toolCalls))
+	}
+	canonical, ok := toolCalls[0].(CanonicalOAIResponseToolCall)
+	if !ok {
+		t.Fatalf("tool call type=%T, want CanonicalOAIResponseToolCall", toolCalls[0])
+	}
+
+	legacy := map[string]any{
+		"function": map[string]any{
+			"arguments": canonicalJSONString(canonical.Function.Arguments),
+			"name":      canonical.Function.Name,
+		},
+		"id":   canonical.ID,
+		"type": canonical.Type,
+	}
+	gotJSON, err := json.Marshal(canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantJSON, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotJSON) != string(wantJSON) {
+		t.Fatalf("canonical tool call changed wire JSON:\n got:  %s\n want: %s", gotJSON, wantJSON)
+	}
+}
+
 func TestMapFinishReason(t *testing.T) {
 	cases := []struct {
 		in   string

@@ -404,6 +404,17 @@ func outputFromOAI(resp map[string]any) protocolOutput {
 			out.ToolCalls = make([]protocolToolCall, 0, len(toolCalls))
 		}
 		for _, raw := range toolCalls {
+			if tc, ok := raw.(transform.CanonicalOAIResponseToolCall); ok {
+				id := tc.ID
+				if id == "" {
+					id = "call_" + reqID24()
+				}
+				out.ToolCalls = append(out.ToolCalls, protocolToolCall{
+					ID: id, Name: tc.Function.Name, Arguments: tc.Function.Arguments,
+					argumentsCanonical: true,
+				})
+				continue
+			}
 			tc, _ := raw.(map[string]any)
 			fn, _ := tc["function"].(map[string]any)
 			id := stringValue(tc["id"])
