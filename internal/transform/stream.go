@@ -397,7 +397,7 @@ func extractParts(
 				if toolCalls == nil {
 					toolCalls = make([]any, 0, countFunctionCalls(parts[partIndex:]))
 				}
-				arguments, _ := jsonx.MarshalString(args)
+				arguments := marshalToolArguments(args)
 				toolCalls = append(toolCalls, CanonicalOAIResponseToolCall{
 					Function: CanonicalOAIResponseFunctionCall{
 						Arguments: arguments,
@@ -410,7 +410,7 @@ func extractParts(
 				if toolCalls == nil {
 					toolCalls = make([]any, 0, countFunctionCalls(parts[partIndex:]))
 				}
-				arguments, _ := jsonx.MarshalString(args)
+				arguments := marshalToolArguments(args)
 				tc := map[string]any{
 					"index": len(toolCalls),
 					"id":    id,
@@ -481,6 +481,14 @@ func extractParts(
 		return textContent, nil, nil, reasoning
 	}
 	return textContent, toolCalls, canonicalToolCalls, reasoning
+}
+
+func marshalToolArguments(args any) string {
+	if arguments, ok := jsonx.MarshalJSONValueString(args); ok {
+		return arguments
+	}
+	arguments, _ := jsonx.MarshalString(args)
+	return arguments
 }
 
 func countFunctionCalls(parts []any) int {

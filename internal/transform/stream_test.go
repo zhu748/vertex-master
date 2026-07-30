@@ -4,10 +4,22 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/bsfdsagfadg/vertex/internal/jsonx"
 )
 
 var benchmarkSSELineResult string         //nolint:gochecknoglobals
 var benchmarkRealtimeChunkResult []string //nolint:gochecknoglobals
+var benchmarkExtractedToolCalls []any     //nolint:gochecknoglobals
+
+type streamArgumentsJSONProbe struct {
+	calls *int
+}
+
+func (probe streamArgumentsJSONProbe) MarshalJSON() ([]byte, error) {
+	(*probe.calls)++
+	return []byte(`{"custom":"<ok>"}`), nil
+}
 
 func BenchmarkSSELine(b *testing.B) {
 	payload := map[string]any{
@@ -60,6 +72,64 @@ func BenchmarkConvertRealtimeChunkText(b *testing.B) {
 	b.ReportAllocs()
 	for range b.N {
 		benchmarkRealtimeChunkResult = ConvertRealtimeChunk(chunk, "gemini-benchmark", "benchmark", false)
+	}
+}
+
+func BenchmarkExtractPartsToolCalls(b *testing.B) {
+	parts := make([]any, 16)
+	for index := range parts {
+		parts[index] = map[string]any{"functionCall": map[string]any{
+			"id": "call_benchmark", "name": "lookup",
+			"args": map[string]any{"query": "benchmark", "index": float64(index)},
+		}}
+	}
+	for _, test := range []struct {
+		name      string
+		forStream bool
+	}{
+		{name: "stream", forStream: true},
+		{name: "non_stream", forStream: false},
+	} {
+		b.Run(test.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for range b.N {
+				if test.forStream {
+					_, benchmarkExtractedToolCalls, _ = ExtractParts(parts, true)
+				} else {
+					_, benchmarkExtractedToolCalls, _ = extractResponseParts(parts)
+				}
+				if len(benchmarkExtractedToolCalls) != len(parts) {
+					b.Fatal("unexpected tool call count")
+				}
+			}
+		})
+	}
+}
+
+func TestMarshalToolArgumentsFastPathAndFallback(t *testing.T) {
+	for _, arguments := range []any{
+		map[string]any{
+			"z": "<中文>",
+			"a": []any{float64(1), true, nil},
+		},
+		map[string]any{"integer": 1},
+	} {
+		want, err := jsonx.MarshalString(arguments)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := marshalToolArguments(arguments); got != want {
+			t.Fatalf("tool arguments changed:\n got: %s\nwant: %s", got, want)
+		}
+	}
+
+	calls := 0
+	custom := map[string]any{"probe": streamArgumentsJSONProbe{calls: &calls}}
+	if got := marshalToolArguments(custom); got != `{"probe":{"custom":"<ok>"}}` || calls != 1 {
+		t.Fatalf("custom Marshaler fallback failed: got=%s calls=%d", got, calls)
+	}
+	if got := marshalToolArguments(map[string]any{"channel": make(chan int)}); got != "" {
+		t.Fatalf("encoding failure = %q, want empty compatibility value", got)
 	}
 }
 
