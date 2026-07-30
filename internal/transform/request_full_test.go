@@ -664,6 +664,13 @@ func TestTopKClamp(t *testing.T) {
 	if gc["topK"] != 63 {
 		t.Errorf("topK=%v, want clamp 到 63", gc["topK"])
 	}
+
+	payload["generationConfig"] = map[string]any{"topK": float64(1.5)}
+	vars = BuildVertexVariables("m", payload, config.StaticProvider(config.DefaultConfig()))
+	gc = vars["generationConfig"].(map[string]any)
+	if gc["topK"] != float64(1.5) {
+		t.Errorf("fractional topK was silently truncated: %v", gc["topK"])
+	}
 }
 
 func TestGemini36DropsDeprecatedGenerationFields(t *testing.T) {

@@ -2,6 +2,7 @@ package vertex
 
 import (
 	"encoding/json"
+	"math"
 	"strings"
 	"sync"
 	"testing"
@@ -177,6 +178,29 @@ func TestParseErrorResponse(t *testing.T) {
 	}})
 	if e2 == nil {
 		t.Error("errors 数组未解析")
+	}
+
+	invalidCode := parseErrorResponse(map[string]any{
+		"error": map[string]any{"code": float64(429.5), "message": "malformed code"},
+	})
+	if invalidCode == nil || invalidCode.Code != 500 || invalidCode.Kind != "server" {
+		t.Errorf("fractional error code should use safe default: %#v", invalidCode)
+	}
+}
+
+func TestToIntRejectsInvalidNumbers(t *testing.T) {
+	for _, value := range []any{
+		float64(429.5),
+		math.NaN(),
+		math.Inf(1),
+		float64(math.MaxInt) + 1,
+	} {
+		if got := toInt(value, 500); got != 500 {
+			t.Errorf("toInt(%v, 500)=%d, want 500", value, got)
+		}
+	}
+	if got := toInt(float64(429), 500); got != 429 {
+		t.Errorf("toInt(429, 500)=%d, want 429", got)
 	}
 }
 

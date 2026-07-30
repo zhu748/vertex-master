@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -578,6 +579,26 @@ func TestParseImportedNodesSupportsSIP008(t *testing.T) {
 	}
 	if out["type"] != "ss" || intValue(out["port"]) != 8388 {
 		t.Fatalf("unexpected imported node: %#v", out)
+	}
+}
+
+func TestImportedNodeIntegersRejectFractionsAndOverflow(t *testing.T) {
+	for _, value := range []any{
+		float32(443.5),
+		float64(443.5),
+		math.NaN(),
+		math.Inf(1),
+		float64(math.MaxInt) + 1,
+		^uint64(0),
+	} {
+		if got := intValue(value); got != 0 {
+			t.Errorf("intValue(%v)=%d, want 0", value, got)
+		}
+	}
+
+	text := `{"servers":[{"server":"1.2.3.4","server_port":8388.5,"method":"aes-128-gcm","password":"secret"}]}`
+	if imported := parseImportedNodes(text); len(imported) != 0 {
+		t.Fatalf("fractional SIP008 port was imported: %#v", imported)
 	}
 }
 

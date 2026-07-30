@@ -3,6 +3,7 @@ package vertex
 
 import (
 	"encoding/json"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -210,10 +211,18 @@ func FriendlyErrorMessage(e *VertexError) string {
 func toInt(v any, def int) int {
 	switch n := v.(type) {
 	case float64:
+		limit := float64(uint64(1) << (strconv.IntSize - 1))
+		if math.IsNaN(n) || math.IsInf(n, 0) || math.Trunc(n) != n ||
+			n < -limit || n >= limit {
+			return def
+		}
 		return int(n)
 	case int:
 		return n
 	case int64:
+		if n < int64(math.MinInt) || n > int64(math.MaxInt) {
+			return def
+		}
 		return int(n)
 	case string:
 		// 偶有字符串码，尽力转

@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net"
 	"net/url"
 	"strconv"
@@ -179,27 +180,48 @@ func intValue(v any) int {
 	case int32:
 		return int(x)
 	case int64:
+		if x < int64(math.MinInt) || x > int64(math.MaxInt) {
+			return 0
+		}
 		return int(x)
 	case uint:
+		if uint64(x) > uint64(math.MaxInt) {
+			return 0
+		}
 		return int(x)
 	case uint8:
 		return int(x)
 	case uint16:
 		return int(x)
 	case uint32:
+		if uint64(x) > uint64(math.MaxInt) {
+			return 0
+		}
 		return int(x)
 	case uint64:
+		if x > uint64(math.MaxInt) {
+			return 0
+		}
 		return int(x)
 	case float32:
-		return int(x)
+		return floatIntValue(float64(x))
 	case float64:
-		return int(x)
+		return floatIntValue(x)
 	case string:
 		n, _ := strconv.Atoi(strings.TrimSpace(x))
 		return n
 	default:
 		return 0
 	}
+}
+
+func floatIntValue(value float64) int {
+	limit := float64(uint64(1) << (strconv.IntSize - 1))
+	if math.IsNaN(value) || math.IsInf(value, 0) || math.Trunc(value) != value ||
+		value < -limit || value >= limit {
+		return 0
+	}
+	return int(value)
 }
 
 func boolValue(v any) bool {

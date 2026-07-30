@@ -168,7 +168,7 @@ func clampTopK(v any) any {
 		if n > 63 {
 			return 63
 		}
-		return int(n)
+		return n
 	case int:
 		if n > 63 {
 			return 63
