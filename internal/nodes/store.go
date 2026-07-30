@@ -2344,6 +2344,17 @@ func retainHighestKnown(nodes []scoredNode, candidate scoredNode, limit int) []s
 		}
 		return nodes
 	}
+	// Under the healthy-first ordering, a healthy heap root proves every
+	// retained node is healthy. Keep that common steady state on the simpler
+	// score-only heap path instead of rechecking recovery state at each level.
+	if !nodes[0].recovering && !candidate.recovering {
+		if !(candidate.score > nodes[0].score) {
+			return nodes
+		}
+		nodes[0] = candidate
+		siftDownKnownHealthyMinHeap(nodes, 0)
+		return nodes
+	}
 	if !knownNodeBetter(candidate, nodes[0]) {
 		return nodes
 	}
@@ -2357,6 +2368,24 @@ func knownNodeBetter(left, right scoredNode) bool {
 		return !left.recovering
 	}
 	return left.score > right.score
+}
+
+func siftDownKnownHealthyMinHeap(nodes []scoredNode, index int) {
+	for {
+		left := index*2 + 1
+		if left >= len(nodes) {
+			return
+		}
+		worst := left
+		if right := left + 1; right < len(nodes) && nodes[left].score > nodes[right].score {
+			worst = right
+		}
+		if !(nodes[index].score > nodes[worst].score) {
+			return
+		}
+		nodes[index], nodes[worst] = nodes[worst], nodes[index]
+		index = worst
+	}
 }
 
 func siftDownKnownMinHeap(nodes []scoredNode, index int) {

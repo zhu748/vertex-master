@@ -607,6 +607,80 @@ func TestRetainHighestKnownPrioritizesHealthyThenScore(t *testing.T) {
 	}
 }
 
+func TestRetainHighestKnownMatchesFullSort(t *testing.T) {
+	const candidateCount = 257
+	allHealthy := make([]scoredNode, candidateCount)
+	mixed := make([]scoredNode, candidateCount)
+	for index := range candidateCount {
+		score := float64((index*73)%candidateCount) + float64(index)/candidateCount
+		node := Node{RawURI: fmt.Sprintf("candidate-%03d", index)}
+		allHealthy[index] = scoredNode{node: node, score: score}
+		mixed[index] = scoredNode{node: node, score: score, recovering: index%3 == 0}
+	}
+
+	for name, candidates := range map[string][]scoredNode{
+		"all healthy": allHealthy,
+		"mixed":       mixed,
+	} {
+		for _, limit := range []int{1, 2, 3, 10, 80, 128, candidateCount} {
+			t.Run(fmt.Sprintf("%s/limit=%d", name, limit), func(t *testing.T) {
+				want := append([]scoredNode(nil), candidates...)
+				sort.Slice(want, func(i, j int) bool {
+					return knownNodeBetter(want[i], want[j])
+				})
+				want = want[:limit]
+
+				got := make([]scoredNode, 0, limit)
+				for _, candidate := range candidates {
+					got = retainHighestKnown(got, candidate, limit)
+				}
+				sort.Slice(got, func(i, j int) bool {
+					return knownNodeBetter(got[i], got[j])
+				})
+				for index := range want {
+					if got[index].node.RawURI != want[index].node.RawURI ||
+						got[index].score != want[index].score ||
+						got[index].recovering != want[index].recovering {
+						t.Fatalf("candidate %d = %#v, want %#v", index, got[index], want[index])
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestRetainHighestKnownPreservesNonFiniteComparisonSemantics(t *testing.T) {
+	retained := make([]scoredNode, 0, 2)
+	for _, candidate := range []scoredNode{
+		{node: Node{RawURI: "one"}, score: 1},
+		{node: Node{RawURI: "two"}, score: 2},
+		{node: Node{RawURI: "nan-candidate"}, score: math.NaN()},
+	} {
+		retained = retainHighestKnown(retained, candidate, 2)
+	}
+	for _, candidate := range retained {
+		if candidate.node.RawURI == "nan-candidate" {
+			t.Fatalf("NaN candidate unexpectedly displaced a finite score: %#v", retained)
+		}
+	}
+
+	retained = make([]scoredNode, 0, 2)
+	for _, candidate := range []scoredNode{
+		{node: Node{RawURI: "nan-root"}, score: math.NaN()},
+		{node: Node{RawURI: "two"}, score: 2},
+		{node: Node{RawURI: "three"}, score: 3},
+	} {
+		retained = retainHighestKnown(retained, candidate, 2)
+	}
+	seen := make(map[string]bool, len(retained))
+	for _, candidate := range retained {
+		seen[candidate.node.RawURI] = true
+	}
+	if !seen["nan-root"] || !seen["two"] || seen["three"] {
+		t.Fatalf("NaN heap-root comparison changed: %#v", retained)
+	}
+}
+
 func TestNodesLifecycle(t *testing.T) {
 	// Setup a temporary directory for config
 	_ = t.TempDir()
