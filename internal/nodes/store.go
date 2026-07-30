@@ -2381,13 +2381,19 @@ func siftDownScoredMinHeap(nodes []scoredNode, index int) {
 }
 
 // retainHighestKnown 保留最多 limit 个已验证节点。健康节点始终优先于恢复中
-// 节点，同一类别内再按分数选择；这样单遍扫描即可得到与原先双遍计数相同的集合。
-func retainHighestKnown(nodes []scoredNode, candidate scoredNode, limit int) []scoredNode {
+// 节点，同一类别内再按分数选择；只有候选实际进入堆时才复制 Node。
+func retainHighestKnown(
+	nodes []scoredNode,
+	node *Node,
+	score float64,
+	recovering bool,
+	limit int,
+) []scoredNode {
 	if limit <= 0 {
 		return nodes
 	}
 	if len(nodes) < limit {
-		nodes = append(nodes, candidate)
+		nodes = append(nodes, scoredNode{node: *node, score: score, recovering: recovering})
 		if len(nodes) == limit {
 			for index := len(nodes)/2 - 1; index >= 0; index-- {
 				siftDownKnownMinHeap(nodes, index)
@@ -2398,18 +2404,22 @@ func retainHighestKnown(nodes []scoredNode, candidate scoredNode, limit int) []s
 	// Under the healthy-first ordering, a healthy heap root proves every
 	// retained node is healthy. Keep that common steady state on the simpler
 	// score-only heap path instead of rechecking recovery state at each level.
-	if !nodes[0].recovering && !candidate.recovering {
-		if !(candidate.score > nodes[0].score) {
+	if !nodes[0].recovering && !recovering {
+		if !(score > nodes[0].score) {
 			return nodes
 		}
-		nodes[0] = candidate
+		nodes[0] = scoredNode{node: *node, score: score}
 		siftDownKnownHealthyMinHeap(nodes, 0)
 		return nodes
 	}
-	if !knownNodeBetter(candidate, nodes[0]) {
+	if recovering != nodes[0].recovering {
+		if recovering {
+			return nodes
+		}
+	} else if !(score > nodes[0].score) {
 		return nodes
 	}
-	nodes[0] = candidate
+	nodes[0] = scoredNode{node: *node, score: score, recovering: recovering}
 	siftDownKnownMinHeap(nodes, 0)
 	return nodes
 }
@@ -2726,7 +2736,8 @@ func SelectForParallel(k int, topK int, debugMode bool, stickyBonusEnabled bool)
 	seenUntested := 0
 	stickyPosition := 0
 	indexedHealth := len(healthByNodeIndex) == len(nodeList)
-	for nodeIndex, n := range nodeList {
+	for nodeIndex := range nodeList {
+		n := &nodeList[nodeIndex]
 		sticky := false
 		if indexedSticky {
 			sticky = stickyPosition < len(stickyIndexes) && stickyIndexes[stickyPosition] == nodeIndex
@@ -2756,7 +2767,7 @@ func SelectForParallel(k int, topK int, debugMode bool, stickyBonusEnabled bool)
 				}
 			}
 			cooldownNodes = retainEarliestCooldown(cooldownNodes, scoredNode{
-				node: n, score: float64(h.CooldownUntil), last429: h.Last429At,
+				node: *n, score: float64(h.CooldownUntil), last429: h.Last429At,
 			}, auxiliaryLimit)
 			continue
 		}
@@ -2771,7 +2782,7 @@ func SelectForParallel(k int, topK int, debugMode bool, stickyBonusEnabled bool)
 				}
 			}
 			seenUntested++
-			item := scoredNode{node: n, score: 80}
+			item := scoredNode{node: *n, score: 80}
 			if len(untested) < auxiliaryLimit {
 				untested = append(untested, item)
 			} else if auxiliaryLimit > 0 {
@@ -2814,8 +2825,7 @@ func SelectForParallel(k int, topK int, debugMode bool, stickyBonusEnabled bool)
 		if score < 1 {
 			score = 1
 		}
-		item := scoredNode{node: n, score: score, recovering: h.ConsecutiveFailures > 0}
-		known = retainHighestKnown(known, item, knownLimit)
+		known = retainHighestKnown(known, n, score, h.ConsecutiveFailures > 0, knownLimit)
 	}
 	mu.RUnlock()
 

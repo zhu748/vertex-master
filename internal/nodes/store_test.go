@@ -598,8 +598,15 @@ func TestRetainHighestKnownPrioritizesHealthyThenScore(t *testing.T) {
 		{node: Node{RawURI: "healthy-high"}, score: 2},
 	}
 	retained := make([]scoredNode, 0, 3)
-	for _, candidate := range candidates {
-		retained = retainHighestKnown(retained, candidate, 3)
+	for index := range candidates {
+		candidate := &candidates[index]
+		retained = retainHighestKnown(
+			retained,
+			&candidate.node,
+			candidate.score,
+			candidate.recovering,
+			3,
+		)
 	}
 	seen := make(map[string]bool, len(retained))
 	for _, candidate := range retained {
@@ -639,8 +646,15 @@ func TestRetainHighestKnownMatchesFullSort(t *testing.T) {
 				want = want[:limit]
 
 				got := make([]scoredNode, 0, limit)
-				for _, candidate := range candidates {
-					got = retainHighestKnown(got, candidate, limit)
+				for index := range candidates {
+					candidate := &candidates[index]
+					got = retainHighestKnown(
+						got,
+						&candidate.node,
+						candidate.score,
+						candidate.recovering,
+						limit,
+					)
 				}
 				sort.Slice(got, func(i, j int) bool {
 					return knownNodeBetter(got[i], got[j])
@@ -659,12 +673,20 @@ func TestRetainHighestKnownMatchesFullSort(t *testing.T) {
 
 func TestRetainHighestKnownPreservesNonFiniteComparisonSemantics(t *testing.T) {
 	retained := make([]scoredNode, 0, 2)
-	for _, candidate := range []scoredNode{
+	candidates := []scoredNode{
 		{node: Node{RawURI: "one"}, score: 1},
 		{node: Node{RawURI: "two"}, score: 2},
 		{node: Node{RawURI: "nan-candidate"}, score: math.NaN()},
-	} {
-		retained = retainHighestKnown(retained, candidate, 2)
+	}
+	for index := range candidates {
+		candidate := &candidates[index]
+		retained = retainHighestKnown(
+			retained,
+			&candidate.node,
+			candidate.score,
+			candidate.recovering,
+			2,
+		)
 	}
 	for _, candidate := range retained {
 		if candidate.node.RawURI == "nan-candidate" {
@@ -673,12 +695,20 @@ func TestRetainHighestKnownPreservesNonFiniteComparisonSemantics(t *testing.T) {
 	}
 
 	retained = make([]scoredNode, 0, 2)
-	for _, candidate := range []scoredNode{
+	candidates = []scoredNode{
 		{node: Node{RawURI: "nan-root"}, score: math.NaN()},
 		{node: Node{RawURI: "two"}, score: 2},
 		{node: Node{RawURI: "three"}, score: 3},
-	} {
-		retained = retainHighestKnown(retained, candidate, 2)
+	}
+	for index := range candidates {
+		candidate := &candidates[index]
+		retained = retainHighestKnown(
+			retained,
+			&candidate.node,
+			candidate.score,
+			candidate.recovering,
+			2,
+		)
 	}
 	seen := make(map[string]bool, len(retained))
 	for _, candidate := range retained {
