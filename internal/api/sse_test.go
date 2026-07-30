@@ -1002,6 +1002,23 @@ func TestCacheResponsesStaticJSONFastPathAndFallback(t *testing.T) {
 		t.Fatalf("cached JSON changed wire bytes:\n got: %s\nwant: %s", cached, want)
 	}
 
+	tool := map[string]any{
+		"type": "function", "name": "lookup",
+		"parameters": map[string]any{"type": "object"},
+	}
+	tools := make([]any, 16)
+	for index := range tools {
+		tools[index] = tool
+	}
+	want, err = jsonx.Marshal(tools)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cached, ok = cacheResponsesStaticJSON(tools).(json.RawMessage)
+	if !ok || string(cached) != string(want) {
+		t.Fatalf("cached tool array changed wire bytes:\n got: %s\nwant: %s", cached, want)
+	}
+
 	calls := 0
 	custom := map[string]any{"probe": responsesStaticJSONProbe{calls: &calls}}
 	cached, ok = cacheResponsesStaticJSON(custom).(json.RawMessage)

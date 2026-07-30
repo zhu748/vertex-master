@@ -738,6 +738,8 @@ func cacheResponsesStreamStaticFields(response *responsesResponse) {
 }
 
 func cacheResponsesStaticJSON(value any) any {
+	var encoded []byte
+	var encodedOK bool
 	switch typed := value.(type) {
 	case map[string]any:
 		if len(typed) == 0 {
@@ -747,10 +749,15 @@ func cacheResponsesStaticJSON(value any) any {
 		if len(typed) == 0 {
 			return value
 		}
+		encoded = make([]byte, 0, responsesStaticJSONArrayCapacity(len(typed)))
+		encoded, encodedOK = jsonx.AppendJSONValue(encoded, typed)
 	default:
 		return value
 	}
-	if encoded, ok := jsonx.MarshalJSONValue(value); ok {
+	if encoded == nil {
+		encoded, encodedOK = jsonx.MarshalJSONValue(value)
+	}
+	if encodedOK {
 		return json.RawMessage(encoded)
 	}
 	encoded, err := jsonx.Marshal(value)
@@ -758,6 +765,18 @@ func cacheResponsesStaticJSON(value any) any {
 		return json.RawMessage(encoded)
 	}
 	return value
+}
+
+func responsesStaticJSONArrayCapacity(length int) int {
+	const (
+		defaultCapacity = 64
+		maxCapacity     = 4 << 10
+		bytesPerItem    = 256
+	)
+	if length >= (maxCapacity-defaultCapacity)/bytesPerItem {
+		return maxCapacity
+	}
+	return defaultCapacity + length*bytesPerItem
 }
 
 func responseOutputItems(out protocolOutput) []any {
