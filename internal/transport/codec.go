@@ -150,6 +150,7 @@ func parseSimple(uri, typ string) (map[string]any, error) {
 	switch typ {
 	case "trojan":
 		out["password"] = username
+		out["udp"] = true
 	case "hysteria2":
 		out["password"] = fullUserInfo
 	case "tuic":
@@ -162,6 +163,7 @@ func parseSimple(uri, typ string) (map[string]any, error) {
 		}
 	default:
 		out["uuid"] = username
+		out["udp"] = true
 	}
 
 	sec := strings.ToLower(q.Get("security"))
@@ -207,10 +209,48 @@ func parseSimple(uri, typ string) (map[string]any, error) {
 				if serviceName := q.Get("serviceName"); serviceName != "" {
 					out["grpc-opts"] = map[string]any{"grpc-service-name": serviceName}
 				}
+			case "http":
+				if typ != "vless" {
+					return nil, fmt.Errorf("%s 节点不支持 http 传输", typ)
+				}
+				path := q.Get("path")
+				if path == "" {
+					path = "/"
+				}
+				method := q.Get("method")
+				if method == "" {
+					method = "GET"
+				}
+				httpOpts := map[string]any{
+					"method": method,
+					"path":   []string{path},
+				}
+				if host := q.Get("host"); host != "" {
+					httpOpts["headers"] = map[string][]string{"Host": {host}}
+				}
+				out["http-opts"] = httpOpts
+			case "xhttp":
+				if typ != "vless" {
+					return nil, fmt.Errorf("%s 节点不支持 xhttp 传输", typ)
+				}
+				xhttpOpts := map[string]any{}
+				if path := q.Get("path"); path != "" {
+					xhttpOpts["path"] = path
+				}
+				if host := q.Get("host"); host != "" {
+					xhttpOpts["host"] = host
+				}
+				if mode := q.Get("mode"); mode != "" {
+					xhttpOpts["mode"] = mode
+				}
+				out["xhttp-opts"] = xhttpOpts
 			}
 		}
 		if alpn := q.Get("alpn"); alpn != "" {
 			out["alpn"] = strings.Split(alpn, ",")
+		}
+		if fingerprint := q.Get("pcs"); fingerprint != "" {
+			out["fingerprint"] = fingerprint
 		}
 		if q.Get("packetAddr") == "true" {
 			out["packet-addr"] = true

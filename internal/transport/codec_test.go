@@ -96,6 +96,58 @@ func TestParseURIVlessKeepsRealityAndWS(t *testing.T) {
 	}
 }
 
+func TestParseURIVlessKeepsXHTTPAndHTTPOptions(t *testing.T) {
+	xhttpRaw := "vless://12345678-1234-1234-1234-123456789012@xhttp.example.com:443" +
+		"?security=tls&sni=edge.example.com&type=xhttp&path=%2Fapi" +
+		"&host=cdn.example.com&mode=stream-one&pcs=certificate-pin#xhttp"
+	xhttp, err := ParseURI(xhttpRaw)
+	if err != nil {
+		t.Fatalf("ParseURI(XHTTP) returned error: %v", err)
+	}
+	xhttpOpts, ok := xhttp["xhttp-opts"].(map[string]any)
+	if !ok || xhttpOpts["path"] != "/api" ||
+		xhttpOpts["host"] != "cdn.example.com" || xhttpOpts["mode"] != "stream-one" {
+		t.Fatalf("VLESS XHTTP options not preserved: %#v", xhttp)
+	}
+	if xhttp["udp"] != true || xhttp["fingerprint"] != "certificate-pin" {
+		t.Fatalf("VLESS common options not preserved: %#v", xhttp)
+	}
+	delete(xhttp, "fingerprint")
+	proxy, err := adapter.ParseProxy(xhttp)
+	if err != nil {
+		t.Fatalf("Mihomo rejected parsed VLESS XHTTP options: %v", err)
+	}
+	closeProxy(proxy)
+
+	httpRaw := "vless://12345678-1234-1234-1234-123456789012@http.example.com:443" +
+		"?security=tls&type=http&path=%2Fstream&host=edge.example.com&method=POST#http"
+	httpProxy, err := ParseURI(httpRaw)
+	if err != nil {
+		t.Fatalf("ParseURI(HTTP) returned error: %v", err)
+	}
+	httpOpts, ok := httpProxy["http-opts"].(map[string]any)
+	if !ok || httpOpts["method"] != "POST" {
+		t.Fatalf("VLESS HTTP options not preserved: %#v", httpProxy)
+	}
+	paths, pathsOK := httpOpts["path"].([]string)
+	headers, headersOK := httpOpts["headers"].(map[string][]string)
+	if !pathsOK || len(paths) != 1 || paths[0] != "/stream" ||
+		!headersOK || len(headers["Host"]) != 1 || headers["Host"][0] != "edge.example.com" {
+		t.Fatalf("VLESS HTTP path or headers not preserved: %#v", httpOpts)
+	}
+	proxy, err = adapter.ParseProxy(httpProxy)
+	if err != nil {
+		t.Fatalf("Mihomo rejected parsed VLESS HTTP options: %v", err)
+	}
+	closeProxy(proxy)
+
+	if out, err := ParseURI(
+		"trojan://secret@trojan.example.com:443?type=xhttp&path=%2Fapi",
+	); err == nil {
+		t.Fatalf("unsupported Trojan XHTTP returned success with %#v", out)
+	}
+}
+
 func TestParseURIHy2KeepsPortRange(t *testing.T) {
 	raw := "hy2://secret@203.10.99.51:20000?sni=www.bing.com&insecure=1&ports=20000-55000#demo"
 
