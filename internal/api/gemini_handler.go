@@ -182,17 +182,21 @@ func (g *GeminiHandler) handleGeminiStreamGenerate(w http.ResponseWriter, r *htt
 	if streamErrWritten {
 		return
 	}
-	if tail := prefillFilter.Finalize(); tail != "" {
-		tailChunk := map[string]any{"candidates": []any{map[string]any{
-			"index": 0,
-			"content": map[string]any{
-				"role": "model", "parts": []any{map[string]any{"text": tail}},
-			},
-		}}}
+	if tails := prefillFilter.FinalizeGemini(); len(tails) > 0 {
+		candidates := make([]any, 0, len(tails))
+		for _, tail := range tails {
+			candidates = append(candidates, map[string]any{
+				"index": tail.Index,
+				"content": map[string]any{
+					"role": "model", "parts": []any{map[string]any{"text": tail.Text}},
+				},
+			})
+		}
+		tailChunk := map[string]any{"candidates": candidates}
 		if !textStreamEncoder.writeData(sw, tailChunk) {
 			return
 		}
-		streamOutput.AddText(tail)
+		streamOutput.Add(outputFromGeminiChunk(tailChunk))
 	}
 	if !gotChunk {
 		_ = sw.writeData(map[string]any{

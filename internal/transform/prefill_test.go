@@ -217,6 +217,26 @@ func TestAssistantPrefillEchoRemovalForNativeGemini(t *testing.T) {
 	}
 }
 
+func TestAssistantPrefillEchoRemovalForEveryNativeGeminiCandidate(t *testing.T) {
+	response := map[string]any{"candidates": []any{
+		prefillTestCandidate(0, "ABC first", "STOP"),
+		prefillTestCandidate(1, "ABC second", "STOP"),
+		prefillTestCandidate(2, "independent", "STOP"),
+	}}
+
+	StripAssistantPrefillFromGemini(response, "ABC")
+
+	if got := prefillCandidateText(response, 0); got != " first" {
+		t.Fatalf("首个候选应移除重复前缀，got %q", got)
+	}
+	if got := prefillCandidateText(response, 1); got != " second" {
+		t.Fatalf("后续候选也应移除重复前缀，got %q", got)
+	}
+	if got := prefillCandidateText(response, 2); got != "independent" {
+		t.Fatalf("未重复前缀的候选不应改变，got %q", got)
+	}
+}
+
 func TestAssistantPrefillStreamFilterAcrossChunks(t *testing.T) {
 	filter := NewAssistantPrefillStreamFilter("Alice:")
 	first := prefillTestChunk("Ali", FinishReasonUnspecified)
@@ -232,6 +252,50 @@ func TestAssistantPrefillStreamFilterAcrossChunks(t *testing.T) {
 	}
 	if !filter.SawText() {
 		t.Fatal("过滤器应记录上游确实产生过文本")
+	}
+}
+
+func TestAssistantPrefillStreamFilterSeparatesCandidateState(t *testing.T) {
+	filter := NewAssistantPrefillStreamFilter("ABC")
+	first := map[string]any{"candidates": []any{
+		prefillTestCandidate(0, "A", FinishReasonUnspecified),
+		prefillTestCandidate(1, "AB", FinishReasonUnspecified),
+	}}
+	filter.FilterGeminiChunk(first)
+	if got := prefillCandidateText(first, 0); got != "" {
+		t.Fatalf("候选 0 的部分前缀应暂存，got %q", got)
+	}
+	if got := prefillCandidateText(first, 1); got != "" {
+		t.Fatalf("候选 1 的部分前缀应独立暂存，got %q", got)
+	}
+
+	// 上游可能改变候选在数组内的顺序，状态必须跟随 candidate.index。
+	second := map[string]any{"candidates": []any{
+		prefillTestCandidate(1, "C second", "STOP"),
+		prefillTestCandidate(0, "BC first", "STOP"),
+	}}
+	filter.FilterGeminiChunk(second)
+	if got := prefillCandidateText(second, 0); got != " second" {
+		t.Fatalf("候选 1 的跨块前缀应被移除，got %q", got)
+	}
+	if got := prefillCandidateText(second, 1); got != " first" {
+		t.Fatalf("候选 0 的跨块前缀应被移除，got %q", got)
+	}
+}
+
+func TestAssistantPrefillNativeFinalizeReleasesEveryCandidate(t *testing.T) {
+	response := map[string]any{"candidates": []any{
+		prefillTestCandidate(0, "A", FinishReasonUnspecified),
+		prefillTestCandidate(1, "AB", FinishReasonUnspecified),
+	}}
+
+	StripAssistantPrefillFromGemini(response, "ABC")
+
+	if got := prefillCandidateText(response, 0); got != "A" {
+		t.Fatalf("流无结束帧时应释放候选 0 的部分匹配，got %q", got)
+	}
+	if got := prefillCandidateText(response, 1); got != "AB" {
+		t.Fatalf("流无结束帧时应释放候选 1 的部分匹配，got %q", got)
 	}
 }
 
@@ -311,14 +375,29 @@ func BenchmarkAssistantPrefillStreamFilterSingleByteChunks(b *testing.B) {
 }
 
 func prefillTestChunk(text, finish string) map[string]any {
-	return map[string]any{"candidates": []any{map[string]any{
+	return map[string]any{"candidates": []any{prefillTestCandidate(0, text, finish)}}
+}
+
+func prefillTestCandidate(index int, text, finish string) map[string]any {
+	return map[string]any{
+		"index":        index,
 		"content":      map[string]any{"role": "model", "parts": []any{map[string]any{"text": text}}},
 		"finishReason": finish,
-	}}}
+	}
 }
 
 func prefillTestText(chunk map[string]any) string {
 	parts := candidateParts(firstCandidate(chunk))
 	text, _, _ := ExtractParts(parts, true)
+	return text
+}
+
+func prefillCandidateText(chunk map[string]any, position int) string {
+	candidates, _ := chunk["candidates"].([]any)
+	if position < 0 || position >= len(candidates) {
+		return ""
+	}
+	candidate, _ := candidates[position].(map[string]any)
+	text, _, _ := ExtractParts(candidateParts(candidate), true)
 	return text
 }

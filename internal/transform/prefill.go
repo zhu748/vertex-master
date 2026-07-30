@@ -265,8 +265,10 @@ func StripAssistantPrefillFromGemini(response map[string]any, prefill string) {
 	}
 	filter := NewAssistantPrefillStreamFilter(prefill)
 	filter.FilterGeminiChunk(response)
-	if tail := filter.Finalize(); tail != "" {
-		appendOrdinaryText(firstCandidate(response), tail)
+	for _, tail := range filter.FinalizeGemini() {
+		if candidate := geminiCandidateByFilterIndex(response, tail.Index); candidate != nil {
+			appendOrdinaryText(candidate, tail.Text)
+		}
 	}
 }
 
@@ -274,10 +276,22 @@ func StripAssistantPrefillFromGemini(response map[string]any, prefill string) {
 // several upstream chunks. It buffers only while output is still an exact
 // prefix candidate, then releases text immediately once a mismatch is known.
 type AssistantPrefillStreamFilter struct {
-	prefill string
+	prefill        string
+	candidates     map[int]*assistantPrefillCandidateState
+	candidateOrder []int
+	sawText        bool
+}
+
+type assistantPrefillCandidateState struct {
 	matched int
 	decided bool
-	sawText bool
+}
+
+// GeminiPrefillTail identifies an ambiguous partial prefix that must be
+// released when a native Gemini stream closes without a finish frame.
+type GeminiPrefillTail struct {
+	Index int
+	Text  string
 }
 
 func NewAssistantPrefillStreamFilter(prefill string) *AssistantPrefillStreamFilter {
@@ -285,19 +299,28 @@ func NewAssistantPrefillStreamFilter(prefill string) *AssistantPrefillStreamFilt
 }
 
 func (f *AssistantPrefillStreamFilter) filterText(text string, final bool) string {
+	return f.filterCandidateText(0, text, final)
+}
+
+func (f *AssistantPrefillStreamFilter) filterCandidateText(candidateIndex int, text string, final bool) string {
 	if text != "" {
 		f.sawText = true
 	}
-	if f.decided || f.prefill == "" {
+	if f.prefill == "" {
 		return text
 	}
 
-	previouslyMatched := f.matched
+	state := f.candidateState(candidateIndex)
+	if state.decided {
+		return text
+	}
+
+	previouslyMatched := state.matched
 	remaining := f.prefill[previouslyMatched:]
 	matchedNow := commonPrefixBytes(text, remaining)
 	if matchedNow == len(remaining) {
-		f.matched += matchedNow
-		f.decided = true
+		state.matched += matchedNow
+		state.decided = true
 		return text[matchedNow:]
 	}
 	if matchedNow < len(text) {
@@ -307,20 +330,33 @@ func (f *AssistantPrefillStreamFilter) filterText(text string, final bool) strin
 		if previouslyMatched > 0 {
 			out = f.prefill[:previouslyMatched] + text
 		}
-		f.matched = 0
-		f.decided = true
+		state.matched = 0
+		state.decided = true
 		return out
 	}
 
 	// 当前 chunk 全部匹配，但完整前缀尚未结束。
-	f.matched += matchedNow
+	state.matched += matchedNow
 	if !final {
 		return ""
 	}
-	out := f.prefill[:f.matched]
-	f.matched = 0
-	f.decided = true
+	out := f.prefill[:state.matched]
+	state.matched = 0
+	state.decided = true
 	return out
+}
+
+func (f *AssistantPrefillStreamFilter) candidateState(index int) *assistantPrefillCandidateState {
+	if f.candidates == nil {
+		f.candidates = make(map[int]*assistantPrefillCandidateState)
+	}
+	if state := f.candidates[index]; state != nil {
+		return state
+	}
+	state := &assistantPrefillCandidateState{}
+	f.candidates[index] = state
+	f.candidateOrder = append(f.candidateOrder, index)
+	return state
 }
 
 func commonPrefixBytes(left, right string) int {
@@ -339,25 +375,62 @@ func (f *AssistantPrefillStreamFilter) FilterGeminiChunk(chunk map[string]any) {
 	if f == nil || f.prefill == "" {
 		return
 	}
-	candidate := firstCandidate(chunk)
-	content, _ := candidate["content"].(map[string]any)
-	parts, _ := content["parts"].([]any)
-	for _, rawPart := range parts {
-		part, ok := rawPart.(map[string]any)
-		if !ok || isTruthy(part["thought"]) {
+	candidates, _ := chunk["candidates"].([]any)
+	for position, rawCandidate := range candidates {
+		candidate, ok := rawCandidate.(map[string]any)
+		if !ok {
 			continue
 		}
-		if text, ok := part["text"].(string); ok && text != "" {
-			part["text"] = f.filterText(text, false)
+		candidateIndex := geminiCandidateFilterIndex(candidate, position)
+		content, _ := candidate["content"].(map[string]any)
+		parts, _ := content["parts"].([]any)
+		for _, rawPart := range parts {
+			part, ok := rawPart.(map[string]any)
+			if !ok || isTruthy(part["thought"]) {
+				continue
+			}
+			if text, ok := part["text"].(string); ok && text != "" {
+				part["text"] = f.filterCandidateText(candidateIndex, text, false)
+			}
 		}
-	}
 
-	finish, _ := candidate["finishReason"].(string)
-	if finish != "" && finish != FinishReasonUnspecified {
-		if tail := f.filterText("", true); tail != "" {
-			appendOrdinaryText(candidate, tail)
+		finish, _ := candidate["finishReason"].(string)
+		if finish != "" && finish != FinishReasonUnspecified {
+			if tail := f.filterCandidateText(candidateIndex, "", true); tail != "" {
+				appendOrdinaryText(candidate, tail)
+			}
 		}
 	}
+}
+
+func geminiCandidateFilterIndex(candidate map[string]any, fallback int) int {
+	const maximumCandidateIndex = 1 << 30
+	switch index := candidate["index"].(type) {
+	case int:
+		if index >= 0 && index <= maximumCandidateIndex {
+			return index
+		}
+	case int64:
+		if index >= 0 && index <= maximumCandidateIndex {
+			return int(index)
+		}
+	case float64:
+		if index >= 0 && index <= maximumCandidateIndex && index == float64(int(index)) {
+			return int(index)
+		}
+	}
+	return fallback
+}
+
+func geminiCandidateByFilterIndex(response map[string]any, wanted int) map[string]any {
+	candidates, _ := response["candidates"].([]any)
+	for position, rawCandidate := range candidates {
+		candidate, _ := rawCandidate.(map[string]any)
+		if candidate != nil && geminiCandidateFilterIndex(candidate, position) == wanted {
+			return candidate
+		}
+	}
+	return nil
 }
 
 func appendOrdinaryText(candidate map[string]any, text string) {
@@ -380,6 +453,21 @@ func (f *AssistantPrefillStreamFilter) Finalize() string {
 		return ""
 	}
 	return f.filterText("", true)
+}
+
+// FinalizeGemini releases every candidate's still-ambiguous partial prefix.
+// The result follows first-seen order so native stream output is deterministic.
+func (f *AssistantPrefillStreamFilter) FinalizeGemini() []GeminiPrefillTail {
+	if f == nil || f.prefill == "" {
+		return nil
+	}
+	var tails []GeminiPrefillTail
+	for _, index := range f.candidateOrder {
+		if text := f.filterCandidateText(index, "", true); text != "" {
+			tails = append(tails, GeminiPrefillTail{Index: index, Text: text})
+		}
+	}
+	return tails
 }
 
 func (f *AssistantPrefillStreamFilter) SawText() bool {
