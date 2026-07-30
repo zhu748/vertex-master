@@ -1,6 +1,7 @@
 package transform
 
 import (
+	"math"
 	"strings"
 	"time"
 )
@@ -225,11 +226,11 @@ func NormalizeUsageForCandidate(meta, candidate map[string]any) NormalizedUsage 
 	}
 	thoughts := usageCount(meta, "thoughtsTokenCount", "thoughts_token_count")
 
-	prompt := promptBase + toolPrompt
-	completion := candidateTokens + thoughts
+	prompt := addUsageCounts(promptBase, toolPrompt)
+	completion := addUsageCounts(candidateTokens, thoughts)
 	total := usageCount(meta, "totalTokenCount", "total_token_count", "total_tokens")
 	if total == 0 {
-		total = prompt + completion
+		total = addUsageCounts(prompt, completion)
 	} else {
 		// 有些预览模型只给 total + 单侧计数。用精确总数反推缺失侧，避免
 		// RikkaHub 只看到 total_tokens 却把输入/输出显示为 0/0。
@@ -349,8 +350,19 @@ func sumUsageDetails(details []any) int {
 	total := 0
 	for _, raw := range details {
 		if detail, ok := raw.(map[string]any); ok {
-			total += usageDetailCount(detail)
+			count := usageDetailCount(detail)
+			if total > math.MaxInt-count {
+				return 0
+			}
+			total += count
 		}
 	}
 	return total
+}
+
+func addUsageCounts(left, right int) int {
+	if left < 0 || right < 0 || left > math.MaxInt-right {
+		return 0
+	}
+	return left + right
 }

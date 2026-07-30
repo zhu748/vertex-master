@@ -876,6 +876,46 @@ func TestConvertUsage_DetailOnlyAndStringCounts(t *testing.T) {
 	}
 }
 
+func TestNormalizeUsageRejectsInvalidAndOverflowingCounts(t *testing.T) {
+	for _, value := range []any{
+		float64(1.5),
+		float64(-1),
+		math.NaN(),
+		math.Inf(1),
+		math.MaxFloat64,
+		float64(math.MaxInt) + 1,
+		int64(-1),
+		"-1",
+	} {
+		usage := NormalizeUsageForCandidate(
+			map[string]any{"promptTokenCount": value},
+			nil,
+		)
+		if usage.PromptTokens != 0 || usage.TotalTokens != 0 {
+			t.Errorf("invalid count %v produced usage %+v", value, usage)
+		}
+	}
+
+	usage := NormalizeUsageForCandidate(map[string]any{
+		"promptTokenCount":        math.MaxInt,
+		"toolUsePromptTokenCount": 1,
+	}, nil)
+	if usage.PromptTokens != 0 || usage.TotalTokens != 0 {
+		t.Fatalf("overflowing usage was not discarded: %+v", usage)
+	}
+
+	usage = NormalizeUsageForCandidate(map[string]any{
+		"promptTokensDetails": []any{
+			map[string]any{"tokenCount": math.MaxInt},
+			map[string]any{"tokenCount": 1},
+			map[string]any{"tokenCount": 5},
+		},
+	}, nil)
+	if usage.PromptTokens != 0 || usage.TotalTokens != 0 {
+		t.Fatalf("overflowing usage details were not discarded: %+v", usage)
+	}
+}
+
 func TestConvertUsage_TotalAndCandidateFallback(t *testing.T) {
 	usage := ConvertUsageForCandidate(
 		map[string]any{"totalTokenCount": float64(84)},

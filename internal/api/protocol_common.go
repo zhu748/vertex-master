@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"math"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -106,7 +107,7 @@ func normalizeProtocolUsage(out protocolOutput) protocolOutput {
 		out.Output = out.Total - out.Input
 	}
 	if out.Total == 0 && out.Input > 0 && out.Output > 0 {
-		out.Total = out.Input + out.Output
+		out.Total = addProtocolCounts(out.Input, out.Output)
 	}
 	return out
 }
@@ -421,7 +422,7 @@ func outputFromOAI(resp map[string]any) protocolOutput {
 		}
 	}
 	if out.Total == 0 && out.Input > 0 && out.Output > 0 {
-		out.Total = out.Input + out.Output
+		out.Total = addProtocolCounts(out.Input, out.Output)
 	}
 	return out
 }
@@ -500,7 +501,7 @@ func outputFromGeminiChunkWithUsage(
 		out.ReasoningTokens = normalizedUsage.ReasoningTokens
 	}
 	if out.Total == 0 && out.Input > 0 && out.Output > 0 {
-		out.Total = out.Input + out.Output
+		out.Total = addProtocolCounts(out.Input, out.Output)
 	}
 	return out
 }
@@ -527,22 +528,41 @@ func protocolBoolValue(v any) bool {
 }
 
 func protocolIntValue(v any) int {
+	var count int
 	switch n := v.(type) {
 	case int:
-		return n
+		count = n
 	case int64:
-		return int(n)
+		if n < 0 || uint64(n) > uint64(math.MaxInt) {
+			return 0
+		}
+		count = int(n)
 	case float64:
-		return int(n)
+		if math.IsNaN(n) || math.IsInf(n, 0) || n < 0 || math.Trunc(n) != n ||
+			n >= float64(uint64(1)<<(strconv.IntSize-1)) {
+			return 0
+		}
+		count = int(n)
 	case string:
 		parsed, err := strconv.Atoi(strings.TrimSpace(n))
-		if err == nil {
-			return parsed
+		if err != nil {
+			return 0
 		}
-		return 0
+		count = parsed
 	default:
 		return 0
 	}
+	if count < 0 {
+		return 0
+	}
+	return count
+}
+
+func addProtocolCounts(left, right int) int {
+	if left < 0 || right < 0 || left > math.MaxInt-right {
+		return 0
+	}
+	return left + right
 }
 
 func jsonString(v any) string {

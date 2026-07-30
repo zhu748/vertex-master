@@ -3,6 +3,7 @@ package transform
 import (
 	cryptorand "crypto/rand"
 	"encoding/hex"
+	"math"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -418,22 +419,34 @@ func firstNonEmpty(vals ...any) any {
 	return ""
 }
 
-// numOf 把任意 JSON 数字（float64/int）转 int，非数字返回 0。
+// numOf 把非负、有限且可表示的 JSON 整数转 int，其他值返回 0。
 func numOf(v any) int {
+	var count int
 	switch n := v.(type) {
 	case float64:
-		return int(n)
+		if math.IsNaN(n) || math.IsInf(n, 0) || n < 0 || math.Trunc(n) != n ||
+			n >= float64(uint64(1)<<(strconv.IntSize-1)) {
+			return 0
+		}
+		count = int(n)
 	case int:
-		return n
+		count = n
 	case int64:
-		return int(n)
+		if n < 0 || uint64(n) > uint64(math.MaxInt) {
+			return 0
+		}
+		count = int(n)
 	case string:
 		parsed, err := strconv.Atoi(strings.TrimSpace(n))
-		if err == nil {
-			return parsed
+		if err != nil {
+			return 0
 		}
-		return 0
+		count = parsed
 	default:
 		return 0
 	}
+	if count < 0 {
+		return 0
+	}
+	return count
 }

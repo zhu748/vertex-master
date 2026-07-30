@@ -275,6 +275,7 @@ func TestTokenCountValueRejectsNonFiniteAndOutOfRangeNumbers(t *testing.T) {
 		math.Inf(1),
 		math.Inf(-1),
 		math.MaxFloat64,
+		float64(math.MaxInt) + 1,
 		float64(-1),
 	} {
 		if count, ok := tokenCountValue(value); ok || count != 0 {

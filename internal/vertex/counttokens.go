@@ -402,9 +402,8 @@ func tokenCountValue(v any) (int, bool) {
 	var count int
 	switch n := v.(type) {
 	case float64:
-		maximumInt := int(^uint(0) >> 1)
-		if math.IsNaN(n) || math.IsInf(n, 0) || n < 0 ||
-			n > float64(maximumInt) || math.Trunc(n) != n {
+		if math.IsNaN(n) || math.IsInf(n, 0) || n < 0 || math.Trunc(n) != n ||
+			n >= float64(uint64(1)<<(strconv.IntSize-1)) {
 			return 0, false
 		}
 		count = int(n)

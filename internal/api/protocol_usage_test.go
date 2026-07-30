@@ -2,9 +2,12 @@ package api
 
 import (
 	"encoding/json"
+	"math"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/bsfdsagfadg/vertex/internal/transform"
 )
 
 func TestOutputFromGeminiChunkUsageOnly(t *testing.T) {
@@ -34,6 +37,50 @@ func TestOutputFromGeminiChunkUsesRealCandidateCountWithoutUsage(t *testing.T) {
 	})
 	if out.Input != 0 || out.Output != 8 || out.Total != 0 {
 		t.Fatalf("candidate tokenCount 应只作为真实输出统计，不能估算输入或总量: %+v", out)
+	}
+}
+
+func TestProtocolIntValueRejectsInvalidUsageCounts(t *testing.T) {
+	for _, value := range []any{
+		float64(1.5),
+		float64(-1),
+		math.NaN(),
+		math.Inf(1),
+		math.MaxFloat64,
+		float64(math.MaxInt) + 1,
+		int64(-1),
+		"-1",
+	} {
+		if got := protocolIntValue(value); got != 0 {
+			t.Errorf("protocolIntValue(%v)=%d, want 0", value, got)
+		}
+	}
+
+	for value, want := range map[any]int{
+		42:          42,
+		int64(42):   42,
+		float64(42): 42,
+		" 42 ":      42,
+	} {
+		if got := protocolIntValue(value); got != want {
+			t.Errorf("protocolIntValue(%v)=%d, want %d", value, got, want)
+		}
+	}
+}
+
+func TestNormalizeProtocolUsageDoesNotOverflow(t *testing.T) {
+	out := normalizeProtocolUsage(protocolOutput{Input: math.MaxInt, Output: 1})
+	if out.Total != 0 {
+		t.Fatalf("overflowing usage total=%d, want 0", out.Total)
+	}
+
+	out = outputFromGeminiChunkWithUsage(
+		map[string]any{},
+		transform.NormalizedUsage{PromptTokens: math.MaxInt, CompletionTokens: 1},
+		true,
+	)
+	if out.Total != 0 {
+		t.Fatalf("overflowing Gemini usage total=%d, want 0", out.Total)
 	}
 }
 
