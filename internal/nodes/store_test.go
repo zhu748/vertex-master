@@ -1065,6 +1065,72 @@ func TestSelectForParallelAboveInlineCandidateCapacity(t *testing.T) {
 	}
 }
 
+func TestSelectForParallelStickyMembershipPaths(t *testing.T) {
+	tests := []struct {
+		name        string
+		lowCount    int
+		targetIndex int
+		stale       bool
+	}{
+		{name: "inline indexes", lowCount: 127, targetIndex: 128},
+		{name: "stale index fallback", lowCount: 126, targetIndex: 127, stale: true},
+		{name: "dense map fallback", lowCount: 128, targetIndex: 129, stale: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			resetState()
+			const nodeCount = 160
+			now := time.Now().Unix()
+			list := make([]Node, nodeCount)
+			health := make(map[string]*NodeHealth, nodeCount)
+			sticky := NewStickyNodePool()
+			for index := range list {
+				uri := fmt.Sprintf("sticky-index-%d", index)
+				list[index] = Node{RawURI: uri, Name: uri}
+				health[uri] = &NodeHealth{LastSuccessAt: now}
+				switch {
+				case index == 0:
+					health[uri].SuccessCount = 10
+				case index <= test.lowCount:
+					health[uri].FailCount = 10
+					sticky.Add(uri)
+				case index == test.targetIndex:
+					sticky.Add(uri)
+				}
+			}
+			if test.stale {
+				sticky.Add("stale-sticky-index")
+			}
+
+			mu.Lock()
+			previousSticky := globalStickyPool
+			nodeList, healthMap, loaded = list, health, true
+			rebuildNodeIndexUnsafe()
+			globalStickyPool = sticky
+			mu.Unlock()
+			defer func() {
+				mu.Lock()
+				globalStickyPool = previousSticky
+				mu.Unlock()
+				resetState()
+			}()
+
+			plain := SelectForParallel(1, 1, false, false)
+			if len(plain) != 1 || plain[0].RawURI != list[0].RawURI {
+				t.Fatalf("selection without sticky bonus=%#v, want %q", plain, list[0].RawURI)
+			}
+			boosted := SelectForParallel(1, 1, false, true)
+			if len(boosted) != 1 || boosted[0].RawURI != list[test.targetIndex].RawURI {
+				t.Fatalf(
+					"sticky selection=%#v, want %q",
+					boosted,
+					list[test.targetIndex].RawURI,
+				)
+			}
+		})
+	}
+}
+
 func TestHealthCountersDecayAtMutation(t *testing.T) {
 	resetState()
 	defer resetState()

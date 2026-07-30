@@ -2585,6 +2585,31 @@ func SelectForParallel(k int, topK int, debugMode bool, stickyBonusEnabled bool)
 	now := time.Now().Unix()
 
 	lockLoadedForRead()
+	// Sticky membership changes much less often than request selection. Resolve
+	// sparse immutable URI snapshots to sorted node indexes once, then consume
+	// them alongside the nodeList scan. Dense snapshots retain direct map
+	// lookups to avoid sorting or allocating an index slice per request.
+	const inlineStickyIndexLimit = 128
+	var inlineStickyIndexes [inlineStickyIndexLimit]int
+	var stickyIndexes []int
+	indexedSticky := len(stickyNodes) > 0 && len(stickyNodes) <= len(inlineStickyIndexes)
+	if indexedSticky {
+		stickyIndexes = inlineStickyIndexes[:0:len(stickyNodes)]
+		for uri := range stickyNodes {
+			index, exists := nodeIndexByURI[uri]
+			if !exists || index < 0 || index >= len(nodeList) || nodeList[index].RawURI != uri {
+				// The read index can briefly be stale after an external list
+				// mutation. Fall back to URI membership for exact semantics.
+				indexedSticky = false
+				stickyIndexes = nil
+				break
+			}
+			stickyIndexes = append(stickyIndexes, index)
+		}
+		if indexedSticky {
+			slices.Sort(stickyIndexes)
+		}
+	}
 	// 默认 topK=80 是请求热路径。单遍扫描用固定容量堆同时保留最高分
 	// 已验证节点、少量探索节点和最早冷却节点，避免为精确预分配先扫描一次全池。
 	const inlineScoredNodeLimit = 80
@@ -2598,7 +2623,17 @@ func SelectForParallel(k int, topK int, debugMode bool, stickyBonusEnabled bool)
 	var untested []scoredNode
 	var cooldownNodes []scoredNode
 	seenUntested := 0
-	for _, n := range nodeList {
+	stickyPosition := 0
+	for nodeIndex, n := range nodeList {
+		sticky := false
+		if indexedSticky {
+			sticky = stickyPosition < len(stickyIndexes) && stickyIndexes[stickyPosition] == nodeIndex
+			if sticky {
+				stickyPosition++
+			}
+		} else if len(stickyNodes) > 0 {
+			_, sticky = stickyNodes[n.RawURI]
+		}
 		if n.Disabled {
 			continue
 		}
@@ -2657,7 +2692,7 @@ func SelectForParallel(k int, topK int, debugMode bool, stickyBonusEnabled bool)
 				}
 			}
 		}
-		if _, sticky := stickyNodes[n.RawURI]; sticky {
+		if sticky {
 			score += 40
 		}
 		if known == nil {
