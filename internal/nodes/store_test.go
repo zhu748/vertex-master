@@ -59,6 +59,7 @@ func resetState() {
 	defer mu.Unlock()
 	nodeList = nil
 	nodeIndexByURI = make(map[string]int)
+	healthByNodeIndex = nil
 	healthMap = make(map[string]*NodeHealth)
 	subscriptionSources = make(map[string]map[int64]bool)
 	loaded = false
@@ -113,6 +114,7 @@ func BenchmarkSelectForParallelLargePool(b *testing.B) {
 	b.Cleanup(func() {
 		mu.Lock()
 		nodeList, nodeIndexByURI, healthMap, loaded = previousNodes, previousIndex, previousHealth, previousLoaded
+		rebuildNodeHealthIndexUnsafe()
 		globalStickyPool = previousSticky
 		mu.Unlock()
 	})
@@ -150,6 +152,7 @@ func BenchmarkRecordSelectionLargePool(b *testing.B) {
 	b.Cleanup(func() {
 		mu.Lock()
 		nodeList, nodeIndexByURI, healthMap, loaded = previousNodes, previousIndex, previousHealth, previousLoaded
+		rebuildNodeHealthIndexUnsafe()
 		mu.Unlock()
 	})
 
@@ -182,6 +185,7 @@ func BenchmarkEnableNodeLargePool(b *testing.B) {
 		mu.Lock()
 		nodeList, nodeIndexByURI, healthMap, loaded =
 			previousNodes, previousIndex, previousHealth, previousLoaded
+		rebuildNodeHealthIndexUnsafe()
 		mu.Unlock()
 	})
 
@@ -217,6 +221,7 @@ func BenchmarkPruneHealthLargePool(b *testing.B) {
 	b.Cleanup(func() {
 		mu.Lock()
 		nodeList, nodeIndexByURI, healthMap, loaded = previousNodes, previousIndex, previousHealth, previousLoaded
+		rebuildNodeHealthIndexUnsafe()
 		mu.Unlock()
 	})
 
@@ -254,6 +259,7 @@ func BenchmarkSelectNodesForHealthCheckLargePool(b *testing.B) {
 	b.Cleanup(func() {
 		mu.Lock()
 		nodeList, nodeIndexByURI, healthMap, loaded = previousNodes, previousIndex, previousHealth, previousLoaded
+		rebuildNodeHealthIndexUnsafe()
 		mu.Unlock()
 	})
 
@@ -286,6 +292,7 @@ func BenchmarkLoadNodePoolSnapshotLargePool(b *testing.B) {
 	b.Cleanup(func() {
 		mu.Lock()
 		nodeList, nodeIndexByURI, healthMap, loaded = previousNodes, previousIndex, previousHealth, previousLoaded
+		rebuildNodeHealthIndexUnsafe()
 		mu.Unlock()
 	})
 
@@ -340,6 +347,7 @@ func BenchmarkSortNodesLargePoolAlreadySorted(b *testing.B) {
 		mu.Lock()
 		nodeList, nodeIndexByURI, healthMap, loaded =
 			previousNodes, previousIndex, previousHealth, previousLoaded
+		rebuildNodeHealthIndexUnsafe()
 		mu.Unlock()
 	})
 
@@ -679,6 +687,57 @@ func TestRetainHighestKnownPreservesNonFiniteComparisonSemantics(t *testing.T) {
 	if !seen["nan-root"] || !seen["two"] || seen["three"] {
 		t.Fatalf("NaN heap-root comparison changed: %#v", retained)
 	}
+}
+
+func TestHealthByNodeIndexTracksNodeAndHealthMutations(t *testing.T) {
+	resetState()
+	defer resetState()
+
+	assertIndex := func() {
+		t.Helper()
+		mu.RLock()
+		defer mu.RUnlock()
+		if len(healthByNodeIndex) != len(nodeList) {
+			t.Fatalf("health index length=%d, node count=%d", len(healthByNodeIndex), len(nodeList))
+		}
+		for index, node := range nodeList {
+			if healthByNodeIndex[index] != healthMap[node.RawURI] {
+				t.Fatalf(
+					"health index %d for %q=%p, map=%p",
+					index,
+					node.RawURI,
+					healthByNodeIndex[index],
+					healthMap[node.RawURI],
+				)
+			}
+		}
+	}
+
+	if err := MergeNodes([]Node{
+		{RawURI: "http://three.invalid", Name: "three"},
+		{RawURI: "http://one.invalid", Name: "one"},
+		{RawURI: "http://two.invalid", Name: "two"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	assertIndex()
+
+	RecordTest("http://two.invalid", true, 20, "")
+	RecordRateLimit("http://three.invalid", 30)
+	assertIndex()
+
+	SortNodesByLatency()
+	assertIndex()
+
+	if deleted, err := DeleteNodeWithError("http://two.invalid"); err != nil || !deleted {
+		t.Fatalf("DeleteNodeWithError()=(%v, %v), want (true, nil)", deleted, err)
+	}
+	assertIndex()
+
+	if err := BatchDeleteNodes([]string{"http://one.invalid"}); err != nil {
+		t.Fatal(err)
+	}
+	assertIndex()
 }
 
 func TestNodesLifecycle(t *testing.T) {
@@ -1088,9 +1147,15 @@ func TestSelectForParallelAllCooldownKeepsEarliestK(t *testing.T) {
 		t.Fatal(err)
 	}
 	mu.Lock()
-	healthMap["late"] = &NodeHealth{LastFailAt: now, CooldownUntil: now + 300, Last429At: now + 30}
-	healthMap["early"] = &NodeHealth{LastFailAt: now, CooldownUntil: now + 100, Last429At: now + 10}
-	healthMap["middle"] = &NodeHealth{LastFailAt: now, CooldownUntil: now + 200, Last429At: now + 20}
+	storeNodeHealthUnsafe("late", &NodeHealth{
+		LastFailAt: now, CooldownUntil: now + 300, Last429At: now + 30,
+	})
+	storeNodeHealthUnsafe("early", &NodeHealth{
+		LastFailAt: now, CooldownUntil: now + 100, Last429At: now + 10,
+	})
+	storeNodeHealthUnsafe("middle", &NodeHealth{
+		LastFailAt: now, CooldownUntil: now + 200, Last429At: now + 20,
+	})
 	mu.Unlock()
 
 	selected := SelectForParallel(2, 80, false, false)
@@ -1239,11 +1304,11 @@ func TestHealthCountersDecayAtMutation(t *testing.T) {
 		t.Fatal(err)
 	}
 	mu.Lock()
-	healthMap[uri] = &NodeHealth{
+	storeNodeHealthUnsafe(uri, &NodeHealth{
 		SuccessCount:   1000,
 		FailCount:      10,
 		RecentUseCount: 20,
-	}
+	})
 	mu.Unlock()
 
 	RecordTest(uri, true, 10, "")

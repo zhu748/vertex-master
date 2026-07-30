@@ -50,6 +50,7 @@ var (
 	mu                  sync.RWMutex                      //nolint:gochecknoglobals
 	nodeList            []Node                            //nolint:gochecknoglobals
 	nodeIndexByURI      = make(map[string]int)            //nolint:gochecknoglobals
+	healthByNodeIndex   []*NodeHealth                     //nolint:gochecknoglobals
 	healthMap           = make(map[string]*NodeHealth)    //nolint:gochecknoglobals
 	subscriptionSources = make(map[string]map[int64]bool) //nolint:gochecknoglobals
 	loaded              bool                              //nolint:gochecknoglobals
@@ -149,8 +150,8 @@ func ensureLoaded() {
 	_ = sourceRows.Close()
 
 	nodeList = loadedNodes
-	rebuildNodeIndexUnsafe()
 	healthMap = loadedHealth
+	rebuildNodeIndexUnsafe()
 	subscriptionSources = loadedSources
 	loaded = true
 	pruneHealthUnsafe()
@@ -182,6 +183,28 @@ func rebuildNodeIndexUnsafe() {
 		index[nodeList[position].RawURI] = position
 	}
 	nodeIndexByURI = index
+	rebuildNodeHealthIndexUnsafe()
+}
+
+func rebuildNodeHealthIndexUnsafe() {
+	healthIndex := make([]*NodeHealth, len(nodeList))
+	for position := range nodeList {
+		healthIndex[position] = healthMap[nodeList[position].RawURI]
+	}
+	healthByNodeIndex = healthIndex
+}
+
+func storeNodeHealthUnsafe(uri string, health *NodeHealth) {
+	healthMap[uri] = health
+	position, exists := nodeIndexByURI[uri]
+	if !exists || position < 0 || position >= len(nodeList) || nodeList[position].RawURI != uri {
+		return
+	}
+	if len(healthByNodeIndex) != len(nodeList) {
+		rebuildNodeHealthIndexUnsafe()
+		return
+	}
+	healthByNodeIndex[position] = health
 }
 
 func lookupNodeUnsafe(uri string) (Node, bool) {
@@ -264,10 +287,16 @@ func LoadNodePoolSnapshot(now time.Time) NodePoolSnapshot {
 		Stats:     NodePoolStats{Total: len(nodeList)},
 	}
 	nowUnix := now.Unix()
+	indexedHealth := len(healthByNodeIndex) == len(nodeList)
 	for index := range snapshot.Nodes {
 		node := snapshot.Nodes[index]
 		snapshot.Nodes[index].SubscriptionSourceCount = len(subscriptionSources[node.RawURI])
-		health := healthMap[node.RawURI]
+		var health *NodeHealth
+		if indexedHealth {
+			health = healthByNodeIndex[index]
+		} else {
+			health = healthMap[node.RawURI]
+		}
 		if health != nil {
 			snapshot.Health[index] = *health
 			snapshot.HasHealth[index] = true
@@ -285,8 +314,14 @@ func LoadFilteredNodeURIs(match func(Node, *NodeHealth) bool) []string {
 	defer mu.RUnlock()
 
 	uris := make([]string, 0, len(nodeList))
-	for _, storedNode := range nodeList {
-		health := healthMap[storedNode.RawURI]
+	indexedHealth := len(healthByNodeIndex) == len(nodeList)
+	for index, storedNode := range nodeList {
+		var health *NodeHealth
+		if indexedHealth {
+			health = healthByNodeIndex[index]
+		} else {
+			health = healthMap[storedNode.RawURI]
+		}
 		node := storedNode
 		node.SubscriptionSourceCount = len(subscriptionSources[node.RawURI])
 		if match == nil || match(node, health) {
@@ -340,8 +375,14 @@ func LoadNodePoolPageSnapshot(
 		start, end = nodePoolPageBounds(len(nodeList), requestedPage, pageSize)
 	}
 	nowUnix := now.Unix()
-	for _, storedNode := range nodeList {
-		health := healthMap[storedNode.RawURI]
+	indexedHealth := len(healthByNodeIndex) == len(nodeList)
+	for index, storedNode := range nodeList {
+		var health *NodeHealth
+		if indexedHealth {
+			health = healthByNodeIndex[index]
+		} else {
+			health = healthMap[storedNode.RawURI]
+		}
 		addNodePoolStats(&snapshot.Stats, storedNode, health, nowUnix)
 
 		node := storedNode
@@ -379,8 +420,13 @@ func LoadNodePoolPageSnapshot(
 	snapshot.Health = snapshot.Health[:0]
 	snapshot.HasHealth = snapshot.HasHealth[:0]
 	matchedIndex := 0
-	for _, storedNode := range nodeList {
-		health := healthMap[storedNode.RawURI]
+	for index, storedNode := range nodeList {
+		var health *NodeHealth
+		if indexedHealth {
+			health = healthByNodeIndex[index]
+		} else {
+			health = healthMap[storedNode.RawURI]
+		}
 		node := storedNode
 		node.SubscriptionSourceCount = len(subscriptionSources[node.RawURI])
 		if match != nil && !match(node, health) {
@@ -817,6 +863,7 @@ func publishRemovedNodeIndexesUnsafe(removed []removedNodePosition) {
 	for index, node := range nodeList {
 		nodeIndexByURI[node.RawURI] = index
 	}
+	rebuildNodeHealthIndexUnsafe()
 }
 
 func detachNodeRuntimeStateUnsafe(rawURI string) detachedNodeRuntimeState {
@@ -1034,6 +1081,7 @@ func MergeNodes(newNodes []Node) error {
 		log.Printf("[Nodes] 合并节点持久化失败，已回滚内存状态: %v", err)
 		return err
 	}
+	rebuildNodeHealthIndexUnsafe()
 	return nil
 }
 
@@ -1286,6 +1334,7 @@ func syncSubscriptionNodes(
 	for index, node := range nodeList {
 		nodeIndexByURI[node.RawURI] = index
 	}
+	rebuildNodeHealthIndexUnsafe()
 	for _, rawURI := range removedURIs {
 		globalStickyPool.Evict(rawURI)
 	}
@@ -1530,6 +1579,7 @@ func DeleteNodeWithError(uri string) (bool, error) {
 		for current := index; current < len(nodeList); current++ {
 			nodeIndexByURI[nodeList[current].RawURI] = current
 		}
+		rebuildNodeHealthIndexUnsafe()
 	}
 	globalStickyPool.Evict(uri)
 	cb := DeleteNodeCallback
@@ -1868,6 +1918,7 @@ func sortNodesByLatency(descending bool) {
 		for index, node := range nodeList {
 			nodeIndexByURI[node.RawURI] = index
 		}
+		rebuildNodeHealthIndexUnsafe()
 	}
 	mu.Unlock()
 }
@@ -2215,7 +2266,7 @@ func RecordTest(uri string, ok bool, ms float64, errStr string) {
 	h, exists := healthMap[uri]
 	if !exists {
 		h = &NodeHealth{} //nolint:exhaustruct
-		healthMap[uri] = h
+		storeNodeHealthUnsafe(uri, h)
 	}
 	h.LastTestMs = ms
 	h.LastTestError = errStr
@@ -2250,7 +2301,7 @@ func RecordRateLimit(uri string, cooldownSec int) {
 	h, exists := healthMap[uri]
 	if !exists {
 		h = &NodeHealth{} //nolint:exhaustruct
-		healthMap[uri] = h
+		storeNodeHealthUnsafe(uri, h)
 	}
 	now := time.Now().Unix()
 	h.CooldownUntil = now + int64(cooldownSec)
@@ -2273,7 +2324,7 @@ func RecordSelection(uri string) {
 	health := healthMap[uri]
 	if health == nil {
 		health = &NodeHealth{} //nolint:exhaustruct
-		healthMap[uri] = health
+		storeNodeHealthUnsafe(uri, health)
 	}
 	health.LastSelectedAt = time.Now().Unix()
 	health.RecentUseCount++
@@ -2525,8 +2576,15 @@ func GetNodePoolStats(now time.Time) NodePoolStats {
 	defer mu.RUnlock()
 	stats := NodePoolStats{Total: len(nodeList)}
 	nowUnix := now.Unix()
-	for _, node := range nodeList {
-		addNodePoolStats(&stats, node, healthMap[node.RawURI], nowUnix)
+	indexedHealth := len(healthByNodeIndex) == len(nodeList)
+	for index, node := range nodeList {
+		var health *NodeHealth
+		if indexedHealth {
+			health = healthByNodeIndex[index]
+		} else {
+			health = healthMap[node.RawURI]
+		}
+		addNodePoolStats(&stats, node, health, nowUnix)
 	}
 	return stats
 }
@@ -2567,11 +2625,17 @@ func SelectNodesForHealthCheck(limit int, staleAfter time.Duration, now time.Tim
 	} else {
 		candidates = make([]healthCheckCandidate, 0, candidateLimit)
 	}
+	indexedHealth := len(healthByNodeIndex) == len(nodeList)
 	for order, node := range nodeList {
 		if node.Disabled {
 			continue
 		}
-		health := healthMap[node.RawURI]
+		var health *NodeHealth
+		if indexedHealth {
+			health = healthByNodeIndex[order]
+		} else {
+			health = healthMap[node.RawURI]
+		}
 		var candidate healthCheckCandidate
 		switch {
 		case health == nil || (health.LastSuccessAt == 0 && health.LastFailAt == 0):
@@ -2661,6 +2725,7 @@ func SelectForParallel(k int, topK int, debugMode bool, stickyBonusEnabled bool)
 	var cooldownNodes []scoredNode
 	seenUntested := 0
 	stickyPosition := 0
+	indexedHealth := len(healthByNodeIndex) == len(nodeList)
 	for nodeIndex, n := range nodeList {
 		sticky := false
 		if indexedSticky {
@@ -2674,7 +2739,14 @@ func SelectForParallel(k int, topK int, debugMode bool, stickyBonusEnabled bool)
 		if n.Disabled {
 			continue
 		}
-		h := healthMap[n.RawURI]
+		var h *NodeHealth
+		if indexedHealth {
+			h = healthByNodeIndex[nodeIndex]
+		} else {
+			// Keep exact behavior while a derived index length is temporarily
+			// stale inside an internal write path.
+			h = healthMap[n.RawURI]
+		}
 		if h != nil && h.CooldownUntil > now {
 			if cooldownNodes == nil {
 				if auxiliaryLimit <= len(inlineCooldown) {
@@ -2961,11 +3033,17 @@ func GetAverageLatency() float64 {
 	var sum float64
 	var count int
 	now := time.Now().Unix()
-	for _, n := range nodeList {
+	indexedHealth := len(healthByNodeIndex) == len(nodeList)
+	for index, n := range nodeList {
 		if n.Disabled {
 			continue
 		}
-		h := healthMap[n.RawURI]
+		var h *NodeHealth
+		if indexedHealth {
+			h = healthByNodeIndex[index]
+		} else {
+			h = healthMap[n.RawURI]
+		}
 		if h != nil && h.LastTestMs > 0 && h.CooldownUntil <= now {
 			sum += h.LastTestMs
 			count++
