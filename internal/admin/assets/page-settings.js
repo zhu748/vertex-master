@@ -70,9 +70,12 @@ function claudeReplacementRowsHTML() {
         </div>
       </div>
       <div class="field">
-        <label for="set_claude_prompt_rule_models_${index}">仅应用于这些模型（可选）</label>
+        <div class="claude-rule-model-head">
+          <label for="set_claude_prompt_rule_models_${index}">仅应用于这些模型（可选）</label>
+          <button type="button" class="btn ghost compact" data-click-action="useLatestClaudeModelForRule" data-rule-index="${index}">使用最近模型</button>
+        </div>
         <input id="set_claude_prompt_rule_models_${index}" data-rule-field="models" value="${escapeSettingsHTML((rule.models || []).join(', '))}" placeholder="例如 fake-gemini-3.6-flash；多个模型用逗号分隔">
-        <div class="desc">留空表示所有 Claude 兼容模型；同时匹配客户端模型名和解析后的实际模型名。</div>
+        <div class="desc">默认留空并应用于所有 Claude 兼容模型；只有主动填写时才限制范围，同时匹配客户端模型名和解析后的实际模型名。</div>
       </div>
       <div class="grid grid-2">
         <div class="field">
@@ -327,9 +330,21 @@ function useLatestClaudePromptAsFind() {
     from: latestClaudePrompt.original_prompt || '',
     to: '',
     disabled: false,
-    models: latestClaudePrompt.model ? [latestClaudePrompt.model] : []
+    models: []
   });
-  toast('已添加仅用于当前模型的替换规则，请填写“替换为”后保存');
+  toast('已添加适用于所有模型的替换规则；如需限制范围，请主动填写模型');
+}
+
+function useLatestClaudeModelForRule(element) {
+  if (!latestClaudePrompt?.model) return toast('暂无可用的最近请求模型');
+  const index = Number(element.dataset.ruleIndex);
+  if (!Number.isInteger(index) || index < 0) return;
+  const input = $('#set_claude_prompt_rule_models_' + index);
+  if (!input) return;
+  input.value = latestClaudePrompt.model;
+  window.hasUnsavedSettings = true;
+  input.focus();
+  toast('已将该规则限定为最近请求模型：' + latestClaudePrompt.model);
 }
 
 function currentClaudeReplacementRulesForRequest() {
@@ -684,6 +699,7 @@ registerActions({
   moveClaudeReplacementRule: function (element) { moveClaudeReplacementRule(element); },
   refreshLatestClaudePrompt: function () { loadLatestClaudePrompt(); },
   useLatestClaudePromptAsFind: function () { useLatestClaudePromptAsFind(); },
+  useLatestClaudeModelForRule: function (element) { useLatestClaudeModelForRule(element); },
   previewClaudePrompt: function () { previewClaudePrompt(); },
   copyLatestClaudePrompt: function () { copyLatestClaudePrompt(); },
   clearLatestClaudePrompt: function () { clearLatestClaudePrompt(); },

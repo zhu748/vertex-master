@@ -124,6 +124,7 @@ func TestClaudePromptSettingsUIIsEmbedded(t *testing.T) {
 		"set_claude_prompt_injection_position",
 		"set_claude_prompt_injection_text",
 		"useLatestClaudePromptAsFind",
+		"useLatestClaudeModelForRule",
 		"previewClaudePrompt",
 		"claudePromptLatestEndpoint",
 		"loadLatestClaudePrompt",
@@ -131,6 +132,16 @@ func TestClaudePromptSettingsUIIsEmbedded(t *testing.T) {
 		if !strings.Contains(script, token) {
 			t.Errorf("Claude prompt settings token %q is missing", token)
 		}
+	}
+	useLatestStart := strings.Index(script, "function useLatestClaudePromptAsFind()")
+	useLatestEnd := strings.Index(script, "function useLatestClaudeModelForRule(")
+	if useLatestStart < 0 || useLatestEnd <= useLatestStart {
+		t.Fatal("Claude latest-prompt rule creation function is missing")
+	}
+	useLatestBlock := script[useLatestStart:useLatestEnd]
+	if !strings.Contains(useLatestBlock, "models: []") ||
+		strings.Contains(useLatestBlock, "[latestClaudePrompt.model]") {
+		t.Fatal("one-click Claude replacement rules must default to all models")
 	}
 
 	apiScript, err := Assets.ReadFile("assets/api.js")
