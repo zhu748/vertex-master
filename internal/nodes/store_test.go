@@ -1251,10 +1251,17 @@ func TestSelectForParallelAboveInlineCandidateCapacity(t *testing.T) {
 	if len(selected) != 20 {
 		t.Fatalf("selected %d nodes above inline capacity, want 20", len(selected))
 	}
+	eligible := make(map[string]bool, 128)
+	for _, node := range list[nodeCount-128:] {
+		eligible[node.RawURI] = true
+	}
 	seen := make(map[string]bool, len(selected))
 	for _, node := range selected {
 		if seen[node.RawURI] {
 			t.Fatalf("selected duplicate node %q: %#v", node.RawURI, selected)
+		}
+		if !eligible[node.RawURI] {
+			t.Fatalf("selected node %q outside highest-scored top 128: %#v", node.RawURI, selected)
 		}
 		seen[node.RawURI] = true
 	}

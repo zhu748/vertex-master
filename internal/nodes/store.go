@@ -2825,7 +2825,18 @@ func SelectForParallel(k int, topK int, debugMode bool, stickyBonusEnabled bool)
 		if score < 1 {
 			score = 1
 		}
-		known = retainHighestKnown(known, n, score, h.ConsecutiveFailures > 0, knownLimit)
+		recovering := h.ConsecutiveFailures > 0
+		if len(known) == knownLimit && !known[0].recovering && !recovering {
+			// Once a full heap has a healthy root, every retained node is
+			// healthy. Keep the overwhelmingly common rejection path local so
+			// it avoids the non-inlineable mixed-state heap helper.
+			if score > known[0].score {
+				known[0] = scoredNode{node: *n, score: score}
+				siftDownKnownHealthyMinHeap(known, 0)
+			}
+		} else {
+			known = retainHighestKnown(known, n, score, recovering, knownLimit)
+		}
 	}
 	mu.RUnlock()
 
