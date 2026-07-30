@@ -606,7 +606,7 @@ func buildImportedNodeFromProxyMap(proxy map[string]any) (nodes.Node, bool) {
 	if raw == "" {
 		return nodes.Node{}, false
 	}
-	return parseImportedNodeLine(raw)
+	return importedClashNode(proxy, raw)
 }
 
 func buildImportedNodeFromMap(obj map[string]any) (nodes.Node, bool) {
@@ -620,19 +620,19 @@ func buildImportedNodeFromMap(obj map[string]any) (nodes.Node, bool) {
 		return buildImportedNodeFromProxyMap(proxy)
 	}
 	if looksLikeClashProxyMap(obj) {
-		return buildClashNode(obj)
+		return buildNormalizedClashNode(obj)
 	}
 	return nodes.Node{}, false
 }
 
-func buildImportedNodesFromSlice(items []any) []nodes.Node {
+func buildJSONImportedNodesFromSlice(items []any) []nodes.Node {
 	imported := make([]nodes.Node, 0, len(items))
 	for _, item := range items {
-		obj := mapValue(item)
-		if len(obj) == 0 {
+		obj, ok := item.(map[string]any)
+		if !ok || len(obj) == 0 {
 			continue
 		}
-		if node, ok2 := buildImportedNodeFromMap(obj); ok2 {
+		if node, nodeOK := buildImportedNodeFromMap(obj); nodeOK {
 			imported = append(imported, node)
 		}
 	}
@@ -650,15 +650,17 @@ func parseJSONImportedNodes(text string) []nodes.Node {
 		return nil
 	}
 
-	normalized := normalizeYAMLValue(raw)
-	if obj, ok := normalized.(map[string]any); ok {
-		if proxies := buildImportedNodesFromSlice(sliceValue(obj["proxies"])); len(proxies) > 0 {
+	// encoding/json already guarantees map[string]any and []any recursively.
+	// Keep those decoded containers read-only and avoid normalizing/copying the
+	// complete document before conversion.
+	if obj, ok := raw.(map[string]any); ok {
+		if proxies := buildJSONImportedNodesFromSlice(jsonArrayValue(obj["proxies"])); len(proxies) > 0 {
 			return proxies
 		}
-		if outbounds := buildImportedNodesFromSlice(sliceValue(obj["outbounds"])); len(outbounds) > 0 {
+		if outbounds := buildJSONImportedNodesFromSlice(jsonArrayValue(obj["outbounds"])); len(outbounds) > 0 {
 			return outbounds
 		}
-		if servers := buildImportedNodesFromSlice(sliceValue(obj["servers"])); len(servers) > 0 {
+		if servers := buildJSONImportedNodesFromSlice(jsonArrayValue(obj["servers"])); len(servers) > 0 {
 			return servers
 		}
 		if node, ok2 := buildImportedNodeFromMap(obj); ok2 {
@@ -666,10 +668,15 @@ func parseJSONImportedNodes(text string) []nodes.Node {
 		}
 		return nil
 	}
-	if items, ok := normalized.([]any); ok {
-		return buildImportedNodesFromSlice(items)
+	if items, ok := raw.([]any); ok {
+		return buildJSONImportedNodesFromSlice(items)
 	}
 	return nil
+}
+
+func jsonArrayValue(value any) []any {
+	items, _ := value.([]any)
+	return items
 }
 
 func parseV2RayNNodeLine(line string) (nodes.Node, bool) {
@@ -1004,15 +1011,33 @@ func buildClashNode(proxy map[string]any) (nodes.Node, bool) {
 	if !ok || len(normalized) == 0 {
 		return nodes.Node{}, false
 	}
-	if !looksLikeClashProxyMap(normalized) {
+	return buildNormalizedClashNode(normalized)
+}
+
+func buildNormalizedClashNode(proxy map[string]any) (nodes.Node, bool) {
+	if !looksLikeClashProxyMap(proxy) {
 		return nodes.Node{}, false
 	}
 
-	rawURI := clashProxyObjectToURI(normalized)
+	rawURI := clashProxyObjectToURI(proxy)
 	if rawURI == "" {
 		return nodes.Node{}, false
 	}
-	return parseImportedNodeLine(rawURI)
+	return importedClashNode(proxy, rawURI)
+}
+
+func importedClashNode(proxy map[string]any, rawURI string) (nodes.Node, bool) {
+	nodeType := strings.TrimSpace(valueToString(proxy["type"]))
+	if nodeType == "" || rawURI == "" {
+		return nodes.Node{}, false
+	}
+	name := strings.TrimSpace(valueToString(proxy["name"]))
+	if name == "" {
+		name = importedNodeFallbackName(nodeType, proxy)
+	}
+	return nodes.Node{
+		Type: nodeType, Name: nodes.SafeNodeLabel(name), RawURI: rawURI,
+	}, true
 }
 
 func clashProxyObjectToURI(proxy map[string]any) string {

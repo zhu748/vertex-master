@@ -18,6 +18,32 @@ func TestParseImportedNodesDecodesJSONSubscription(t *testing.T) {
 	}
 }
 
+func TestParseImportedNodesJSONMetadataMatchesEncodedClashNode(t *testing.T) {
+	imported := parseImportedNodes(`[
+		{"type":"HTTP","server":"proxy.example.com","port":8080},
+		{"type":"socks5","name":"unsafe\n\u200bname","server":"socks.example.com","port":1080}
+	]`)
+	if len(imported) != 2 {
+		t.Fatalf("expected 2 nodes, got %d", len(imported))
+	}
+
+	for index, node := range imported {
+		reparsed, ok := parseImportedNodeLine(node.RawURI)
+		if !ok {
+			t.Fatalf("node %d has an invalid encoded Clash URI: %#v", index, node)
+		}
+		if node.Type != reparsed.Type || node.Name != reparsed.Name {
+			t.Fatalf("node %d metadata differs from encoded URI: direct=%#v reparsed=%#v", index, node, reparsed)
+		}
+	}
+	if imported[0].Type != "HTTP" || imported[0].Name != "HTTP-proxy.example.com:8080" {
+		t.Fatalf("fallback metadata changed: %#v", imported[0])
+	}
+	if imported[1].Name != "unsafename" {
+		t.Fatalf("unsafe imported label was not normalized: %q", imported[1].Name)
+	}
+}
+
 func TestParseImportedNodesURIListAllowsNonStructuredNoise(t *testing.T) {
 	text := `# generated subscription
 this line is ignored

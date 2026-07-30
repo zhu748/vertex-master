@@ -27,7 +27,14 @@ func parseImportedNodes(text string) []nodes.Node {
 		return nil
 	}
 
-	normalized := maybeDecodeSubscriptionText(text)
+	normalized := text
+	// A JSON document cannot itself be a base64 subscription. Only attempt
+	// decoding for other shapes so large JSON node lists do not allocate and
+	// scan a speculative decoded copy before their real parse.
+	if !looksLikeJSONDocument(normalized) {
+		normalized = maybeDecodeSubscriptionText(normalized)
+	}
+
 	if looksLikeJSONDocument(normalized) {
 		if imported := parseJSONImportedNodes(normalized); len(imported) > 0 {
 			return imported
