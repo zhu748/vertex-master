@@ -821,6 +821,81 @@ func TestResponsesTypedLifecycleEventsMatchGenericSSE(t *testing.T) {
 	}
 }
 
+func TestResponsesInitialLifecycleEncodingMatchesGenericSSE(t *testing.T) {
+	tests := []struct {
+		name      string
+		request   map[string]any
+		wantReuse bool
+	}{
+		{
+			name:      "rich request",
+			wantReuse: true,
+			request: map[string]any{
+				"instructions": "<系统提示>\u2028",
+				"metadata":     map[string]any{"trace": "<&>", "source": "测试"},
+				"reasoning":    map[string]any{"effort": "high", "summary": nil},
+				"text":         map[string]any{"format": map[string]any{"type": "text"}},
+				"tool_choice":  map[string]any{"type": "auto"},
+				"tools": []any{map[string]any{
+					"type": "function", "name": "lookup<&>",
+					"parameters": map[string]any{"type": "object"},
+				}},
+			},
+		},
+		{
+			name: "serialization failure",
+			request: map[string]any{
+				"temperature": func() any {
+					cyclic := map[string]any{}
+					cyclic["self"] = cyclic
+					return cyclic
+				}(),
+			},
+		},
+		{
+			name: "large response fallback",
+			request: map[string]any{
+				"instructions": strings.Repeat("x", maxReusableResponsesInitialJSONBytes),
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			actualRecorder := httptest.NewRecorder()
+			actual := responsesStreamState{
+				sw: &sseWriter{w: actualRecorder}, sequence: 8,
+				request: test.request, model: "gemini<&>", id: "resp_<中文>",
+			}
+			response := actual.responseObject(
+				"in_progress",
+				protocolOutput{},
+				[]any{},
+			)
+			if got := canReuseResponsesInitialJSON(response); got != test.wantReuse {
+				t.Fatalf("canReuseResponsesInitialJSON()=%v, want %v", got, test.wantReuse)
+			}
+			actual.emitInitialResponses(response)
+
+			genericRecorder := httptest.NewRecorder()
+			generic := responsesStreamState{
+				sw: &sseWriter{w: genericRecorder}, sequence: 8,
+			}
+			generic.emitResponse("response.created", response)
+			if !generic.streamFailed() {
+				generic.emitResponse("response.in_progress", response)
+			}
+
+			if got, want := actualRecorder.Body.String(), genericRecorder.Body.String(); got != want {
+				t.Fatalf("cached initial lifecycle=%q, generic lifecycle=%q", got, want)
+			}
+			if actual.sequence != generic.sequence {
+				t.Fatalf("cached sequence=%d, generic sequence=%d", actual.sequence, generic.sequence)
+			}
+		})
+	}
+}
+
 func TestResponsesContentFilterProducesIncompleteLifecycle(t *testing.T) {
 	response := buildResponsesResponse(
 		map[string]any{},

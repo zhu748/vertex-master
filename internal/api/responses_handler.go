@@ -1,11 +1,13 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,6 +26,7 @@ type ResponsesHandler struct {
 }
 
 const responsesNamespaceToolsKey = "__responses_namespace_tools"
+const maxReusableResponsesInitialJSONBytes = 32 << 10
 
 type responsesNamespacedTool struct {
 	Namespace string
@@ -878,11 +881,136 @@ func (h *ResponsesHandler) streamResponses(
 
 func (s *responsesStreamState) start() {
 	response := s.responseObject("in_progress", protocolOutput{}, []any{})
-	s.emitResponse("response.created", response)
+	s.emitInitialResponses(response)
+}
+
+func (s *responsesStreamState) emitInitialResponses(response *responsesResponse) {
 	if s.streamFailed() {
 		return
 	}
-	s.emitResponse("response.in_progress", response)
+	if s.sw != nil && canReuseResponsesInitialJSON(response) {
+		if err := jsonx.MarshalView(response, func(encoded []byte) {
+			s.emitEncodedResponse("response.created", encoded)
+			if !s.streamFailed() {
+				s.emitEncodedResponse("response.in_progress", encoded)
+			}
+		}); err == nil {
+			return
+		}
+	}
+
+	// Preserve the generic writer's serialization-error frames for malformed
+	// dynamic values instead of committing a partial handcrafted event.
+	s.emitResponse("response.created", response)
+	if !s.streamFailed() {
+		s.emitResponse("response.in_progress", response)
+	}
+}
+
+func canReuseResponsesInitialJSON(response *responsesResponse) bool {
+	if response == nil ||
+		response.Status != "in_progress" ||
+		response.CompletedAt != nil ||
+		response.Error != nil ||
+		response.IncompleteDetails != nil ||
+		response.Usage != nil ||
+		len(response.Output) != 0 {
+		return false
+	}
+	size := 1024 +
+		reusableResponsesJSONStringSize(response.ID) +
+		reusableResponsesJSONStringSize(response.Model)
+	if size > maxReusableResponsesInitialJSONBytes {
+		return false
+	}
+	for _, value := range [...]any{
+		response.Instructions,
+		response.MaxOutputTokens,
+		response.Metadata,
+		response.PreviousResponseID,
+		response.Reasoning,
+		response.Temperature,
+		response.Text,
+		response.ToolChoice,
+		response.Tools,
+		response.TopP,
+		response.Truncation,
+	} {
+		valueSize, reusable := reusableResponsesJSONValueSize(value)
+		if !reusable {
+			return false
+		}
+		size += valueSize
+		if size > maxReusableResponsesInitialJSONBytes {
+			return false
+		}
+	}
+	return true
+}
+
+func reusableResponsesJSONValueSize(value any) (int, bool) {
+	switch typed := value.(type) {
+	case nil:
+		return 4, true
+	case bool,
+		float32, float64,
+		int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32, uint64,
+		json.Number:
+		return 24, true
+	case string:
+		// A control-heavy JSON string can expand to six ASCII bytes per input
+		// byte as a \u00XX escape. Use the worst case to keep the retained
+		// encoded response safely under the reuse threshold.
+		return reusableResponsesJSONStringSize(typed), true
+	case json.RawMessage:
+		return len(typed), true
+	case map[string]any:
+		return 2, len(typed) == 0
+	case []any:
+		return 2, len(typed) == 0
+	case *responsesDefaultTextConfig,
+		*responsesDefaultReasoningConfig,
+		*responsesEmptyObject:
+		return 64, true
+	default:
+		return 0, false
+	}
+}
+
+func reusableResponsesJSONStringSize(value string) int {
+	if len(value) > maxReusableResponsesInitialJSONBytes/6 {
+		return maxReusableResponsesInitialJSONBytes + 1
+	}
+	return len(value)*6 + 2
+}
+
+// emitEncodedResponse writes the closed Responses lifecycle envelope around
+// response JSON produced by jsonx. Callers pass protocol-owned event names,
+// whose ASCII contents are valid in both the SSE event line and JSON string.
+func (s *responsesStreamState) emitEncodedResponse(event string, responseJSON []byte) {
+	if s.streamFailed() {
+		return
+	}
+	s.sequence++
+	if s.sw == nil {
+		return
+	}
+
+	buffer := sseBufferPool.Get().(*bytes.Buffer)
+	buffer.Reset()
+	buffer.Grow(len(event)*2 + len(responseJSON) + 64)
+	buffer.WriteString("event: ")
+	buffer.WriteString(event)
+	buffer.WriteString("\ndata: {\"response\":")
+	buffer.Write(responseJSON)
+	buffer.WriteString(",\"sequence_number\":")
+	var sequenceBuffer [20]byte
+	buffer.Write(strconv.AppendInt(sequenceBuffer[:0], int64(s.sequence), 10))
+	buffer.WriteString(",\"type\":\"")
+	buffer.WriteString(event)
+	buffer.WriteString("\"}\n\n")
+	_ = s.sw.writeBuffer(buffer)
 }
 
 type responsesStreamState struct {
