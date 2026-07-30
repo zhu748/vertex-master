@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bsfdsagfadg/vertex/internal/jsonx"
 	"github.com/bsfdsagfadg/vertex/internal/transform"
 	"github.com/bsfdsagfadg/vertex/internal/vertex"
 )
@@ -135,6 +136,50 @@ func TestOutputFromGeminiChunkPreservesPartOrderAndInput(t *testing.T) {
 	}
 	if string(after) != string(before) {
 		t.Fatalf("input chunk was mutated:\n before: %s\n after:  %s", before, after)
+	}
+}
+
+func TestAnthropicCanonicalToolInputMatchesParsedWireFormat(t *testing.T) {
+	geminiResponse := map[string]any{
+		"candidates": []any{map[string]any{
+			"content": map[string]any{"parts": []any{map[string]any{
+				"functionCall": map[string]any{
+					"id": "call_1", "name": "lookup",
+					"args": map[string]any{"z": "<tag>", "a": map[string]any{"value": float64(1)}},
+				},
+			}}},
+		}},
+	}
+	out := outputFromOAI(transform.GeminiJSONToOAIJSON(geminiResponse, "gemini-test"))
+	if len(out.ToolCalls) != 1 || !out.ToolCalls[0].argumentsCanonical {
+		t.Fatalf("locally serialized arguments were not marked canonical: %+v", out.ToolCalls)
+	}
+
+	fast, err := jsonx.Marshal(anthropicMessage("claude-test", "msg_fast", out))
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyOut := out
+	legacyOut.ToolCalls = append([]protocolToolCall(nil), out.ToolCalls...)
+	legacyOut.ToolCalls[0].argumentsCanonical = false
+	legacy, err := jsonx.Marshal(anthropicMessage("claude-test", "msg_fast", legacyOut))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(fast) != string(legacy) {
+		t.Fatalf("canonical raw input changed Anthropic wire JSON:\n fast:   %s\n legacy: %s", fast, legacy)
+	}
+
+	rawOut := outputFromOAI(map[string]any{"choices": []any{map[string]any{
+		"message": map[string]any{"tool_calls": []any{map[string]any{
+			"id": "call_2",
+			"function": map[string]any{
+				"name": "lookup", "arguments": `{"z":1,"a":2}`,
+			},
+		}}},
+	}}})
+	if len(rawOut.ToolCalls) != 1 || rawOut.ToolCalls[0].argumentsCanonical {
+		t.Fatalf("client-provided argument string must keep the parsed compatibility path: %+v", rawOut.ToolCalls)
 	}
 }
 

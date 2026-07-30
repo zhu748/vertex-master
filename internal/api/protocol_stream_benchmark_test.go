@@ -519,6 +519,28 @@ func BenchmarkAnthropicCompletedMessage(b *testing.B) {
 	}
 }
 
+func BenchmarkAnthropicCompletedGeminiToolMessage(b *testing.B) {
+	parts := make([]any, 16)
+	for index := range parts {
+		parts[index] = map[string]any{"functionCall": map[string]any{
+			"id": "toolu_benchmark", "name": "lookup",
+			"args": map[string]any{"query": "benchmark", "index": index},
+		}}
+	}
+	chunk := map[string]any{"candidates": []any{map[string]any{
+		"content": map[string]any{"parts": parts},
+	}}}
+	sw := &sseWriter{w: benchmarkResponseWriter{}}
+	b.ReportAllocs()
+	for range b.N {
+		out := outputFromOAI(transform.GeminiJSONToOAIJSON(chunk, "gemini-benchmark"))
+		message := anthropicMessage("gemini-benchmark", "msg_benchmark", out)
+		if !sw.writeData(message) || len(message.Content) != len(parts) {
+			b.Fatal("unexpected Anthropic Gemini tool message")
+		}
+	}
+}
+
 func BenchmarkResponsesToolCallStreamState(b *testing.B) {
 	chunk := protocolOutput{ToolCalls: []protocolToolCall{{
 		ID: "call_benchmark", Name: "lookup", Namespace: "mcp__demo", Arguments: `{"query":"benchmark"}`,

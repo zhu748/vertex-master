@@ -19,6 +19,11 @@ type protocolToolCall struct {
 	Name      string
 	Namespace string
 	Arguments string
+
+	// argumentsCanonical is true only when Arguments was serialized locally by
+	// jsonx. Anthropic responses can then embed it directly without parsing the
+	// same JSON back into a generic object first.
+	argumentsCanonical bool
 }
 
 type protocolOutput struct {
@@ -405,8 +410,10 @@ func outputFromOAI(resp map[string]any) protocolOutput {
 			if id == "" {
 				id = "call_" + reqID24()
 			}
+			arguments, argumentsCanonical := jsonStringWithCanonical(fn["arguments"])
 			out.ToolCalls = append(out.ToolCalls, protocolToolCall{
-				ID: id, Name: stringValue(fn["name"]), Arguments: jsonString(fn["arguments"]),
+				ID: id, Name: stringValue(fn["name"]), Arguments: arguments,
+				argumentsCanonical: argumentsCanonical,
 			})
 		}
 	}
@@ -480,8 +487,10 @@ func outputFromGeminiChunkWithUsage(
 				if id == "" {
 					id = "call_" + reqID24()
 				}
+				arguments, argumentsCanonical := jsonStringWithCanonical(fc["args"])
 				out.ToolCalls = append(out.ToolCalls, protocolToolCall{
-					ID: id, Name: stringValue(fc["name"]), Arguments: jsonString(fc["args"]),
+					ID: id, Name: stringValue(fc["name"]), Arguments: arguments,
+					argumentsCanonical: argumentsCanonical,
 				})
 				continue
 			}
@@ -576,20 +585,28 @@ func addProtocolCounts(left, right int) int {
 }
 
 func jsonString(v any) string {
+	value, _ := jsonStringWithCanonical(v)
+	return value
+}
+
+func jsonStringWithCanonical(v any) (string, bool) {
+	if canonical, ok := transform.CanonicalJSONStringValue(v); ok {
+		return canonical, true
+	}
 	if s, ok := v.(string); ok {
 		if strings.TrimSpace(s) == "" {
-			return "{}"
+			return "{}", true
 		}
-		return s
+		return s, false
 	}
 	if v == nil {
-		return "{}"
+		return "{}", true
 	}
 	data, err := jsonx.MarshalString(v)
 	if err != nil {
-		return "{}"
+		return "{}", true
 	}
-	return data
+	return data, true
 }
 
 func normalizedIntermediateJSONValue(value any) any {

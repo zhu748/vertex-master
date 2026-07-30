@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -539,12 +540,22 @@ func anthropicMessage(model, id string, out protocolOutput) *anthropicMessageRes
 	}
 	for _, tc := range out.ToolCalls {
 		message.Content = append(message.Content, &anthropicToolUseContent{
-			ID: tc.ID, Input: jsonValue(tc.Arguments), Name: tc.Name, Type: "tool_use",
+			ID: tc.ID, Input: anthropicToolInput(tc), Name: tc.Name, Type: "tool_use",
 		})
 	}
 	message.StopReason = anthropicStopReason(out.Finish, len(out.ToolCalls) > 0)
 	fillAnthropicUsage(&message.Usage, out)
 	return message
+}
+
+func anthropicToolInput(toolCall protocolToolCall) any {
+	if toolCall.argumentsCanonical {
+		raw := json.RawMessage(toolCall.Arguments)
+		if json.Valid(raw) {
+			return raw
+		}
+	}
+	return jsonValue(toolCall.Arguments)
 }
 
 func anthropicUsage(out protocolOutput) *anthropicUsageData {

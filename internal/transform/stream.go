@@ -287,6 +287,16 @@ func ConvertRealtimeChunk(chunk map[string]any, model, requestID string, isFirst
 	return events
 }
 
+type canonicalJSONString string
+
+// CanonicalJSONStringValue reports whether value is JSON text produced by this
+// package's serializer. The private dynamic type survives intermediate
+// map-based protocol conversion while still encoding exactly like a string.
+func CanonicalJSONStringValue(value any) (string, bool) {
+	canonical, ok := value.(canonicalJSONString)
+	return string(canonical), ok
+}
+
 // ExtractParts 从 Gemini parts 提取 (text_content, tool_calls, reasoning_content)。
 func ExtractParts(parts []any, forStream bool) (string, []any, string) {
 	// 绝大多数流帧只有一个纯文本 part；先处理这一形状，避免为两个通用
@@ -333,7 +343,7 @@ func ExtractParts(parts []any, forStream bool) (string, []any, string) {
 				"type":  "function",
 				"function": map[string]any{
 					"name":      toString(fc["name"]),
-					"arguments": arguments,
+					"arguments": canonicalJSONString(arguments),
 				},
 			}
 			if !forStream {
