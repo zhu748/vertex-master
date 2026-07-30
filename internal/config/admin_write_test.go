@@ -397,20 +397,30 @@ func TestLoadLegacyConfigGetsNewProxyDefaults(t *testing.T) {
 
 	cfg := Load()
 	defaults := DefaultConfig()
-	if cfg.ProxyFailoverMaxAttempts != defaults.ProxyFailoverMaxAttempts ||
+	if cfg.MaxRetries != defaults.MaxRetries ||
+		cfg.ParallelPoolSize != defaults.ParallelPoolSize ||
+		cfg.ProxyFailoverMaxAttempts != defaults.ProxyFailoverMaxAttempts ||
 		cfg.ParallelPoolRetryEnabled != defaults.ParallelPoolRetryEnabled ||
 		cfg.ProxyHealthCheckEnabled != defaults.ProxyHealthCheckEnabled ||
 		cfg.ProxyHealthCheckIntervalMinutes != defaults.ProxyHealthCheckIntervalMinutes ||
 		cfg.ProxyHealthCheckBatchSize != defaults.ProxyHealthCheckBatchSize ||
 		cfg.ProxyHealthCheckConcurrency != defaults.ProxyHealthCheckConcurrency ||
 		cfg.ProxyHealthCheckTimeoutSeconds != defaults.ProxyHealthCheckTimeoutSeconds {
-		t.Fatalf("旧配置应获得新增代理默认值，got %+v", cfg)
+		t.Fatalf("旧配置缺失的字段应获得当前默认值，got %+v", cfg)
 	}
 }
 
 func TestDefaultConfigEnablesParallelPoolRetry(t *testing.T) {
-	if !DefaultConfig().ParallelPoolRetryEnabled {
+	cfg := DefaultConfig()
+	if !cfg.ParallelPoolRetryEnabled {
 		t.Fatal("默认配置应开启并发池节点重试，以便 429 可在节点内自动重试")
+	}
+	if cfg.ParallelPoolSize != 10 || cfg.MaxRetries != 10 {
+		t.Fatalf(
+			"默认并发与重试应均为 10，got parallel_pool_size=%d max_retries=%d",
+			cfg.ParallelPoolSize,
+			cfg.MaxRetries,
+		)
 	}
 }
 
@@ -446,14 +456,14 @@ func TestLoadNormalizesOutOfRangeProxySettings(t *testing.T) {
 	if cfg.MaxN != 32 {
 		t.Fatalf("过大的 max_n 应限制为 32，got %d", cfg.MaxN)
 	}
-	if cfg.ParallelPoolSize != 5 {
-		t.Fatalf("parallel_pool_size=0 应回退为 5，got %d", cfg.ParallelPoolSize)
+	if cfg.ParallelPoolSize != 10 {
+		t.Fatalf("parallel_pool_size=0 应回退为 10，got %d", cfg.ParallelPoolSize)
 	}
 	if cfg.ParallelPoolDelayMs != 10000 {
 		t.Fatalf("过大的接力延迟应限制为 10000，got %d", cfg.ParallelPoolDelayMs)
 	}
-	if cfg.ProxyFailoverMaxAttempts != 5 {
-		t.Fatalf("尝试数应至少等于并发数 5，got %d", cfg.ProxyFailoverMaxAttempts)
+	if cfg.ProxyFailoverMaxAttempts != 10 {
+		t.Fatalf("尝试数应至少等于并发数 10，got %d", cfg.ProxyFailoverMaxAttempts)
 	}
 	if cfg.ProxyHealthCheckIntervalMinutes != 15 {
 		t.Fatalf("巡检间隔 0 应回退为 15，got %d", cfg.ProxyHealthCheckIntervalMinutes)
@@ -472,9 +482,9 @@ func TestLoadNormalizesOutOfRangeProxySettings(t *testing.T) {
 		"max_retries":                         0,
 		"max_spill_mb":                        2048,
 		"max_n":                               32,
-		"parallel_pool_size":                  5,
+		"parallel_pool_size":                  10,
 		"parallel_pool_delay_ms":              10000,
-		"proxy_failover_max_attempts":         5,
+		"proxy_failover_max_attempts":         10,
 		"proxy_health_check_interval_minutes": 15,
 		"proxy_health_check_batch_size":       450,
 		"proxy_health_check_concurrency":      1,

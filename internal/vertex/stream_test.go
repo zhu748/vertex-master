@@ -208,8 +208,8 @@ func TestEffectiveMaxRetriesDefaultsTo429RetryInParallelPool(t *testing.T) {
 		cfg.MaxRetries,
 		cfg.ParallelPoolEnabled,
 		cfg.ParallelPoolRetryEnabled,
-	); got != 1 {
-		t.Fatalf("默认并发池应保留 1 次节点内重试，got %d", got)
+	); got != 10 {
+		t.Fatalf("默认并发池应保留 10 次节点内重试，got %d", got)
 	}
 	if got := effectiveMaxRetries(cfg.MaxRetries, true, false); got != 0 {
 		t.Fatalf("显式关闭并发池重试时应为 0，got %d", got)

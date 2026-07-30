@@ -40,7 +40,7 @@
 | `VPROXY_PROXY_HEALTH_CHECK_CONCURRENCY` | `5` | 每轮巡检的最大并发数 |
 | `VPROXY_PROXY_HEALTH_CHECK_TIMEOUT_SECONDS` | `8` | 单个代理巡检超时（秒） |
 
-代理池本身默认最多同时运行 `5` 个候选节点、每次请求最多接力尝试 `30` 个节点，并以 `1000` 毫秒的间隔启动后备节点；节点遇到 429 时默认允许 `1` 次节点内重试。Blueprint 中声明的设置由 Render 环境变量托管，面板会显示“环境托管”并锁定对应输入框；请在 Render 的 **Environment** 页面修改。未由环境变量托管的 `parallel_pool_size`、`parallel_pool_delay_ms`、`parallel_pool_retry_enabled` 等设置仍可在面板调整，但免费实例重启后本地修改会丢失。
+代理池本身默认最多同时运行 `10` 个候选节点、每次请求最多接力尝试 `30` 个节点，并以 `1000` 毫秒的间隔启动后备节点；节点遇到 429 等可重试错误时默认允许 `10` 次节点内重试。Blueprint 中声明的设置由 Render 环境变量托管，面板会显示“环境托管”并锁定对应输入框；请在 Render 的 **Environment** 页面修改。未由环境变量托管的 `parallel_pool_size`、`parallel_pool_delay_ms`、`parallel_pool_retry_enabled` 等设置仍可在面板调整，但免费实例重启后本地修改会丢失。
 
 远程订阅直连拉取会校验初始地址、每次重定向和实际拨号 IP。订阅产生的代理端点默认只接受公网 IP 字面量，并过滤回环、私网、链路本地和保留地址，从而避免代理域名在导入后发生 DNS 重绑定。示例 jsDelivr 地址中的代理行自带协议且使用 IP，可直接使用。
 

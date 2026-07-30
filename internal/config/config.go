@@ -18,6 +18,8 @@ import (
 const (
 	defaultAnonAPIKey          = "AIzaSyCI-zsRP85UVOi0DjtiCwWBwQ1djDy741g"
 	defaultCountTokensQuerySig = "2/mENOSldfC+HZM+tGhVuJLrl8M6gEyK3HRjUKuA5AM58="
+	defaultMaxRetries          = 10
+	defaultParallelPoolSize    = 10
 )
 
 type AppConfig struct { //nolint:govet
@@ -145,7 +147,7 @@ func cloneClaudePromptReplacementRules(
 func DefaultConfig() AppConfig {
 	return AppConfig{ //nolint:exhaustruct
 		PortAPI:                         2156,
-		MaxRetries:                      1, // 默认为 1 次
+		MaxRetries:                      defaultMaxRetries,
 		VertexAPIKey:                    defaultAnonAPIKey,
 		CountTokensQuerySignature:       defaultCountTokensQuerySig,
 		MaxN:                            8,
@@ -159,7 +161,7 @@ func DefaultConfig() AppConfig {
 		ParallelPoolEnabled:             true,
 		StickyNodePriority:              true,
 		ParallelPoolRetryEnabled:        true,
-		ParallelPoolSize:                5, // 最多同时运行 5 个候选
+		ParallelPoolSize:                defaultParallelPoolSize,
 		ParallelNodeTopK:                80,
 		ParallelPoolDelayDynamic:        false, // 建议默认关闭动态对冲，改为稳定的秒级接力
 		ParallelPoolDelayMs:             1000,  // 每秒启动一个后备节点
@@ -411,7 +413,13 @@ func Load() AppConfig {
 					recordNormalization(key, original, value)
 				}
 			}
-			normalize("parallel_pool_size", &cfg.ParallelPoolSize, 1, 20, 5)
+			normalize(
+				"parallel_pool_size",
+				&cfg.ParallelPoolSize,
+				1,
+				20,
+				defaultParallelPoolSize,
+			)
 			normalize("parallel_pool_delay_ms", &cfg.ParallelPoolDelayMs, 100, 10000, 1000)
 			if cfg.MaxRetries < 0 || cfg.MaxRetries > 10 {
 				original := cfg.MaxRetries

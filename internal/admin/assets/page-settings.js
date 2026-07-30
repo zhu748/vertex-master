@@ -3,7 +3,7 @@ const SETTINGS_FIELDS = [
   { k: 'parallel_pool_enabled', label: '并发请求池', type: 'bool', group: 'pool', desc: '同时请求多个健康节点，首包到达即采纳，降低延迟' },
   { k: 'parallel_pool_retry_enabled', label: '并发池单点重试', type: 'bool', group: 'pool', desc: '默认开启；节点遇到429等可重试错误时允许节点内再次尝试' },
   { k: 'sticky_node_priority', label: '优先复用成功节点', type: 'bool', group: 'pool', desc: '优先选择近期请求成功的节点，同时保留少量未测试节点用于探索。' },
-  { k: 'parallel_pool_size', label: '最大同时并发', type: 'number', max: 20, min: 1, group: 'pool', desc: '同一请求最多同时运行的代理数量（默认 5，最大 20）' },
+  { k: 'parallel_pool_size', label: '最大同时并发', type: 'number', max: 20, min: 1, group: 'pool', desc: '同一请求最多同时运行的代理数量（默认 10，最大 20）' },
   { k: 'proxy_failover_max_attempts', label: '单请求最多尝试代理', type: 'number', max: 100, min: 1, group: 'pool', desc: '失败或超时后可继续接力的候选总数（默认 30）' },
   { k: 'parallel_pool_delay_dynamic', label: '动态对冲延迟', type: 'bool', group: 'pool', desc: '根据节点平均响应时间动态调整并发启动间隔，平衡延迟与流量消耗' },
   { k: 'parallel_pool_delay_ms', label: '固定对冲延迟时间 (毫秒)', type: 'number', max: 10000, min: 100, group: 'pool', desc: '当前代理尚未响应时，启动下一个后备代理的间隔（默认 1000ms）' },

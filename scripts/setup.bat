@@ -51,9 +51,9 @@ if /i "%USE_PROXY%"=="y" (
 
 echo.
 echo ── 高级选项 ──
-set "MAX_RETRIES=2"
-set /p "MAX_RETRIES=请求失败重试次数 [2]: "
-if "%MAX_RETRIES%"=="" set "MAX_RETRIES=2"
+set "MAX_RETRIES=10"
+set /p "MAX_RETRIES=请求失败重试次数 [10]: "
+if "%MAX_RETRIES%"=="" set "MAX_RETRIES=10"
 
 
 :: ---- 创建配置 ----

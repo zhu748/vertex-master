@@ -132,7 +132,7 @@ fi
 
 echo ""
 echo -e "${CYAN}── 高级选项 ──${NC}"
-MAX_RETRIES=$(ask "请求失败重试次数" "2")
+MAX_RETRIES=$(ask "请求失败重试次数" "10")
 
 AUTO_START=false
 if ask_yn "是否设置开机自启？(y/n)" "n"; then

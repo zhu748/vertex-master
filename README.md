@@ -133,7 +133,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ver
 |------|------|------|
 | `port_api` | 2156 | 服务监听端口 |
 | `admin_password` | 自动生成 | 管理面板登录密码 |
-| `max_retries` | 1 | 请求失败重试次数 |
+| `max_retries` | 10 | 请求失败重试次数 |
 | `max_request_mb` | 64 | 单次 HTTP 请求体上限（MiB，面板修改即时生效） |
 | `drop_max_tokens` | false | 移除客户端附带的输出 token 上限，避免思考 token 挤占正文；默认严格遵守客户端上限 |
 | `claude_prompt_injection_enabled` | false | 是否为 Claude Messages 请求前置或后置注入额外 system 提示词 |
@@ -146,7 +146,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ver
 | `proxy_url` | 空 | 出站代理地址 (如 `http://127.0.0.1:7890`) |
 | `parallel_pool_enabled` | true | 是否开启并发竞速节点池 |
 | `parallel_pool_retry_enabled` | true | 并发池节点遇到 429 等可重试错误时是否在节点内自动重试 |
-| `parallel_pool_size` | 5 | 同时运行的候选代理上限 |
+| `parallel_pool_size` | 10 | 同时运行的候选代理上限 |
 | `proxy_failover_max_attempts` | 30 | 单次请求最多尝试的代理数 |
 | `parallel_pool_delay_ms` | 1000 | 后备代理启动间隔（毫秒） |
 | `proxy_health_check_enabled` | true | 是否启用后台代理健康巡检 |
@@ -165,4 +165,4 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ver
 
 ## ☁️ 部署到 Render
 
-仓库根目录已提供 `render.yaml`，可在上传 GitHub 后直接创建 Render Blueprint。部署时只需填写管理面板密码和 API Key；还可选填纯文本代理订阅 URL，服务启动后会立即拉取并默认每 60 分钟更新。远程订阅 URL 默认只能指向公网，订阅代理默认只接受公网 IP 字面量，避免误访问 Render 内部网络和 DNS 重绑定。Blueprint 默认同时运行最多 5 个候选代理、单次请求最多接力尝试 30 个节点、全局最多处理 16 个上游请求，并每 15 分钟分批巡检代理健康。`/healthz` 用于进程存活检查，Render 使用 `/readyz` 同时验证 SQLite 和 API Key 已就绪。详细配置、免费方案限制和持久化说明见 [Render 部署指南](RENDER_DEPLOY.md)。
+仓库根目录已提供 `render.yaml`，可在上传 GitHub 后直接创建 Render Blueprint。部署时只需填写管理面板密码和 API Key；还可选填纯文本代理订阅 URL，服务启动后会立即拉取并默认每 60 分钟更新。远程订阅 URL 默认只能指向公网，订阅代理默认只接受公网 IP 字面量，避免误访问 Render 内部网络和 DNS 重绑定。Blueprint 默认同时运行最多 10 个候选代理、每个候选节点最多重试 10 次、单次请求最多接力尝试 30 个节点、全局最多处理 16 个上游请求，并每 15 分钟分批巡检代理健康。`/healthz` 用于进程存活检查，Render 使用 `/readyz` 同时验证 SQLite 和 API Key 已就绪。详细配置、免费方案限制和持久化说明见 [Render 部署指南](RENDER_DEPLOY.md)。

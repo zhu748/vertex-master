@@ -746,10 +746,11 @@ func CheckTestControl() bool {
 // that may need to roll the change back.
 func pruneHealthUnsafe() map[string]*NodeHealth {
 	var removed map[string]*NodeHealth
+	estimatedOrphans := max(len(healthMap)-len(nodeIndexByURI), 1)
 	for uri, health := range healthMap {
 		if _, found := nodeIndexByURI[uri]; !found {
 			if removed == nil {
-				removed = make(map[string]*NodeHealth)
+				removed = make(map[string]*NodeHealth, estimatedOrphans)
 			}
 			removed[uri] = health
 			delete(healthMap, uri)
