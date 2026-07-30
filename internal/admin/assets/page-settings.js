@@ -115,6 +115,7 @@ function claudePromptSettingsHTML() {
   const injectionEnabled = !!curSettings.claude_prompt_injection_enabled;
   const replacementEnabled = !!curSettings.claude_prompt_replacement_enabled;
   const stripPromotions = curSettings.claude_prompt_strip_claude_code_promotions !== false;
+  const replaceSecurity = curSettings.claude_prompt_replace_security_preamble !== false;
   const position = curSettings.claude_prompt_injection_position === 'prepend' ? 'prepend' : 'append';
   claudeReplacementRules = configuredClaudeReplacementRules();
   if (!claudeReplacementRules.length) {
@@ -130,6 +131,16 @@ function claudePromptSettingsHTML() {
             <div class="desc mt-4px">默认开启，精确删除 Claude Code 注入的 Claude 5 模型推荐、产品入口及 Fast mode 推广三行；其他 system 内容不受影响。</div>
           </div>
           <label class="toggle"><input type="checkbox" id="set_claude_prompt_strip_claude_code_promotions" ${stripPromotions ? 'checked' : ''}><span class="track"></span></label>
+        </div>
+      </div>
+
+      <div class="claude-prompt-rule">
+        <div class="field bool">
+          <div class="min-w-0">
+            <label for="set_claude_prompt_replace_security_preamble">替换 Claude 安全测试提示</label>
+            <div class="desc mt-4px">默认开启，精确替换 Claude/Codex CLI system 中以 “IMPORTANT: Assist with authorized security testing...” 开头的安全测试说明；普通 user 内容不受影响。</div>
+          </div>
+          <label class="toggle"><input type="checkbox" id="set_claude_prompt_replace_security_preamble" ${replaceSecurity ? 'checked' : ''}><span class="track"></span></label>
         </div>
       </div>
 
@@ -342,6 +353,9 @@ async function loadLatestClaudePrompt() {
   if (latestClaudePrompt.promotion_removal_count) {
     actions.push('已移除 Claude Code 推广片段×' + latestClaudePrompt.promotion_removal_count);
   }
+  if (latestClaudePrompt.security_preamble_replacement_count) {
+    actions.push('已替换 Claude 安全测试提示×' + latestClaudePrompt.security_preamble_replacement_count);
+  }
   if (latestClaudePrompt.replacement_count) {
     let replacementSummary = '替换 ' + latestClaudePrompt.replacement_count + ' 处';
     if (latestClaudePrompt.replacement_rules) {
@@ -423,6 +437,8 @@ async function previewClaudePrompt() {
       model: latestClaudePrompt.model || '',
       strip_claude_code_promotions:
         $('#set_claude_prompt_strip_claude_code_promotions').checked,
+      replace_security_preamble:
+        $('#set_claude_prompt_replace_security_preamble').checked,
       replacement_enabled: $('#set_claude_prompt_replacement_enabled').checked,
       replacements: currentClaudeReplacementRulesForRequest(),
       injection_enabled: $('#set_claude_prompt_injection_enabled').checked,
@@ -430,8 +446,9 @@ async function previewClaudePrompt() {
       injection_text: $('#set_claude_prompt_injection_text').value
     });
     effective.value = result.effective_prompt || '';
-    meta.textContent = '当前页面设置预览（尚未保存） · 默认清理 ' +
-      (result.promotion_removal_count || 0) + ' 处 · 自定义替换 ' +
+    meta.textContent = '当前页面设置预览（尚未保存） · 推广清理 ' +
+      (result.promotion_removal_count || 0) + ' 处 · Claude 安全提示 ' +
+      (result.security_preamble_replacement_count || 0) + ' 处 · 自定义替换 ' +
       (result.replacement_count || 0) + ' 处 · 命中 ' +
       (result.matched_rules || 0) + '/' + (result.applicable_rules || 0) +
       ' 条适用规则 · 最终 ' + (result.effective_bytes || 0) + 'B';
@@ -700,6 +717,8 @@ async function saveSettings() {
   out.claude_prompt_replacements = replacements;
   out.claude_prompt_strip_claude_code_promotions =
     $('#set_claude_prompt_strip_claude_code_promotions').checked;
+  out.claude_prompt_replace_security_preamble =
+    $('#set_claude_prompt_replace_security_preamble').checked;
   out.claude_prompt_injection_enabled = injectionEnabled;
   out.claude_prompt_injection_position = $('#set_claude_prompt_injection_position').value;
   out.claude_prompt_injection_text = injectionText;

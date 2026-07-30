@@ -122,6 +122,8 @@ func TestClaudePromptSettingsUIIsEmbedded(t *testing.T) {
 		"removeClaudeReplacementRule",
 		"rule_match_counts",
 		"set_claude_prompt_strip_claude_code_promotions",
+		"set_claude_prompt_replace_security_preamble",
+		"security_preamble_replacement_count",
 		"set_claude_prompt_injection_enabled",
 		"set_claude_prompt_injection_position",
 		"set_claude_prompt_injection_text",

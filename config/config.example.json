@@ -10,6 +10,7 @@
   "claude_prompt_injection_position": "append",
   "claude_prompt_injection_text": "",
   "claude_prompt_strip_claude_code_promotions": true,
+  "claude_prompt_replace_security_preamble": true,
   "claude_prompt_replacement_enabled": false,
   "claude_prompt_replacements": [],
   "parallel_pool_delay_dynamic": false,

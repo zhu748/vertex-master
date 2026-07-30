@@ -21,6 +21,7 @@ var adminAllowedSettings = map[string]bool{
 	"claude_prompt_injection_position":           true,
 	"claude_prompt_injection_text":               true,
 	"claude_prompt_strip_claude_code_promotions": true,
+	"claude_prompt_replace_security_preamble":    true,
 	"claude_prompt_replacement_enabled":          true,
 	"claude_prompt_replacements":                 true,
 	"claude_prompt_replace_from":                 true,
@@ -92,6 +93,7 @@ func (adm *AdminHandler) adminGetSettings(w http.ResponseWriter, _ *http.Request
 			"claude_prompt_injection_position":           adm.cfg.ClaudePromptInjectionPosition(),
 			"claude_prompt_injection_text":               adm.cfg.ClaudePromptInjectionText(),
 			"claude_prompt_strip_claude_code_promotions": policy.StripPromotions,
+			"claude_prompt_replace_security_preamble":    policy.ReplaceSecurity,
 			"claude_prompt_replacement_enabled":          adm.cfg.ClaudePromptReplacementEnabled(),
 			"claude_prompt_replacements":                 rules,
 			"claude_prompt_replace_from":                 legacyFrom,
@@ -169,7 +171,8 @@ func (adm *AdminHandler) adminPutSettings(w http.ResponseWriter, r *http.Request
 			"proxy_health_check_enabled", "sticky_node_priority",
 			"parallel_pool_retry_enabled", "debug_mode", "auto_refresh_logs",
 			"claude_prompt_injection_enabled", "claude_prompt_replacement_enabled",
-			"claude_prompt_strip_claude_code_promotions":
+			"claude_prompt_strip_claude_code_promotions",
+			"claude_prompt_replace_security_preamble":
 			if _, ok := v.(bool); !ok {
 				writeJSON(w, http.StatusBadRequest, adminErr(k+" 必须是布尔值"))
 				return
@@ -377,6 +380,9 @@ func (adm *AdminHandler) adminPutSettings(w http.ResponseWriter, r *http.Request
 	}
 	if value, ok := updates["claude_prompt_strip_claude_code_promotions"].(bool); ok {
 		promptPolicyChanged = promptPolicyChanged || value != currentClaudePolicy.StripPromotions
+	}
+	if value, ok := updates["claude_prompt_replace_security_preamble"].(bool); ok {
+		promptPolicyChanged = promptPolicyChanged || value != currentClaudePolicy.ReplaceSecurity
 	}
 	if value, ok := updates["claude_prompt_injection_enabled"].(bool); ok {
 		promptPolicyChanged = promptPolicyChanged || value != currentClaudePolicy.InjectionEnabled

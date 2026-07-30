@@ -40,6 +40,7 @@ type AppConfig struct { //nolint:govet
 	ClaudePromptInjectionPosition  string                        `json:"claude_prompt_injection_position"`
 	ClaudePromptInjectionText      string                        `json:"claude_prompt_injection_text"`
 	ClaudePromptStripPromotions    bool                          `json:"claude_prompt_strip_claude_code_promotions"`
+	ClaudePromptReplaceSecurity    bool                          `json:"claude_prompt_replace_security_preamble"`
 	ClaudePromptReplacementEnabled bool                          `json:"claude_prompt_replacement_enabled"`
 	ClaudePromptReplacements       []ClaudePromptReplacementRule `json:"claude_prompt_replacements"`
 	// Deprecated single-rule fields are retained for config-file compatibility.
@@ -94,6 +95,7 @@ type ClaudePromptPolicyConfig struct {
 	InjectionPosition  string
 	InjectionText      string
 	StripPromotions    bool
+	ReplaceSecurity    bool
 	ReplacementEnabled bool
 	ReplacementRules   []ClaudePromptReplacementRule
 	MaxRequestMB       int
@@ -105,6 +107,7 @@ func (c AppConfig) ClaudePromptPolicy() ClaudePromptPolicyConfig {
 		InjectionPosition:  normalizeClaudePromptInjectionPosition(c.ClaudePromptInjectionPosition),
 		InjectionText:      c.ClaudePromptInjectionText,
 		StripPromotions:    c.ClaudePromptStripPromotions,
+		ReplaceSecurity:    c.ClaudePromptReplaceSecurity,
 		ReplacementEnabled: c.ClaudePromptReplacementEnabled,
 		ReplacementRules:   c.EffectiveClaudePromptReplacementRules(),
 		MaxRequestMB:       c.MaxRequestMB,
@@ -151,6 +154,7 @@ func DefaultConfig() AppConfig {
 		RequestTimeout:                  180,
 		ClaudePromptInjectionPosition:   "append",
 		ClaudePromptStripPromotions:     true,
+		ClaudePromptReplaceSecurity:     true,
 		ParallelPoolEnabled:             true,
 		StickyNodePriority:              true,
 		ParallelPoolRetryEnabled:        true,

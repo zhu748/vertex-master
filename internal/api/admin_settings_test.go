@@ -87,6 +87,11 @@ func TestAdminPutSettingsRejectsInvalidProxySettings(t *testing.T) {
 			wantMessage: "claude_prompt_strip_claude_code_promotions 必须是布尔值",
 		},
 		{
+			name:        "Claude security preamble replacement wrong type",
+			body:        `{"settings":{"claude_prompt_replace_security_preamble":"true"}}`,
+			wantMessage: "claude_prompt_replace_security_preamble 必须是布尔值",
+		},
+		{
 			name:        "Claude replacement rule missing search text",
 			body:        `{"settings":{"claude_prompt_replacements":[{"from":"","to":"value"}]}}`,
 			wantMessage: "查找内容不能为空",
@@ -182,6 +187,7 @@ func TestAdminPutSettingsAcceptsValidProxySettings(t *testing.T) {
 		"claude_prompt_injection_position":"prepend",
 		"claude_prompt_injection_text":"injected policy",
 		"claude_prompt_strip_claude_code_promotions":false,
+		"claude_prompt_replace_security_preamble":false,
 		"claude_prompt_replacement_enabled":true,
 		"claude_prompt_replacements":[
 			{"from":"old policy","to":"new policy","models":["fake-gemini-3.6-flash"]},
@@ -222,6 +228,7 @@ func TestAdminPutSettingsAcceptsValidProxySettings(t *testing.T) {
 		"claude_prompt_injection_position":           "prepend",
 		"claude_prompt_injection_text":               "injected policy",
 		"claude_prompt_strip_claude_code_promotions": false,
+		"claude_prompt_replace_security_preamble":    false,
 		"claude_prompt_replacement_enabled":          true,
 		"claude_prompt_replace_from":                 "",
 		"claude_prompt_replace_to":                   "",
@@ -557,6 +564,7 @@ func TestAdminSettingsExposeAndRejectEnvironmentManagedFields(t *testing.T) {
 	if response.Settings["claude_prompt_injection_position"] != "append" ||
 		response.Settings["claude_prompt_injection_enabled"] != false ||
 		response.Settings["claude_prompt_strip_claude_code_promotions"] != true ||
+		response.Settings["claude_prompt_replace_security_preamble"] != true ||
 		response.Settings["claude_prompt_replacement_enabled"] != false {
 		t.Fatalf("Claude prompt settings missing from admin response: %#v", response.Settings)
 	}

@@ -140,6 +140,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ver
 | `claude_prompt_injection_position` | append | 注入位置，可选 `prepend` 或 `append` |
 | `claude_prompt_injection_text` | 空 | 要注入的 system 提示词 |
 | `claude_prompt_strip_claude_code_promotions` | true | 精确移除 Claude Code 注入的模型、产品入口及 Fast mode 推广片段 |
+| `claude_prompt_replace_security_preamble` | true | 精确替换 Claude/Codex CLI 注入的 `IMPORTANT: Assist with authorized security testing...` 安全测试说明 |
 | `claude_prompt_replacement_enabled` | false | 是否在发送上游前，对 Claude 真正的 system/developer 提示词执行有序字面量替换 |
 | `claude_prompt_replacements` | `[]` | 最多 32 条 `{from,to,disabled,models}` 规则；面板可明确选择替换或删除，删除仍兼容保存为 `to: ""` |
 | `proxy_url` | 空 | 出站代理地址 (如 `http://127.0.0.1:7890`) |
@@ -158,7 +159,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ver
 
 > **预填充兼容**：通过 OpenAI Chat/Responses、Claude Messages 或 Gemini 原生接口调用 `gemini-3.6-flash` 时，服务会保留末尾纯文本 `assistant`/`model` 预填充的角色与原文，再追加一条短续写提示，使请求合法地以 `user` 结束；流式或非流式回复都会移除模型可能重复输出的前缀。工具调用、媒体、思考块和其他模型的历史行为保持不变；旧客户端传入的 `NONE`/`thinkingBudget` 也会在出站时转换为 Gemini 3.6 支持的思考级别。
 
-> **Claude system 处理**：默认先精确移除 Claude Code 注入的 Claude 模型推荐、产品入口及 Fast mode 推广三行，可在管理面板关闭。随后可以为 `/v1/messages` 和 `/v1/messages/count_tokens` 配置多条 system 精确替换或删除规则。每条规则可单独停用或限定客户端/实际模型名；模型范围默认留空并适用于所有模型，只有主动填写时才会限制。规则区分大小写、空白与换行，按列表顺序逐条执行，最后再以前置或后置的独立 system 片段注入额外提示词。顶层和中途 system 会保持先后顺序与独立片段，只有规则确实跨片段匹配时才兼容性合并。`role: user` 内的 `<system-reminder>` 仍是用户内容，不会被 system 规则改写。生成与 Token 计数的最近记录分开保存在当前进程内，可使用尚未保存的页面设置进行后端预览；被截断的记录不会用于创建精确规则，也不会写入日志或配置文件。
+> **Claude system 处理**：默认先精确移除 Claude Code 注入的 Claude 模型推荐、产品入口及 Fast mode 推广三行，再精确替换 Claude/Codex CLI 注入的 `IMPORTANT: Assist with authorized security testing...` 安全测试说明，二者都可在管理面板关闭。随后可以为 `/v1/messages` 和 `/v1/messages/count_tokens` 配置多条 system 精确替换或删除规则。每条规则可单独停用或限定客户端/实际模型名；模型范围默认留空并适用于所有模型，只有主动填写时才会限制。规则区分大小写、空白与换行，按列表顺序逐条执行，最后再以前置或后置的独立 system 片段注入额外提示词。顶层和中途 system 会保持先后顺序与独立片段，只有规则确实跨片段匹配时才兼容性合并。`role: user` 内的 `<system-reminder>` 仍是用户内容，不会被 system 规则改写。生成与 Token 计数的最近记录分开保存在当前进程内，可使用尚未保存的页面设置进行后端预览；被截断的记录不会用于创建精确规则，也不会写入日志或配置文件。
 
 详细配置说明请参阅 [部署指南](部署指南.md#配置怎么改)。
 

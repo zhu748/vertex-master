@@ -88,6 +88,49 @@ func TestClaudePromptPolicyDoesNotPartiallyStripChangedPromotionBlock(t *testing
 	}
 }
 
+func TestClaudePromptPolicyReplacesSecurityPreambleByDefault(t *testing.T) {
+	cfg := config.DefaultConfig()
+	chatBody := map[string]any{"messages": []any{
+		map[string]any{
+			"role":    "system",
+			"content": "before\n" + claudeSecurityPreamblePrompt + "\nafter",
+		},
+		map[string]any{"role": "user", "content": claudeSecurityPreamblePrompt},
+	}}
+
+	result, err := applyClaudePromptPolicy(chatBody, config.StaticProvider(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.SecurityPreambleReplacementCount != 1 ||
+		result.ReplacementCount != 0 ||
+		!strings.Contains(result.EffectivePrompt, claudeSecurityPreambleReplacement) ||
+		strings.Contains(result.EffectivePrompt, claudeSecurityPreamblePrompt) {
+		t.Fatalf("unexpected default security preamble replacement: %#v", result)
+	}
+	messages := chatBody["messages"].([]any)
+	if got := messages[0].(map[string]any)["content"].(string); got != result.EffectivePrompt {
+		t.Fatalf("upstream system=%q, want %q", got, result.EffectivePrompt)
+	}
+	if got := messages[1].(map[string]any)["content"].(string); got != claudeSecurityPreamblePrompt {
+		t.Fatalf("user content was unexpectedly rewritten: %q", got)
+	}
+
+	cfg.ClaudePromptReplaceSecurity = false
+	unchangedBody := map[string]any{"messages": []any{
+		map[string]any{"role": "system", "content": claudeSecurityPreamblePrompt},
+		map[string]any{"role": "user", "content": "hello"},
+	}}
+	result, err = applyClaudePromptPolicy(unchangedBody, config.StaticProvider(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.SecurityPreambleReplacementCount != 0 ||
+		result.EffectivePrompt != claudeSecurityPreamblePrompt {
+		t.Fatalf("security-preamble opt-out was ignored: %#v", result)
+	}
+}
+
 func TestClaudePromptPolicyReplacesBeforeAppendingInjection(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.ClaudePromptReplacementEnabled = true
@@ -497,14 +540,15 @@ func TestAdminClaudePromptLatestLifecycle(t *testing.T) {
 	}
 
 	store.Record("claude-alias", "messages", claudePromptPolicyResult{
-		OriginalPrompt:        "before",
-		EffectivePrompt:       "after",
-		HadSystem:             true,
-		PromotionRemovalCount: 1,
-		ReplacementCount:      1,
-		ReplacementRules:      1,
-		MatchedRules:          1,
-		RuleMatchCounts:       []int{1},
+		OriginalPrompt:                   "before",
+		EffectivePrompt:                  "after",
+		HadSystem:                        true,
+		PromotionRemovalCount:            1,
+		SecurityPreambleReplacementCount: 1,
+		ReplacementCount:                 1,
+		ReplacementRules:                 1,
+		MatchedRules:                     1,
+		RuleMatchCounts:                  []int{1},
 	})
 	get := httptest.NewRecorder()
 	adm.adminClaudePromptLatest(
@@ -517,6 +561,7 @@ func TestAdminClaudePromptLatestLifecycle(t *testing.T) {
 	}
 	if response["original_prompt"] != "before" || response["effective_prompt"] != "after" ||
 		response["promotion_removal_count"] != float64(1) ||
+		response["security_preamble_replacement_count"] != float64(1) ||
 		response["replacement_count"] != float64(1) ||
 		response["replacement_rules"] != float64(1) ||
 		response["matched_rules"] != float64(1) {
@@ -842,7 +887,42 @@ func TestAdminClaudePromptPreviewReportsDefaultPromotionRemoval(t *testing.T) {
 	}
 	if response["effective_prompt"] != "" ||
 		response["promotion_removal_count"] != float64(1) ||
+		response["security_preamble_replacement_count"] != float64(0) ||
 		response["replacement_count"] != float64(0) {
 		t.Fatalf("unexpected promotion-removal preview: %#v", response)
+	}
+}
+
+func TestAdminClaudePromptPreviewReportsDefaultSecurityPreambleReplacement(t *testing.T) {
+	adm := &AdminHandler{
+		handler: handler{cfg: config.StaticProvider(config.DefaultConfig())},
+	} //nolint:exhaustruct
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/api/admin/claude-prompt/preview",
+		strings.NewReader(fmt.Sprintf(`{
+			"original_prompt":%q,
+			"replace_security_preamble":true,
+			"replacement_enabled":false,
+			"replacements":[],
+			"injection_enabled":false,
+			"injection_position":"append",
+			"injection_text":""
+		}`, claudeSecurityPreamblePrompt)),
+	)
+
+	adm.adminClaudePromptPreview(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("preview status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response["effective_prompt"] != claudeSecurityPreambleReplacement ||
+		response["security_preamble_replacement_count"] != float64(1) ||
+		response["replacement_count"] != float64(0) {
+		t.Fatalf("unexpected security-preamble preview: %#v", response)
 	}
 }

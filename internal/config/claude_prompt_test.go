@@ -9,10 +9,13 @@ import (
 func TestClaudePromptConfigDefaultsAndProvider(t *testing.T) {
 	cfg := DefaultConfig()
 	if cfg.ClaudePromptInjectionEnabled || cfg.ClaudePromptReplacementEnabled {
-		t.Fatal("Claude prompt rewriting must be opt-in")
+		t.Fatal("custom Claude prompt rewriting must be opt-in")
 	}
 	if !cfg.ClaudePromptStripPromotions {
 		t.Fatal("Claude Code promotion removal must be enabled by default")
+	}
+	if !cfg.ClaudePromptReplaceSecurity {
+		t.Fatal("Claude security preamble replacement must be enabled by default")
 	}
 	if cfg.ClaudePromptInjectionPosition != "append" {
 		t.Fatalf("default injection position=%q, want append", cfg.ClaudePromptInjectionPosition)
@@ -22,6 +25,7 @@ func TestClaudePromptConfigDefaultsAndProvider(t *testing.T) {
 	cfg.ClaudePromptInjectionPosition = "prepend"
 	cfg.ClaudePromptInjectionText = "inject"
 	cfg.ClaudePromptStripPromotions = false
+	cfg.ClaudePromptReplaceSecurity = false
 	cfg.ClaudePromptReplacementEnabled = true
 	cfg.ClaudePromptReplacements = []ClaudePromptReplacementRule{
 		{From: "from one", To: "to one", Models: []string{"fake-model"}},
@@ -43,7 +47,8 @@ func TestClaudePromptConfigDefaultsAndProvider(t *testing.T) {
 		t.Fatal("provider exposed its replacement rule slice for mutation")
 	}
 	policy := provider.ClaudePromptPolicy()
-	if !policy.InjectionEnabled || policy.StripPromotions || !policy.ReplacementEnabled ||
+	if !policy.InjectionEnabled || policy.StripPromotions || policy.ReplaceSecurity ||
+		!policy.ReplacementEnabled ||
 		policy.InjectionPosition != "prepend" || len(policy.ReplacementRules) != 2 ||
 		!policy.ReplacementRules[1].Disabled || policy.MaxRequestMB != cfg.MaxRequestMB {
 		t.Fatalf("static provider lost the Claude prompt policy snapshot: %#v", policy)
@@ -85,7 +90,8 @@ func TestLoadOldConfigGetsSafeClaudePromptDefaults(t *testing.T) {
 
 	cfg := Load()
 	if cfg.ClaudePromptInjectionEnabled || cfg.ClaudePromptReplacementEnabled ||
-		!cfg.ClaudePromptStripPromotions || cfg.ClaudePromptInjectionPosition != "append" {
+		!cfg.ClaudePromptStripPromotions || !cfg.ClaudePromptReplaceSecurity ||
+		cfg.ClaudePromptInjectionPosition != "append" {
 		t.Fatalf("old config got unsafe Claude prompt defaults: %#v", cfg)
 	}
 }
@@ -103,6 +109,22 @@ func TestLoadCanDisableClaudeCodePromotionRemoval(t *testing.T) {
 
 	if cfg := Load(); cfg.ClaudePromptStripPromotions {
 		t.Fatalf("explicit promotion-removal opt-out was ignored: %#v", cfg)
+	}
+}
+
+func TestLoadCanDisableClaudeSecurityPreambleReplacement(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("VPROXY_CONFIG", path)
+	if err := os.WriteFile(path, []byte(
+		`{"claude_prompt_replace_security_preamble":false}`,
+	), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	InvalidateCache()
+	t.Cleanup(InvalidateCache)
+
+	if cfg := Load(); cfg.ClaudePromptReplaceSecurity {
+		t.Fatalf("explicit security-preamble replacement opt-out was ignored: %#v", cfg)
 	}
 }
 
