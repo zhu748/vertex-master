@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -401,6 +402,11 @@ func tokenCountValue(v any) (int, bool) {
 	var count int
 	switch n := v.(type) {
 	case float64:
+		maximumInt := int(^uint(0) >> 1)
+		if math.IsNaN(n) || math.IsInf(n, 0) || n < 0 ||
+			n > float64(maximumInt) || math.Trunc(n) != n {
+			return 0, false
+		}
 		count = int(n)
 	case int:
 		count = n
@@ -413,5 +419,8 @@ func tokenCountValue(v any) (int, bool) {
 	default:
 		return 0, false
 	}
-	return count, count >= 0
+	if count < 0 {
+		return 0, false
+	}
+	return count, true
 }

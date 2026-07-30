@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -229,6 +230,18 @@ func TestParseCountTokensResultDistinguishesZeroAndStructuredErrors(t *testing.T
 	}
 }
 
+func TestParseCountTokensResultRejectsInvalidNumericCounts(t *testing.T) {
+	for _, raw := range []string{
+		`[{"results":[{"data":{"ui":{"countTokensV2":{"totalTokens":42.5}}}}]}]`,
+		`[{"results":[{"data":{"ui":{"countTokensV2":{"totalTokens":-1}}}}]}]`,
+	} {
+		count, found, err := parseCountTokensResult([]byte(raw))
+		if err != nil || found || count != 0 {
+			t.Fatalf("invalid totalTokens should not be accepted: count=%d found=%v err=%v", count, found, err)
+		}
+	}
+}
+
 // ---- coerceTokenCount ----
 
 func TestCoerceTokenCount(t *testing.T) {
@@ -238,7 +251,7 @@ func TestCoerceTokenCount(t *testing.T) {
 		want int
 	}{
 		{"float64", float64(42), 42},
-		{"float64 truncates", float64(42.9), 42},
+		{"fractional float64 rejected", float64(42.9), 0},
 		{"int", 7, 7},
 		{"numeric string", "123", 123},
 		{"trimmed not supported (atoi strict)", " 5 ", 0}, // Atoi 不 trim
@@ -255,6 +268,21 @@ func TestCoerceTokenCount(t *testing.T) {
 		})
 	}
 }
+
+func TestTokenCountValueRejectsNonFiniteAndOutOfRangeNumbers(t *testing.T) {
+	for _, value := range []any{
+		math.NaN(),
+		math.Inf(1),
+		math.Inf(-1),
+		math.MaxFloat64,
+		float64(-1),
+	} {
+		if count, ok := tokenCountValue(value); ok || count != 0 {
+			t.Fatalf("tokenCountValue(%v)=(%d,%v), want (0,false)", value, count, ok)
+		}
+	}
+}
+
 func TestCountTokensUsesUpstreamOperation(t *testing.T) {
 	oldURL := batchGraphqlURL
 	t.Cleanup(func() { batchGraphqlURL = oldURL })
