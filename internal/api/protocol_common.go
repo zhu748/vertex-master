@@ -678,6 +678,9 @@ func jsonStringWithCanonical(v any) (string, bool) {
 	if v == nil {
 		return "{}", true
 	}
+	if data, ok := jsonx.MarshalJSONValueString(v); ok {
+		return data, true
+	}
 	data, err := jsonx.MarshalString(v)
 	if err != nil {
 		return "{}", true

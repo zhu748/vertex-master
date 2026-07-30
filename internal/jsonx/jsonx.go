@@ -10,10 +10,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
+	"slices"
+	"strconv"
 	"sync"
+	"unicode/utf8"
+	"unsafe"
 )
 
-const maxPooledMarshalBufferCapacity = 64 << 10
+const (
+	maxPooledMarshalBufferCapacity = 64 << 10
+	maxFastJSONValueDepth          = 64
+	maxStackJSONMapKeys            = 16
+)
 
 var marshalBufferPool = sync.Pool{ //nolint:gochecknoglobals
 	New: func() any { return new(bytes.Buffer) },
@@ -121,6 +130,253 @@ func MarshalString(v any) (string, error) {
 	encoded := string(view)
 	releaseMarshalBuffer(buf)
 	return encoded, nil
+}
+
+// MarshalJSONValueString serializes the finite value set produced by decoding
+// arbitrary JSON into any: nil, bool, string, float64, []any and map[string]any.
+// It avoids reflection and returns ok=false for custom types, non-finite numbers,
+// cycles and unusually deep values so callers can fall back to MarshalString.
+func MarshalJSONValueString(value any) (encoded string, ok bool) {
+	size, ok := jsonValueEncodedSize(value, 0)
+	if !ok {
+		return "", false
+	}
+	buffer := make([]byte, 0, size)
+	buffer, ok = appendJSONValue(buffer, value, 0)
+	if !ok || len(buffer) != size {
+		return "", false
+	}
+	// buffer is newly allocated to its exact final size and is not exposed or
+	// mutated after publication, so its backing storage can safely become the
+	// immutable result string without another complete copy.
+	return unsafe.String(unsafe.SliceData(buffer), len(buffer)), true
+}
+
+func jsonValueEncodedSize(value any, depth int) (int, bool) {
+	if depth > maxFastJSONValueDepth {
+		return 0, false
+	}
+	switch typed := value.(type) {
+	case nil:
+		return len("null"), true
+	case bool:
+		if typed {
+			return len("true"), true
+		}
+		return len("false"), true
+	case string:
+		return jsonStringEncodedSize(typed), true
+	case float64:
+		if math.IsInf(typed, 0) || math.IsNaN(typed) {
+			return 0, false
+		}
+		var scratch [32]byte
+		return len(appendJSONFloat(scratch[:0], typed)), true
+	case []any:
+		if typed == nil {
+			return len("null"), true
+		}
+		size := 2
+		for index, item := range typed {
+			itemSize, itemOK := jsonValueEncodedSize(item, depth+1)
+			if !itemOK || size > int(^uint(0)>>1)-itemSize {
+				return 0, false
+			}
+			size += itemSize
+			if index > 0 {
+				size++
+			}
+		}
+		return size, true
+	case map[string]any:
+		if typed == nil {
+			return len("null"), true
+		}
+		size := 2
+		index := 0
+		for key, item := range typed {
+			keySize := jsonStringEncodedSize(key)
+			itemSize, itemOK := jsonValueEncodedSize(item, depth+1)
+			if !itemOK || keySize > int(^uint(0)>>1)-itemSize-1 ||
+				size > int(^uint(0)>>1)-keySize-itemSize-1 {
+				return 0, false
+			}
+			size += keySize + 1 + itemSize
+			if index > 0 {
+				size++
+			}
+			index++
+		}
+		return size, true
+	default:
+		return 0, false
+	}
+}
+
+func appendJSONValue(buffer []byte, value any, depth int) ([]byte, bool) {
+	if depth > maxFastJSONValueDepth {
+		return buffer, false
+	}
+	switch typed := value.(type) {
+	case nil:
+		return append(buffer, "null"...), true
+	case bool:
+		return strconv.AppendBool(buffer, typed), true
+	case string:
+		return appendJSONString(buffer, typed), true
+	case float64:
+		if math.IsInf(typed, 0) || math.IsNaN(typed) {
+			return buffer, false
+		}
+		return appendJSONFloat(buffer, typed), true
+	case []any:
+		if typed == nil {
+			return append(buffer, "null"...), true
+		}
+		buffer = append(buffer, '[')
+		for index, item := range typed {
+			if index > 0 {
+				buffer = append(buffer, ',')
+			}
+			var ok bool
+			buffer, ok = appendJSONValue(buffer, item, depth+1)
+			if !ok {
+				return buffer, false
+			}
+		}
+		return append(buffer, ']'), true
+	case map[string]any:
+		if typed == nil {
+			return append(buffer, "null"...), true
+		}
+		var stackKeys [maxStackJSONMapKeys]string
+		keys := stackKeys[:0]
+		if len(typed) > len(stackKeys) {
+			keys = make([]string, 0, len(typed))
+		}
+		for key := range typed {
+			keys = append(keys, key)
+		}
+		slices.Sort(keys)
+		buffer = append(buffer, '{')
+		for index, key := range keys {
+			if index > 0 {
+				buffer = append(buffer, ',')
+			}
+			buffer = appendJSONString(buffer, key)
+			buffer = append(buffer, ':')
+			var ok bool
+			buffer, ok = appendJSONValue(buffer, typed[key], depth+1)
+			if !ok {
+				return buffer, false
+			}
+		}
+		return append(buffer, '}'), true
+	default:
+		return buffer, false
+	}
+}
+
+func appendJSONFloat(buffer []byte, value float64) []byte {
+	format := byte('f')
+	absolute := math.Abs(value)
+	if absolute != 0 && (absolute < 1e-6 || absolute >= 1e21) {
+		format = 'e'
+	}
+	buffer = strconv.AppendFloat(buffer, value, format, -1, 64)
+	if format == 'e' {
+		length := len(buffer)
+		if length >= 4 && buffer[length-4] == 'e' && buffer[length-3] == '-' && buffer[length-2] == '0' {
+			buffer[length-2] = buffer[length-1]
+			buffer = buffer[:length-1]
+		}
+	}
+	return buffer
+}
+
+func jsonStringEncodedSize(value string) int {
+	size := 2
+	for index := 0; index < len(value); {
+		char := value[index]
+		if char < utf8.RuneSelf {
+			switch char {
+			case '\\', '"', '\b', '\f', '\n', '\r', '\t':
+				size += 2
+			default:
+				if char < 0x20 {
+					size += 6
+				} else {
+					size++
+				}
+			}
+			index++
+			continue
+		}
+		runeValue, runeSize := utf8.DecodeRuneInString(value[index:])
+		switch {
+		case runeValue == utf8.RuneError && runeSize == 1:
+			size += len(`\ufffd`)
+		case runeValue == '\u2028' || runeValue == '\u2029':
+			size += 6
+		default:
+			size += runeSize
+		}
+		index += runeSize
+	}
+	return size
+}
+
+func appendJSONString(buffer []byte, value string) []byte {
+	buffer = append(buffer, '"')
+	start := 0
+	for index := 0; index < len(value); {
+		char := value[index]
+		if char < utf8.RuneSelf {
+			if char >= 0x20 && char != '\\' && char != '"' {
+				index++
+				continue
+			}
+			buffer = append(buffer, value[start:index]...)
+			switch char {
+			case '\\', '"':
+				buffer = append(buffer, '\\', char)
+			case '\b':
+				buffer = append(buffer, '\\', 'b')
+			case '\f':
+				buffer = append(buffer, '\\', 'f')
+			case '\n':
+				buffer = append(buffer, '\\', 'n')
+			case '\r':
+				buffer = append(buffer, '\\', 'r')
+			case '\t':
+				buffer = append(buffer, '\\', 't')
+			default:
+				const hex = "0123456789abcdef"
+				buffer = append(buffer, '\\', 'u', '0', '0', hex[char>>4], hex[char&0xf])
+			}
+			index++
+			start = index
+			continue
+		}
+		runeValue, runeSize := utf8.DecodeRuneInString(value[index:])
+		if runeValue == utf8.RuneError && runeSize == 1 {
+			buffer = append(buffer, value[start:index]...)
+			buffer = append(buffer, `\ufffd`...)
+			index += runeSize
+			start = index
+			continue
+		}
+		if runeValue == '\u2028' || runeValue == '\u2029' {
+			buffer = append(buffer, value[start:index]...)
+			buffer = append(buffer, '\\', 'u', '2', '0', '2', byte('8'+runeValue-'\u2028'))
+			index += runeSize
+			start = index
+			continue
+		}
+		index += runeSize
+	}
+	buffer = append(buffer, value[start:]...)
+	return append(buffer, '"')
 }
 
 // MarshalView serializes v and passes a read-only view of the pooled encoding
