@@ -2681,22 +2681,22 @@ func SelectForParallel(k int, topK int, debugMode bool, stickyBonusEnabled bool)
 			continue
 		}
 		if h != nil {
-			score += math.Min(float64(h.SuccessCount), 100) * 3
-			score -= math.Min(float64(h.FailCount), 100) * 4
+			score += selectionUpperBound(float64(h.SuccessCount), 100) * 3
+			score -= selectionUpperBound(float64(h.FailCount), 100) * 4
 			score -= float64(h.ConsecutiveFailures) * 25
 			if h.LastTestMs > 0 {
-				score -= math.Min(h.LastTestMs/1000.0, 30.0)
+				score -= selectionUpperBound(h.LastTestMs/1000.0, 30)
 			}
 			lastSeen := maxInt64(h.LastSuccessAt, h.LastFailAt)
 			if now-lastSeen > 3600 {
 				score += 10
 			}
-			score -= math.Min(float64(h.RateLimitCount), 10) * 5
+			score -= selectionUpperBound(float64(h.RateLimitCount), 10) * 5
 			score -= float64(h.RecentUseCount) * 2
 			if h.LastSelectedAt > 0 {
 				elapsed := now - h.LastSelectedAt
 				if elapsed > 600 {
-					score += math.Min(float64(elapsed)/60, 15)
+					score += selectionUpperBound(float64(elapsed)/60, 15)
 				}
 			}
 		}
@@ -2710,9 +2710,10 @@ func SelectForParallel(k int, topK int, debugMode bool, stickyBonusEnabled bool)
 				known = make([]scoredNode, 0, knownLimit)
 			}
 		}
-		item := scoredNode{
-			node: n, score: math.Max(1.0, score), recovering: h.ConsecutiveFailures > 0,
+		if score < 1 {
+			score = 1
 		}
+		item := scoredNode{node: n, score: score, recovering: h.ConsecutiveFailures > 0}
 		known = retainHighestKnown(known, item, knownLimit)
 	}
 	mu.RUnlock()
@@ -2869,6 +2870,13 @@ func SelectForParallel(k int, topK int, debugMode bool, stickyBonusEnabled bool)
 		log.Printf("[Nodes] 选择并行节点 (需求: %d, 实际: %d)", k, len(selected))
 	}
 	return selected
+}
+
+func selectionUpperBound(value, upper float64) float64 {
+	if value > upper {
+		return upper
+	}
+	return value
 }
 
 func weightedNodeSample(candidates []scoredNode, count int) []Node {

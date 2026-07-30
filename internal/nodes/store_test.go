@@ -3,6 +3,7 @@ package nodes
 import (
 	"encoding/base64"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -971,6 +972,31 @@ func TestSelectForParallelCooldownFallback(t *testing.T) {
 	selected := SelectForParallel(3, 80, false, false)
 	if len(selected) != 1 || selected[0].RawURI != "uri3" {
 		t.Errorf("Expected only the available node, got %#v", selected)
+	}
+}
+
+func TestSelectionUpperBoundMatchesScoreSemantics(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		value float64
+		upper float64
+		want  float64
+	}{
+		{name: "negative", value: -5, upper: 100, want: -5},
+		{name: "below", value: 9, upper: 10, want: 9},
+		{name: "boundary", value: 10, upper: 10, want: 10},
+		{name: "above", value: 11, upper: 10, want: 10},
+		{name: "positive infinity", value: math.Inf(1), upper: 30, want: 30},
+		{name: "negative infinity", value: math.Inf(-1), upper: 30, want: math.Inf(-1)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := selectionUpperBound(test.value, test.upper); got != test.want {
+				t.Fatalf("selectionUpperBound(%v, %v)=%v, want %v", test.value, test.upper, got, test.want)
+			}
+		})
+	}
+	if got := selectionUpperBound(math.NaN(), 10); !math.IsNaN(got) {
+		t.Fatalf("selectionUpperBound(NaN, 10)=%v, want NaN", got)
 	}
 }
 
