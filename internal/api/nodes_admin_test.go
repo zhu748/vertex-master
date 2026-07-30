@@ -483,6 +483,87 @@ func TestParseImportedNodesSupportsV2RayNInnerURI(t *testing.T) {
 	}
 }
 
+func TestParseImportedNodesConvertsV2RayNXHTTPExtra(t *testing.T) {
+	extraJSON, err := json.Marshal(map[string]any{
+		"noGRPCHeader":    true,
+		"sessionIDLength": 8,
+		"xmux": map[string]any{
+			"maxConnections":   "1-4",
+			"hKeepAlivePeriod": 30,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Marshal XHTTP extra: %v", err)
+	}
+	payload, err := json.Marshal(map[string]any{
+		"ConfigType":     5,
+		"Remarks":        "xhttp demo",
+		"Address":        "xhttp.example.com",
+		"Port":           443,
+		"Password":       "12345678-1234-1234-1234-123456789012",
+		"StreamSecurity": "tls",
+		"Sni":            "edge.example.com",
+		"Network":        "xhttp",
+		"ProtoExtraObj":  map[string]any{"VlessEncryption": "none"},
+		"TransportExtraObj": map[string]any{
+			"Path":       "/api",
+			"Host":       "cdn.example.com",
+			"XhttpMode":  "stream-one",
+			"XhttpExtra": string(extraJSON),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Marshal V2RayN profile: %v", err)
+	}
+
+	imported := parseImportedNodes(
+		"v2rayn://vless/" + base64.RawURLEncoding.EncodeToString(payload),
+	)
+	if len(imported) != 1 {
+		t.Fatalf("expected 1 node, got %d", len(imported))
+	}
+	out, err := transport.ParseURI(imported[0].RawURI)
+	if err != nil {
+		t.Fatalf("ParseURI returned error: %v", err)
+	}
+	xhttpOptions, ok := out["xhttp-opts"].(map[string]any)
+	if !ok || xhttpOptions["path"] != "/api" ||
+		xhttpOptions["host"] != "cdn.example.com" ||
+		xhttpOptions["mode"] != "stream-one" ||
+		xhttpOptions["no-grpc-header"] != true ||
+		xhttpOptions["session-length"] != "8" {
+		t.Fatalf("V2RayN XHTTP options not converted: %#v", out["xhttp-opts"])
+	}
+	if _, stale := xhttpOptions["extra"]; stale {
+		t.Fatalf("raw XHTTP extra leaked into Mihomo options: %#v", xhttpOptions)
+	}
+	reuse, ok := xhttpOptions["reuse-settings"].(map[string]any)
+	if !ok || reuse["max-connections"] != "1-4" ||
+		reuse["h-keep-alive-period"] != float64(30) {
+		t.Fatalf("V2RayN XHTTP reuse settings not converted: %#v", reuse)
+	}
+
+	directProxy := map[string]any{}
+	applyTransportExtras(
+		directProxy,
+		map[string]any{"Network": "xhttp"},
+		map[string]any{
+			"XhttpExtra": map[string]any{
+				"noGRPCHeader": true,
+				"xmux":         map[string]any{"maxConnections": 2},
+			},
+		},
+	)
+	directOptions, ok := directProxy["xhttp-opts"].(map[string]any)
+	if !ok || directOptions["no-grpc-header"] != true {
+		t.Fatalf("object XHTTP extra not converted: %#v", directProxy)
+	}
+	directReuse, ok := directOptions["reuse-settings"].(map[string]any)
+	if !ok || directReuse["max-connections"] != "2" {
+		t.Fatalf("object XHTTP reuse settings not converted: %#v", directReuse)
+	}
+}
+
 func TestParseImportedNodesSupportsSIP008(t *testing.T) {
 	text := `{"servers":[{"remarks":"ss demo","server":"1.2.3.4","server_port":8388,"method":"aes-128-gcm","password":"secret"}]}`
 

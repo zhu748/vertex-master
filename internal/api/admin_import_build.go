@@ -9,6 +9,7 @@ import (
 
 	"github.com/bsfdsagfadg/vertex/internal/base64x"
 	"github.com/bsfdsagfadg/vertex/internal/nodes"
+	proxytransport "github.com/bsfdsagfadg/vertex/internal/transport"
 	"gopkg.in/yaml.v3"
 )
 
@@ -88,8 +89,12 @@ func applyTransportExtras(proxy map[string]any, obj map[string]any, transport ma
 		if mode := strings.TrimSpace(valueToString(transport["XhttpMode"])); mode != "" {
 			xhttpOpts["mode"] = mode
 		}
-		if headers := parseJSONMapString(valueToString(transport["XhttpExtra"])); len(headers) > 0 {
-			xhttpOpts["extra"] = headers
+		extra := mapValue(transport["XhttpExtra"])
+		if len(extra) == 0 {
+			extra = parseJSONMapString(valueToString(transport["XhttpExtra"]))
+		}
+		if len(extra) > 0 {
+			proxytransport.ApplyXHTTPExtraOptions(xhttpOpts, extra)
 		}
 		if len(xhttpOpts) > 0 {
 			proxy["xhttp-opts"] = xhttpOpts

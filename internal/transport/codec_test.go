@@ -2,6 +2,8 @@ package transport
 
 import (
 	"encoding/base64"
+	"encoding/json"
+	"net/url"
 	"testing"
 
 	"github.com/metacubex/mihomo/adapter"
@@ -97,9 +99,21 @@ func TestParseURIVlessKeepsRealityAndWS(t *testing.T) {
 }
 
 func TestParseURIVlessKeepsXHTTPAndHTTPOptions(t *testing.T) {
+	extraJSON, err := json.Marshal(map[string]any{
+		"noGRPCHeader":    true,
+		"sessionIDLength": 8,
+		"xmux": map[string]any{
+			"maxConnections":   "1-4",
+			"hKeepAlivePeriod": 30,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Marshal XHTTP extra: %v", err)
+	}
 	xhttpRaw := "vless://12345678-1234-1234-1234-123456789012@xhttp.example.com:443" +
 		"?security=tls&sni=edge.example.com&type=xhttp&path=%2Fapi" +
-		"&host=cdn.example.com&mode=stream-one&pcs=certificate-pin#xhttp"
+		"&host=cdn.example.com&mode=stream-one&pcs=certificate-pin&extra=" +
+		url.QueryEscape(string(extraJSON)) + "#xhttp"
 	xhttp, err := ParseURI(xhttpRaw)
 	if err != nil {
 		t.Fatalf("ParseURI(XHTTP) returned error: %v", err)
@@ -108,6 +122,12 @@ func TestParseURIVlessKeepsXHTTPAndHTTPOptions(t *testing.T) {
 	if !ok || xhttpOpts["path"] != "/api" ||
 		xhttpOpts["host"] != "cdn.example.com" || xhttpOpts["mode"] != "stream-one" {
 		t.Fatalf("VLESS XHTTP options not preserved: %#v", xhttp)
+	}
+	reuse, reuseOK := xhttpOpts["reuse-settings"].(map[string]any)
+	if xhttpOpts["no-grpc-header"] != true || xhttpOpts["session-length"] != "8" ||
+		!reuseOK || reuse["max-connections"] != "1-4" ||
+		reuse["h-keep-alive-period"] != 30 {
+		t.Fatalf("VLESS XHTTP extra not preserved: %#v", xhttpOpts)
 	}
 	if xhttp["udp"] != true || xhttp["fingerprint"] != "certificate-pin" {
 		t.Fatalf("VLESS common options not preserved: %#v", xhttp)
@@ -145,6 +165,18 @@ func TestParseURIVlessKeepsXHTTPAndHTTPOptions(t *testing.T) {
 		"trojan://secret@trojan.example.com:443?type=xhttp&path=%2Fapi",
 	); err == nil {
 		t.Fatalf("unsupported Trojan XHTTP returned success with %#v", out)
+	}
+	if out, err := ParseURI(
+		"vless://12345678-1234-1234-1234-123456789012@example.com:443" +
+			"?type=xhttp&extra=%7Binvalid",
+	); err == nil {
+		t.Fatalf("malformed VLESS XHTTP extra returned success with %#v", out)
+	}
+	if out, err := ParseURI(
+		"vless://12345678-1234-1234-1234-123456789012@example.com:443" +
+			"?type=xhttp&extra=null",
+	); err == nil {
+		t.Fatalf("null VLESS XHTTP extra returned success with %#v", out)
 	}
 }
 

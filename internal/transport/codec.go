@@ -243,6 +243,16 @@ func parseSimple(uri, typ string) (map[string]any, error) {
 				if mode := q.Get("mode"); mode != "" {
 					xhttpOpts["mode"] = mode
 				}
+				if extra := q.Get("extra"); extra != "" {
+					var extraOptions map[string]any
+					if err := json.Unmarshal([]byte(extra), &extraOptions); err != nil {
+						return nil, fmt.Errorf("解析 vless XHTTP extra: %w", err)
+					}
+					if extraOptions == nil {
+						return nil, fmt.Errorf("解析 vless XHTTP extra: 必须是 JSON 对象")
+					}
+					ApplyXHTTPExtraOptions(xhttpOpts, extraOptions)
+				}
 				out["xhttp-opts"] = xhttpOpts
 			}
 		}
