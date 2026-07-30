@@ -229,10 +229,15 @@ var additionalLogWriter io.Writer
 type logInterceptor struct{}
 
 func (logInterceptor) Write(p []byte) (int, error) {
-	if additionalLogWriter != nil {
-		_, _ = additionalLogWriter.Write(p)
+	mu.Lock()
+	writer := additionalLogWriter
+	tuiEnabled := enabled
+	mu.Unlock()
+
+	if writer != nil {
+		_, _ = writer.Write(p)
 	}
-	if enabled {
+	if tuiEnabled {
 		addLogLine(string(p))
 	} else {
 		_, _ = os.Stderr.Write(p)
@@ -243,6 +248,7 @@ func (logInterceptor) Write(p []byte) (int, error) {
 func addLogLine(text string) {
 	lines := strings.Split(text, "\n")
 	mu.Lock()
+	defer mu.Unlock()
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -253,24 +259,24 @@ func addLogLine(text string) {
 	for len(logBuffer) > maxLogs*3 {
 		logBuffer = logBuffer[1:]
 	}
-	mu.Unlock()
-
 	if enabled {
-		mu.Lock()
 		drawTUI()
-		mu.Unlock()
 	}
 }
 
 // ─── 公共 API ───
 
 func InitTracker(fileLogger io.Writer) func() {
+	mu.Lock()
 	additionalLogWriter = fileLogger
+	mu.Unlock()
 	fileInfo, err := osStdout.Stat()
 	if err == nil && (fileInfo.Mode()&os.ModeCharDevice) != 0 {
+		mu.Lock()
 		enabled = true
 		terminalWidth = getTerminalWidth()
 		needsRedraw = true
+		mu.Unlock()
 
 		log.SetOutput(logInterceptor{})
 
