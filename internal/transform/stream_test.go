@@ -8,9 +8,10 @@ import (
 	"github.com/bsfdsagfadg/vertex/internal/jsonx"
 )
 
-var benchmarkSSELineResult string         //nolint:gochecknoglobals
-var benchmarkRealtimeChunkResult []string //nolint:gochecknoglobals
-var benchmarkExtractedToolCalls []any     //nolint:gochecknoglobals
+var benchmarkSSELineResult string                      //nolint:gochecknoglobals
+var benchmarkRealtimeChunkResult []string              //nolint:gochecknoglobals
+var benchmarkExtractedToolCalls []any                  //nolint:gochecknoglobals
+var benchmarkPreparedOpenAIStream openAIStreamPrepared //nolint:gochecknoglobals
 
 type streamArgumentsJSONProbe struct {
 	calls *int
@@ -106,6 +107,26 @@ func BenchmarkExtractPartsToolCalls(b *testing.B) {
 	}
 }
 
+func BenchmarkPrepareOpenAIStreamToolCalls(b *testing.B) {
+	parts := make([]any, 16)
+	for index := range parts {
+		parts[index] = map[string]any{"functionCall": map[string]any{
+			"id": "call_benchmark", "name": "lookup",
+			"args": map[string]any{"query": "benchmark", "index": float64(index)},
+		}}
+	}
+	chunk := map[string]any{"candidates": []any{map[string]any{
+		"content": map[string]any{"parts": parts},
+	}}}
+	b.ReportAllocs()
+	for range b.N {
+		benchmarkPreparedOpenAIStream = prepareOpenAIStreamChunk(chunk, false)
+		if len(benchmarkPreparedOpenAIStream.toolCalls) != len(parts) {
+			b.Fatal("unexpected tool call count")
+		}
+	}
+}
+
 func TestMarshalToolArgumentsFastPathAndFallback(t *testing.T) {
 	for _, arguments := range []any{
 		map[string]any{
@@ -130,6 +151,44 @@ func TestMarshalToolArgumentsFastPathAndFallback(t *testing.T) {
 	}
 	if got := marshalToolArguments(map[string]any{"channel": make(chan int)}); got != "" {
 		t.Fatalf("encoding failure = %q, want empty compatibility value", got)
+	}
+}
+
+func TestOpenAIStreamTypedToolCallsMatchLegacyWire(t *testing.T) {
+	parts := []any{
+		map[string]any{"functionCall": map[string]any{
+			"id": "call_1", "name": "lookup",
+			"args": map[string]any{"z": "<中文>", "a": float64(1)},
+		}},
+		map[string]any{"functionCall": map[string]any{
+			"id": "call_2", "name": "lookup",
+			"args": map[string]any{"nested": []any{true, nil, "value"}},
+		}},
+	}
+	_, legacy, _ := ExtractParts(parts, true)
+	for index, toolCall := range legacy {
+		if _, ok := toolCall.(map[string]any); !ok {
+			t.Fatalf("public compatibility tool call %d changed type: %T", index, toolCall)
+		}
+	}
+
+	chunk := map[string]any{"candidates": []any{map[string]any{
+		"content": map[string]any{"parts": parts},
+	}}}
+	typed := prepareOpenAIStreamChunk(chunk, false).toolCalls
+	for index := range typed {
+		typed[index].Index = index
+	}
+	got, err := jsonx.MarshalString(typed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := jsonx.MarshalString(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("typed stream tool calls changed wire JSON:\n got: %s\nwant: %s", got, want)
 	}
 }
 

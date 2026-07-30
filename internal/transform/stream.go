@@ -73,10 +73,19 @@ type openAIStreamChoice struct {
 }
 
 type openAIStreamDelta struct {
-	Role             string `json:"role,omitempty"`
-	ReasoningContent string `json:"reasoning_content,omitempty"`
-	Content          string `json:"content,omitempty"`
-	ToolCalls        []any  `json:"tool_calls,omitempty"`
+	Role             string                 `json:"role,omitempty"`
+	ReasoningContent string                 `json:"reasoning_content,omitempty"`
+	Content          string                 `json:"content,omitempty"`
+	ToolCalls        []openAIStreamToolCall `json:"tool_calls,omitempty"`
+}
+
+// Field order matches encoding/json's lexical map-key order used by the legacy
+// streaming representation.
+type openAIStreamToolCall struct {
+	Function CanonicalOAIResponseFunctionCall `json:"function"`
+	ID       string                           `json:"id"`
+	Index    int                              `json:"index"`
+	Type     string                           `json:"type"`
 }
 
 func setOpenAIStreamChoice(event *openAIStreamEvent, delta openAIStreamDelta, finishReason *string) {
@@ -98,7 +107,7 @@ type openAIStreamPrepared struct {
 	text       string
 	reasoning  string
 	finish     string
-	toolCalls  []any
+	toolCalls  []openAIStreamToolCall
 	eventCount int
 	isFirst    bool
 	hasFinish  bool
@@ -126,7 +135,21 @@ func prepareOpenAIStreamChunk(chunk map[string]any, isFirst bool) openAIStreamPr
 	candidate := firstCandidate(chunk)
 	parts := candidateParts(candidate)
 	finish, _ := candidate["finishReason"].(string)
-	text, toolCalls, reasoning := ExtractParts(parts, true)
+	text, canonicalToolCalls, reasoning := extractCanonicalResponseParts(parts)
+	var toolCalls []openAIStreamToolCall
+	if len(canonicalToolCalls) > 0 {
+		toolCalls = make([]openAIStreamToolCall, len(canonicalToolCalls))
+		for index, toolCall := range canonicalToolCalls {
+			toolCalls[index] = openAIStreamToolCall{
+				Function: CanonicalOAIResponseFunctionCall{
+					Arguments: marshalToolArguments(toolCall.Arguments),
+					Name:      toolCall.Name,
+				},
+				ID:   toolCall.ID,
+				Type: "function",
+			}
+		}
+	}
 	usageMeta, hasUsage := chunk["usageMetadata"].(map[string]any)
 	hasUsage = hasUsage && len(usageMeta) > 0
 	hasFinish := finish != "" && finish != FinishReasonUnspecified
@@ -236,11 +259,9 @@ func (e *OpenAIStreamEncoder) emitPrepared(prepared openAIStreamPrepared, emit f
 		}
 	}
 	if len(prepared.toolCalls) > 0 {
-		for _, rawToolCall := range prepared.toolCalls {
-			if toolCall, ok := rawToolCall.(map[string]any); ok {
-				toolCall["index"] = e.nextToolCallIndex
-				e.nextToolCallIndex++
-			}
+		for index := range prepared.toolCalls {
+			prepared.toolCalls[index].Index = e.nextToolCallIndex
+			e.nextToolCallIndex++
 		}
 		e.sawToolCalls = true
 		setOpenAIStreamChoice(&e.event, openAIStreamDelta{ToolCalls: prepared.toolCalls}, nil)
