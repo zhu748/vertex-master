@@ -20,6 +20,7 @@ var adminAllowedSettings = map[string]bool{
 	"claude_prompt_injection_position":  true,
 	"claude_prompt_injection_text":      true,
 	"claude_prompt_replacement_enabled": true,
+	"claude_prompt_replacements":        true,
 	"claude_prompt_replace_from":        true,
 	"claude_prompt_replace_to":          true,
 	"request_timeout":                   true,
@@ -67,6 +68,13 @@ func environmentManagedAdminSettings() map[string]string {
 }
 
 func (adm *AdminHandler) adminGetSettings(w http.ResponseWriter, _ *http.Request) {
+	rules := adm.cfg.ClaudePromptReplacementRules()
+	legacyFrom := ""
+	legacyTo := ""
+	if len(rules) > 0 {
+		legacyFrom = rules[0].From
+		legacyTo = rules[0].To
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"managed_fields": environmentManagedAdminSettings(),
 		"settings": map[string]any{
@@ -81,8 +89,9 @@ func (adm *AdminHandler) adminGetSettings(w http.ResponseWriter, _ *http.Request
 			"claude_prompt_injection_position":  adm.cfg.ClaudePromptInjectionPosition(),
 			"claude_prompt_injection_text":      adm.cfg.ClaudePromptInjectionText(),
 			"claude_prompt_replacement_enabled": adm.cfg.ClaudePromptReplacementEnabled(),
-			"claude_prompt_replace_from":        adm.cfg.ClaudePromptReplaceFrom(),
-			"claude_prompt_replace_to":          adm.cfg.ClaudePromptReplaceTo(),
+			"claude_prompt_replacements":        rules,
+			"claude_prompt_replace_from":        legacyFrom,
+			"claude_prompt_replace_to":          legacyTo,
 			"request_timeout":                   adm.cfg.RequestTimeout(),
 			"proxy_url":                         adm.cfg.ProxyURL(), "parallel_pool_enabled": adm.cfg.ParallelPoolEnabled(), "parallel_pool_size": adm.cfg.ParallelPoolSize(), "active_node_uri": adm.cfg.ActiveNodeURI(),
 			"parallel_pool_delay_dynamic":         adm.cfg.ParallelPoolDelayDynamic(),
@@ -185,6 +194,14 @@ func (adm *AdminHandler) adminPutSettings(w http.ResponseWriter, r *http.Request
 				)
 				return
 			}
+		case "claude_prompt_replacements":
+			rules, err := parseAdminClaudePromptReplacementRules(v)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, adminErr(err.Error()))
+				return
+			}
+			updates[k] = rules
+			continue
 		case "proxy_url", "active_node_uri", "background_image", "font_size",
 			"font_color_type", "font_color":
 			if _, ok := v.(string); !ok {
@@ -215,15 +232,53 @@ func (adm *AdminHandler) adminPutSettings(w http.ResponseWriter, r *http.Request
 	if value, ok := updates["claude_prompt_replacement_enabled"].(bool); ok {
 		claudeReplacementEnabled = value
 	}
-	claudeReplaceFrom := adm.cfg.ClaudePromptReplaceFrom()
-	if value, ok := updates["claude_prompt_replace_from"].(string); ok {
-		claudeReplaceFrom = value
+	claudeReplacementRules := adm.cfg.ClaudePromptReplacementRules()
+	claudeReplacementRulesUpdated := false
+	if value, ok := updates["claude_prompt_replacements"].([]config.ClaudePromptReplacementRule); ok {
+		claudeReplacementRules = value
+		claudeReplacementRulesUpdated = true
+	} else {
+		legacyFrom, fromUpdated := updates["claude_prompt_replace_from"].(string)
+		legacyTo, toUpdated := updates["claude_prompt_replace_to"].(string)
+		if fromUpdated || toUpdated {
+			claudeReplacementRulesUpdated = true
+			if len(claudeReplacementRules) > 0 {
+				if !fromUpdated {
+					legacyFrom = claudeReplacementRules[0].From
+				}
+				if !toUpdated {
+					legacyTo = claudeReplacementRules[0].To
+				}
+				if legacyFrom == "" {
+					claudeReplacementRules = claudeReplacementRules[1:]
+				} else {
+					claudeReplacementRules[0] = config.ClaudePromptReplacementRule{
+						From: legacyFrom,
+						To:   legacyTo,
+					}
+				}
+			} else if legacyFrom == "" {
+				claudeReplacementRules = []config.ClaudePromptReplacementRule{}
+			} else {
+				claudeReplacementRules = []config.ClaudePromptReplacementRule{{
+					From: legacyFrom,
+					To:   legacyTo,
+				}}
+			}
+			updates["claude_prompt_replacements"] = claudeReplacementRules
+		}
 	}
-	if claudeReplacementEnabled && claudeReplaceFrom == "" {
+	if claudeReplacementRulesUpdated {
+		if err := validateAdminClaudePromptReplacementRules(claudeReplacementRules); err != nil {
+			writeJSON(w, http.StatusBadRequest, adminErr(err.Error()))
+			return
+		}
+	}
+	if claudeReplacementEnabled && len(claudeReplacementRules) == 0 {
 		writeJSON(
 			w,
 			http.StatusBadRequest,
-			adminErr("启用 Claude 提示词替换时，查找内容不能为空"),
+			adminErr("启用 Claude 提示词替换时，至少需要一条规则"),
 		)
 		return
 	}
@@ -299,6 +354,56 @@ func (adm *AdminHandler) adminPutSettings(w http.ResponseWriter, r *http.Request
 		spool.SetMaxSpillBytes(int64(maxSpillMB) << 20)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func parseAdminClaudePromptReplacementRules(
+	value any,
+) ([]config.ClaudePromptReplacementRule, error) {
+	rawRules, ok := value.([]any)
+	if !ok {
+		return nil, fmt.Errorf("claude_prompt_replacements 必须是规则数组")
+	}
+	rules := make([]config.ClaudePromptReplacementRule, 0, len(rawRules))
+	for index, raw := range rawRules {
+		rule, ok := raw.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("第 %d 条 Claude 提示词替换规则必须是对象", index+1)
+		}
+		from, fromOK := rule["from"].(string)
+		to, toOK := rule["to"].(string)
+		if !fromOK || !toOK {
+			return nil, fmt.Errorf("第 %d 条 Claude 提示词替换规则的 from/to 必须是字符串", index+1)
+		}
+		rules = append(rules, config.ClaudePromptReplacementRule{From: from, To: to})
+	}
+	return rules, validateAdminClaudePromptReplacementRules(rules)
+}
+
+func validateAdminClaudePromptReplacementRules(
+	rules []config.ClaudePromptReplacementRule,
+) error {
+	if len(rules) > maxClaudePromptReplacementRules {
+		return fmt.Errorf(
+			"提示词替换规则不能超过 %d 条",
+			maxClaudePromptReplacementRules,
+		)
+	}
+	seen := make(map[string]struct{}, len(rules))
+	totalBytes := 0
+	for index, rule := range rules {
+		if rule.From == "" {
+			return fmt.Errorf("第 %d 条 Claude 提示词替换规则的查找内容不能为空", index+1)
+		}
+		if _, duplicate := seen[rule.From]; duplicate {
+			return fmt.Errorf("第 %d 条 Claude 提示词替换规则的查找内容重复", index+1)
+		}
+		seen[rule.From] = struct{}{}
+		totalBytes += len(rule.From) + len(rule.To)
+		if totalBytes > maxClaudePromptSettingBytes {
+			return fmt.Errorf("提示词替换规则文本总计不能超过 1 MiB")
+		}
+	}
+	return nil
 }
 
 func adminSettingInt(value any) (int, bool) {

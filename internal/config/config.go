@@ -36,12 +36,14 @@ type AppConfig struct { //nolint:govet
 	RequestTimeout            int               `json:"request_timeout"`
 
 	// Claude Messages 顶层 system 提示词处理
-	ClaudePromptInjectionEnabled   bool   `json:"claude_prompt_injection_enabled"`
-	ClaudePromptInjectionPosition  string `json:"claude_prompt_injection_position"`
-	ClaudePromptInjectionText      string `json:"claude_prompt_injection_text"`
-	ClaudePromptReplacementEnabled bool   `json:"claude_prompt_replacement_enabled"`
-	ClaudePromptReplaceFrom        string `json:"claude_prompt_replace_from"`
-	ClaudePromptReplaceTo          string `json:"claude_prompt_replace_to"`
+	ClaudePromptInjectionEnabled   bool                          `json:"claude_prompt_injection_enabled"`
+	ClaudePromptInjectionPosition  string                        `json:"claude_prompt_injection_position"`
+	ClaudePromptInjectionText      string                        `json:"claude_prompt_injection_text"`
+	ClaudePromptReplacementEnabled bool                          `json:"claude_prompt_replacement_enabled"`
+	ClaudePromptReplacements       []ClaudePromptReplacementRule `json:"claude_prompt_replacements"`
+	// Deprecated single-rule fields are retained for config-file compatibility.
+	ClaudePromptReplaceFrom string `json:"claude_prompt_replace_from"`
+	ClaudePromptReplaceTo   string `json:"claude_prompt_replace_to"`
 
 	// 并发池与节点锁定配置
 	ActiveNodeURI            string `json:"active_node_uri"`
@@ -74,6 +76,35 @@ type AppConfig struct { //nolint:govet
 	FontColor       string   `json:"font_color"`
 	CustomBgPresets []string `json:"custom_bg_presets"`
 	AutoRefreshLogs *bool    `json:"auto_refresh_logs,omitempty"`
+}
+
+type ClaudePromptReplacementRule struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+// EffectiveClaudePromptReplacementRules returns a detached replacement rule
+// slice. An explicitly configured multi-rule array takes precedence; old
+// config files that only contain the legacy from/to fields keep working.
+func (c AppConfig) EffectiveClaudePromptReplacementRules() []ClaudePromptReplacementRule {
+	if c.ClaudePromptReplacements != nil {
+		return cloneClaudePromptReplacementRules(c.ClaudePromptReplacements)
+	}
+	if c.ClaudePromptReplaceFrom == "" {
+		return []ClaudePromptReplacementRule{}
+	}
+	return []ClaudePromptReplacementRule{{
+		From: c.ClaudePromptReplaceFrom,
+		To:   c.ClaudePromptReplaceTo,
+	}}
+}
+
+func cloneClaudePromptReplacementRules(
+	rules []ClaudePromptReplacementRule,
+) []ClaudePromptReplacementRule {
+	cloned := make([]ClaudePromptReplacementRule, len(rules))
+	copy(cloned, rules)
+	return cloned
 }
 
 func DefaultConfig() AppConfig {

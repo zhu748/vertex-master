@@ -139,8 +139,8 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ver
 | `claude_prompt_injection_enabled` | false | 是否为 Claude Messages 请求前置或后置注入额外 system 提示词 |
 | `claude_prompt_injection_position` | append | 注入位置，可选 `prepend` 或 `append` |
 | `claude_prompt_injection_text` | 空 | 要注入的 system 提示词 |
-| `claude_prompt_replacement_enabled` | false | 是否在发送上游前，对 Claude system 提示词执行字面量片段替换 |
-| `claude_prompt_replace_from` / `claude_prompt_replace_to` | 空 | 要查找的原文片段及最终替换内容；替换内容可留空以删除匹配片段 |
+| `claude_prompt_replacement_enabled` | false | 是否在发送上游前，对 Claude system 提示词执行有序字面量替换 |
+| `claude_prompt_replacements` | `[]` | 最多 32 条 `{from,to}` 规则；按数组顺序逐条执行，`to` 可留空以删除匹配片段 |
 | `proxy_url` | 空 | 出站代理地址 (如 `http://127.0.0.1:7890`) |
 | `parallel_pool_enabled` | true | 是否开启并发竞速节点池 |
 | `parallel_pool_retry_enabled` | true | 并发池节点遇到 429 等可重试错误时是否在节点内自动重试 |
@@ -157,7 +157,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ver
 
 > **预填充兼容**：通过 OpenAI Chat/Responses、Claude Messages 或 Gemini 原生接口调用 `gemini-3.6-flash` 时，服务会保留末尾纯文本 `assistant`/`model` 预填充的角色与原文，再追加一条短续写提示，使请求合法地以 `user` 结束；流式或非流式回复都会移除模型可能重复输出的前缀。工具调用、媒体、思考块和其他模型的历史行为保持不变；旧客户端传入的 `NONE`/`thinkingBudget` 也会在出站时转换为 Gemini 3.6 支持的思考级别。
 
-> **Claude system 处理**：管理面板「设置」页可以对 `/v1/messages` 和 `/v1/messages/count_tokens` 的 system 提示词执行精确片段替换，并在替换后前置或后置注入额外提示词。最近一次收到的原始提示词和处理后的最终提示词只保存在当前进程内，可一键载入为查找内容，不会写入日志或配置文件。
+> **Claude system 处理**：管理面板「设置」页可以为 `/v1/messages` 和 `/v1/messages/count_tokens` 配置多条 system 精确替换规则。规则区分大小写、空白与换行，按列表顺序逐条执行，随后再前置或后置注入额外提示词。最近一次收到的原始提示词和处理后的最终提示词只保存在当前进程内，可一键添加为替换规则，不会写入日志或配置文件。
 
 详细配置说明请参阅 [部署指南](部署指南.md#配置怎么改)。
 

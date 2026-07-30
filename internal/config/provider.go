@@ -21,8 +21,7 @@ type ConfigProvider interface {
 	ClaudePromptInjectionPosition() string
 	ClaudePromptInjectionText() string
 	ClaudePromptReplacementEnabled() bool
-	ClaudePromptReplaceFrom() string
-	ClaudePromptReplaceTo() string
+	ClaudePromptReplacementRules() []ClaudePromptReplacementRule
 
 	VertexAPIKey() string
 	CountTokensQuerySignature() string
@@ -100,11 +99,8 @@ func (d dynamicConfig) ClaudePromptInjectionText() string {
 func (d dynamicConfig) ClaudePromptReplacementEnabled() bool {
 	return Load().ClaudePromptReplacementEnabled
 }
-func (d dynamicConfig) ClaudePromptReplaceFrom() string {
-	return Load().ClaudePromptReplaceFrom
-}
-func (d dynamicConfig) ClaudePromptReplaceTo() string {
-	return Load().ClaudePromptReplaceTo
+func (d dynamicConfig) ClaudePromptReplacementRules() []ClaudePromptReplacementRule {
+	return Load().EffectiveClaudePromptReplacementRules()
 }
 func (d dynamicConfig) VertexAPIKey() string              { return Load().VertexAPIKey }
 func (d dynamicConfig) CountTokensQuerySignature() string { return Load().CountTokensQuerySignature }

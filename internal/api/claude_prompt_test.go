@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,8 +16,10 @@ import (
 func TestClaudePromptPolicyReplacesBeforeAppendingInjection(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.ClaudePromptReplacementEnabled = true
-	cfg.ClaudePromptReplaceFrom = "ORIGINAL"
-	cfg.ClaudePromptReplaceTo = "REPLACED"
+	cfg.ClaudePromptReplacements = []config.ClaudePromptReplacementRule{
+		{From: "ORIGINAL", To: "REPLACED"},
+		{From: "SECOND", To: "CHANGED"},
+	}
 	cfg.ClaudePromptInjectionEnabled = true
 	cfg.ClaudePromptInjectionPosition = "append"
 	cfg.ClaudePromptInjectionText = "INJECTED"
@@ -25,19 +28,25 @@ func TestClaudePromptPolicyReplacesBeforeAppendingInjection(t *testing.T) {
 	chatBody, err := anthropicToChatRequest(map[string]any{
 		"system": []any{
 			map[string]any{"type": "text", "text": "Keep ORIGINAL"},
-			map[string]any{"type": "text", "text": "ORIGINAL again"},
+			map[string]any{"type": "text", "text": "SECOND and ORIGINAL again"},
 		},
 		"messages": []any{map[string]any{"role": "user", "content": "hello"}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	result := applyClaudePromptPolicy(chatBody, provider)
+	result, err := applyClaudePromptPolicy(chatBody, provider)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	const original = "Keep ORIGINAL\nORIGINAL again"
-	const effective = "Keep REPLACED\nREPLACED again\n\nINJECTED"
+	const original = "Keep ORIGINAL\nSECOND and ORIGINAL again"
+	const effective = "Keep REPLACED\nCHANGED and REPLACED again\n\nINJECTED"
 	if result.OriginalPrompt != original || result.EffectivePrompt != effective ||
-		result.ReplacementCount != 2 || !result.InjectionApplied || !result.HadSystem {
+		result.ReplacementCount != 3 || result.ReplacementRules != 2 ||
+		result.MatchedRules != 2 || len(result.RuleMatchCounts) != 2 ||
+		result.RuleMatchCounts[0] != 2 || result.RuleMatchCounts[1] != 1 ||
+		!result.InjectionApplied || !result.HadSystem {
 		t.Fatalf("unexpected policy result: %#v", result)
 	}
 
@@ -63,7 +72,10 @@ func TestClaudePromptPolicySupportsPrependAndRemoval(t *testing.T) {
 			map[string]any{"role": "user", "content": "hello"},
 		}}
 
-		result := applyClaudePromptPolicy(chatBody, config.StaticProvider(cfg))
+		result, err := applyClaudePromptPolicy(chatBody, config.StaticProvider(cfg))
+		if err != nil {
+			t.Fatal(err)
+		}
 
 		if result.OriginalPrompt != "" || result.EffectivePrompt != "POLICY" ||
 			result.HadSystem || !result.InjectionApplied {
@@ -78,13 +90,16 @@ func TestClaudePromptPolicySupportsPrependAndRemoval(t *testing.T) {
 	t.Run("literal replacement can remove system", func(t *testing.T) {
 		cfg := config.DefaultConfig()
 		cfg.ClaudePromptReplacementEnabled = true
-		cfg.ClaudePromptReplaceFrom = "REMOVE"
+		cfg.ClaudePromptReplacements = []config.ClaudePromptReplacementRule{{From: "REMOVE"}}
 		chatBody := map[string]any{"messages": []any{
 			map[string]any{"role": "system", "content": "REMOVE"},
 			map[string]any{"role": "user", "content": "hello"},
 		}}
 
-		result := applyClaudePromptPolicy(chatBody, config.StaticProvider(cfg))
+		result, err := applyClaudePromptPolicy(chatBody, config.StaticProvider(cfg))
+		if err != nil {
+			t.Fatal(err)
+		}
 
 		if result.EffectivePrompt != "" || result.ReplacementCount != 1 {
 			t.Fatalf("unexpected removal result: %#v", result)
@@ -96,11 +111,93 @@ func TestClaudePromptPolicySupportsPrependAndRemoval(t *testing.T) {
 	})
 }
 
+func TestClaudePromptPolicyAppliesRulesInOrderAndBoundsGrowth(t *testing.T) {
+	t.Run("ordered rules can consume earlier output", func(t *testing.T) {
+		cfg := config.DefaultConfig()
+		cfg.ClaudePromptReplacementEnabled = true
+		cfg.ClaudePromptReplacements = []config.ClaudePromptReplacementRule{
+			{From: "alpha", To: "beta"},
+			{From: "beta", To: "gamma"},
+		}
+		chatBody := map[string]any{"messages": []any{
+			map[string]any{"role": "system", "content": "alpha"},
+			map[string]any{"role": "user", "content": "hello"},
+		}}
+
+		result, err := applyClaudePromptPolicy(chatBody, config.StaticProvider(cfg))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.EffectivePrompt != "gamma" || result.ReplacementCount != 2 ||
+			result.RuleMatchCounts[0] != 1 || result.RuleMatchCounts[1] != 1 {
+			t.Fatalf("ordered replacement result: %#v", result)
+		}
+	})
+
+	t.Run("replacement expansion cannot exceed request limit", func(t *testing.T) {
+		cfg := config.DefaultConfig()
+		cfg.MaxRequestMB = 1
+		cfg.ClaudePromptReplacementEnabled = true
+		cfg.ClaudePromptReplacements = []config.ClaudePromptReplacementRule{{
+			From: "a",
+			To:   "aa",
+		}}
+		chatBody := map[string]any{"messages": []any{
+			map[string]any{"role": "system", "content": strings.Repeat("a", 600<<10)},
+			map[string]any{"role": "user", "content": "hello"},
+		}}
+
+		_, err := applyClaudePromptPolicy(chatBody, config.StaticProvider(cfg))
+		if err == nil || !strings.Contains(err.Error(), "exceeds") {
+			t.Fatalf("expected bounded replacement error, got %v", err)
+		}
+	})
+
+	t.Run("injection cannot exceed request limit", func(t *testing.T) {
+		cfg := config.DefaultConfig()
+		cfg.MaxRequestMB = 1
+		cfg.ClaudePromptInjectionEnabled = true
+		cfg.ClaudePromptInjectionText = strings.Repeat("i", 600<<10)
+		chatBody := map[string]any{"messages": []any{
+			map[string]any{"role": "system", "content": strings.Repeat("s", 600<<10)},
+			map[string]any{"role": "user", "content": "hello"},
+		}}
+
+		_, err := applyClaudePromptPolicy(chatBody, config.StaticProvider(cfg))
+		if err == nil || !strings.Contains(err.Error(), "after injection") {
+			t.Fatalf("expected bounded injection error, got %v", err)
+		}
+	})
+
+	t.Run("manually configured rule overflow is rejected at runtime", func(t *testing.T) {
+		cfg := config.DefaultConfig()
+		cfg.ClaudePromptReplacementEnabled = true
+		cfg.ClaudePromptReplacements = make(
+			[]config.ClaudePromptReplacementRule,
+			maxClaudePromptReplacementRules+1,
+		)
+		for index := range cfg.ClaudePromptReplacements {
+			cfg.ClaudePromptReplacements[index].From = fmt.Sprintf("rule-%d", index)
+		}
+		chatBody := map[string]any{"messages": []any{
+			map[string]any{"role": "system", "content": "system"},
+			map[string]any{"role": "user", "content": "hello"},
+		}}
+
+		_, err := applyClaudePromptPolicy(chatBody, config.StaticProvider(cfg))
+		if err == nil || !strings.Contains(err.Error(), "exceed the limit") {
+			t.Fatalf("expected runtime rule-limit error, got %v", err)
+		}
+	})
+}
+
 func TestAnthropicConversionRecordsOriginalAndEffectiveClaudePrompts(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.ClaudePromptReplacementEnabled = true
-	cfg.ClaudePromptReplaceFrom = "old"
-	cfg.ClaudePromptReplaceTo = "new"
+	cfg.ClaudePromptReplacements = []config.ClaudePromptReplacementRule{{
+		From: "old",
+		To:   "new",
+	}}
 	store := &claudePromptStore{}
 	handler := &AnthropicHandler{
 		handler:       handler{cfg: config.StaticProvider(cfg)},
@@ -161,6 +258,22 @@ func TestClaudePromptStoreBoundsUTF8Records(t *testing.T) {
 	}
 }
 
+func TestClaudePromptStoreDoesNotExposeRuleMatchSlice(t *testing.T) {
+	store := &claudePromptStore{}
+	store.Record("model", "messages", claudePromptPolicyResult{
+		RuleMatchCounts: []int{2, 1},
+	})
+	record, ok := store.Latest()
+	if !ok {
+		t.Fatal("expected latest record")
+	}
+	record.RuleMatchCounts[0] = 99
+	unchanged, _ := store.Latest()
+	if unchanged.RuleMatchCounts[0] != 2 {
+		t.Fatalf("stored match counts were mutated: %#v", unchanged.RuleMatchCounts)
+	}
+}
+
 func TestAdminClaudePromptLatestLifecycle(t *testing.T) {
 	store := &claudePromptStore{}
 	adm := &AdminHandler{claudePrompts: store} //nolint:exhaustruct
@@ -182,6 +295,9 @@ func TestAdminClaudePromptLatestLifecycle(t *testing.T) {
 		EffectivePrompt:  "after",
 		HadSystem:        true,
 		ReplacementCount: 1,
+		ReplacementRules: 1,
+		MatchedRules:     1,
+		RuleMatchCounts:  []int{1},
 	})
 	get := httptest.NewRecorder()
 	adm.adminClaudePromptLatest(
@@ -193,8 +309,14 @@ func TestAdminClaudePromptLatestLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	if response["original_prompt"] != "before" || response["effective_prompt"] != "after" ||
-		response["replacement_count"] != float64(1) {
+		response["replacement_count"] != float64(1) ||
+		response["replacement_rules"] != float64(1) ||
+		response["matched_rules"] != float64(1) {
 		t.Fatalf("unexpected latest response: %#v", response)
+	}
+	matchCounts, _ := response["rule_match_counts"].([]any)
+	if len(matchCounts) != 1 || matchCounts[0] != float64(1) {
+		t.Fatalf("latest response lost per-rule match counts: %#v", response)
 	}
 
 	cleared := httptest.NewRecorder()

@@ -258,6 +258,40 @@ td code { background: rgba(0, 0, 0, .3); padding: 2px 9px; border-radius: 8px; f
 .claude-rule-disabled {
   opacity: .45;
 }
+.claude-replacement-toolbar,
+.claude-replacement-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.claude-replacement-toolbar {
+  margin-bottom: 12px;
+}
+.claude-replacement-toolbar .desc {
+  margin-top: 0;
+}
+.claude-replacement-list {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.claude-replacement-row {
+  padding: 12px;
+  border: 1px solid var(--stroke);
+  border-radius: 11px;
+  background: rgba(0, 0, 0, .12);
+}
+.claude-replacement-row-head {
+  margin-bottom: 10px;
+}
+.claude-replacement-row-head .toolbar {
+  margin: 0;
+}
+.claude-replacement-row-head .btn.compact {
+  min-width: 34px;
+  padding: 5px 9px;
+}
 .claude-prompt-config textarea {
   resize: vertical;
   min-height: 118px;
@@ -638,6 +672,8 @@ td code { background: rgba(0, 0, 0, .3); padding: 2px 9px; border-radius: 8px; f
   .claude-prompt-latest-head { flex-direction: column; }
   .claude-prompt-latest-head .toolbar { justify-content: flex-start; }
   .claude-prompt-latest-head .btn { flex: 1 1 calc(50% - 8px); }
+  .claude-replacement-toolbar { align-items: flex-start; flex-direction: column; }
+  .claude-replacement-row-head { align-items: flex-start; }
   #page-nodes .toolbar > input,
   #page-nodes .toolbar > select {
     flex: 1 1 100%;

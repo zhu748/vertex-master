@@ -114,7 +114,10 @@ func (h *AnthropicHandler) convertAnthropicRequest(
 	if err != nil {
 		return "", nil, err
 	}
-	promptResult := applyClaudePromptPolicy(chatBody, h.cfg)
+	promptResult, err := applyClaudePromptPolicy(chatBody, h.cfg)
+	if err != nil {
+		return "", nil, err
+	}
 	chatBody["model"] = actualModel
 	model, payload, err := h.reqConv.Convert(chatBody, h.cfg)
 	if err != nil {

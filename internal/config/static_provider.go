@@ -31,11 +31,8 @@ func (s staticConfig) ClaudePromptInjectionText() string {
 func (s staticConfig) ClaudePromptReplacementEnabled() bool {
 	return s.c.ClaudePromptReplacementEnabled
 }
-func (s staticConfig) ClaudePromptReplaceFrom() string {
-	return s.c.ClaudePromptReplaceFrom
-}
-func (s staticConfig) ClaudePromptReplaceTo() string {
-	return s.c.ClaudePromptReplaceTo
+func (s staticConfig) ClaudePromptReplacementRules() []ClaudePromptReplacementRule {
+	return s.c.EffectiveClaudePromptReplacementRules()
 }
 func (s staticConfig) VertexAPIKey() string              { return s.c.VertexAPIKey }
 func (s staticConfig) CountTokensQuerySignature() string { return s.c.CountTokensQuerySignature }

@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -78,7 +79,17 @@ func TestAdminPutSettingsRejectsInvalidProxySettings(t *testing.T) {
 		{
 			name:        "Claude replacement missing search text",
 			body:        `{"settings":{"claude_prompt_replacement_enabled":true}}`,
+			wantMessage: "至少需要一条规则",
+		},
+		{
+			name:        "Claude replacement rule missing search text",
+			body:        `{"settings":{"claude_prompt_replacements":[{"from":"","to":"value"}]}}`,
 			wantMessage: "查找内容不能为空",
+		},
+		{
+			name:        "duplicate Claude replacement rule",
+			body:        `{"settings":{"claude_prompt_replacements":[{"from":"same","to":"one"},{"from":"same","to":"two"}]}}`,
+			wantMessage: "查找内容重复",
 		},
 		{
 			name:        "Claude injection missing prompt",
@@ -146,8 +157,10 @@ func TestAdminPutSettingsAcceptsValidProxySettings(t *testing.T) {
 		"claude_prompt_injection_position":"prepend",
 		"claude_prompt_injection_text":"injected policy",
 		"claude_prompt_replacement_enabled":true,
-		"claude_prompt_replace_from":"old policy",
-		"claude_prompt_replace_to":"new policy"
+		"claude_prompt_replacements":[
+			{"from":"old policy","to":"new policy"},
+			{"from":"second section","to":"updated section"}
+		]
 	}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/admin/settings", bytes.NewBufferString(body))
 	rec := httptest.NewRecorder()
@@ -183,13 +196,94 @@ func TestAdminPutSettingsAcceptsValidProxySettings(t *testing.T) {
 		"claude_prompt_injection_position":    "prepend",
 		"claude_prompt_injection_text":        "injected policy",
 		"claude_prompt_replacement_enabled":   true,
-		"claude_prompt_replace_from":          "old policy",
-		"claude_prompt_replace_to":            "new policy",
 	}
 	for key, want := range expected {
 		if got := raw[key]; got != want {
 			t.Errorf("%s 写盘值错误：got=%v want=%v", key, got, want)
 		}
+	}
+	rawRules, ok := raw["claude_prompt_replacements"].([]any)
+	if !ok || len(rawRules) != 2 {
+		t.Fatalf("Claude replacement rules were not persisted: %#v", raw["claude_prompt_replacements"])
+	}
+	firstRule, _ := rawRules[0].(map[string]any)
+	secondRule, _ := rawRules[1].(map[string]any)
+	if firstRule["from"] != "old policy" || firstRule["to"] != "new policy" ||
+		secondRule["from"] != "second section" || secondRule["to"] != "updated section" {
+		t.Fatalf("persisted Claude replacement rules are invalid: %#v", rawRules)
+	}
+}
+
+func TestAdminPutSettingsMigratesLegacyClaudePromptRule(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("VPROXY_CONFIG", path)
+	config.InvalidateCache()
+	t.Cleanup(config.InvalidateCache)
+	adm := newAdminSettingsTestHandler()
+	rec := httptest.NewRecorder()
+
+	adm.adminPutSettings(
+		rec,
+		httptest.NewRequest(
+			http.MethodPut,
+			"/api/admin/settings",
+			bytes.NewBufferString(`{"settings":{"claude_prompt_replacement_enabled":true,"claude_prompt_replace_from":"legacy","claude_prompt_replace_to":"modern"}}`),
+		),
+	)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("legacy Claude rule status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"claude_prompt_replacements"`) ||
+		!strings.Contains(string(data), `"from": "legacy"`) {
+		t.Fatalf("legacy rule was not migrated to the rule array: %s", data)
+	}
+}
+
+func TestAdminPutSettingsLegacyEditPreservesAdditionalClaudeRules(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("VPROXY_CONFIG", path)
+	config.InvalidateCache()
+	t.Cleanup(config.InvalidateCache)
+	cfg := config.DefaultConfig()
+	cfg.ClaudePromptReplacementEnabled = true
+	cfg.ClaudePromptReplacements = []config.ClaudePromptReplacementRule{
+		{From: "first", To: "old"},
+		{From: "second", To: "keep"},
+	}
+	adm := &AdminHandler{handler: handler{cfg: config.StaticProvider(cfg)}} //nolint:exhaustruct
+	rec := httptest.NewRecorder()
+
+	adm.adminPutSettings(
+		rec,
+		httptest.NewRequest(
+			http.MethodPut,
+			"/api/admin/settings",
+			bytes.NewBufferString(`{"settings":{"claude_prompt_replace_from":"first","claude_prompt_replace_to":"updated"}}`),
+		),
+	)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("legacy first-rule edit status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	var rules []config.ClaudePromptReplacementRule
+	if err := json.Unmarshal(raw["claude_prompt_replacements"], &rules); err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 2 || rules[0].To != "updated" || rules[1].From != "second" {
+		t.Fatalf("legacy edit discarded multi-rule config: %#v", rules)
 	}
 }
 
@@ -200,7 +294,10 @@ func TestAdminPutSettingsRejectsOversizedClaudePromptRule(t *testing.T) {
 	t.Cleanup(config.InvalidateCache)
 	adm := newAdminSettingsTestHandler()
 	body, err := json.Marshal(map[string]any{"settings": map[string]any{
-		"claude_prompt_injection_text": strings.Repeat("x", maxClaudePromptSettingBytes+1),
+		"claude_prompt_replacements": []map[string]any{{
+			"from": strings.Repeat("x", maxClaudePromptSettingBytes),
+			"to":   "y",
+		}},
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -218,6 +315,34 @@ func TestAdminPutSettingsRejectsOversizedClaudePromptRule(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("oversized rule must not be persisted: %v", err)
+	}
+}
+
+func TestAdminPutSettingsRejectsTooManyClaudePromptRules(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("VPROXY_CONFIG", path)
+	config.InvalidateCache()
+	t.Cleanup(config.InvalidateCache)
+	adm := newAdminSettingsTestHandler()
+	rules := make([]map[string]any, maxClaudePromptReplacementRules+1)
+	for index := range rules {
+		rules[index] = map[string]any{"from": fmt.Sprintf("from-%d", index), "to": "value"}
+	}
+	body, err := json.Marshal(map[string]any{"settings": map[string]any{
+		"claude_prompt_replacements": rules,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+
+	adm.adminPutSettings(
+		rec,
+		httptest.NewRequest(http.MethodPut, "/api/admin/settings", bytes.NewReader(body)),
+	)
+
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "不能超过") {
+		t.Fatalf("too many Claude rules status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -273,6 +398,9 @@ func TestAdminSettingsExposeAndRejectEnvironmentManagedFields(t *testing.T) {
 		response.Settings["claude_prompt_injection_enabled"] != false ||
 		response.Settings["claude_prompt_replacement_enabled"] != false {
 		t.Fatalf("Claude prompt settings missing from admin response: %#v", response.Settings)
+	}
+	if rules, ok := response.Settings["claude_prompt_replacements"].([]any); !ok || len(rules) != 0 {
+		t.Fatalf("default Claude prompt rules missing from admin response: %#v", response.Settings)
 	}
 
 	putRec := httptest.NewRecorder()

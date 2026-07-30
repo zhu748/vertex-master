@@ -28,7 +28,9 @@ const SETTINGS_FIELDS = [
 ];
 
 const CLAUDE_PROMPT_MAX_BYTES = 1024 * 1024;
+const CLAUDE_PROMPT_MAX_RULES = 32;
 let latestClaudePrompt = null;
+let claudeReplacementRules = [];
 
 function escapeSettingsHTML(value) {
   return String(value ?? '').replace(/[&<>"']/g, function (character) {
@@ -38,10 +40,51 @@ function escapeSettingsHTML(value) {
   });
 }
 
+function configuredClaudeReplacementRules() {
+  if (Array.isArray(curSettings.claude_prompt_replacements)) {
+    return curSettings.claude_prompt_replacements.map(rule => ({
+      from: String(rule?.from ?? ''),
+      to: String(rule?.to ?? '')
+    }));
+  }
+  const legacyFrom = String(curSettings.claude_prompt_replace_from ?? '');
+  if (legacyFrom !== '') {
+    return [{ from: legacyFrom, to: String(curSettings.claude_prompt_replace_to ?? '') }];
+  }
+  return [];
+}
+
+function claudeReplacementRowsHTML() {
+  return claudeReplacementRules.map((rule, index) => `
+    <div class="claude-replacement-row" data-rule-index="${index}">
+      <div class="claude-replacement-row-head">
+        <span class="pill">规则 ${index + 1}</span>
+        <div class="toolbar m-0 gap-8">
+          <button type="button" class="btn ghost compact" data-click-action="moveClaudeReplacementRule" data-rule-index="${index}" data-direction="-1" title="上移">↑</button>
+          <button type="button" class="btn ghost compact" data-click-action="moveClaudeReplacementRule" data-rule-index="${index}" data-direction="1" title="下移">↓</button>
+          <button type="button" class="btn danger compact" data-click-action="removeClaudeReplacementRule" data-rule-index="${index}">删除</button>
+        </div>
+      </div>
+      <div class="grid grid-2">
+        <div class="field">
+          <label for="set_claude_prompt_rule_from_${index}">查找内容</label>
+          <textarea id="set_claude_prompt_rule_from_${index}" data-rule-field="from" rows="6" maxlength="1048576" class="font-mono" placeholder="需要被替换的原文片段，可包含多行">${escapeSettingsHTML(rule.from)}</textarea>
+        </div>
+        <div class="field">
+          <label for="set_claude_prompt_rule_to_${index}">替换为</label>
+          <textarea id="set_claude_prompt_rule_to_${index}" data-rule-field="to" rows="6" maxlength="1048576" class="font-mono" placeholder="新的提示词片段；留空表示删除匹配内容">${escapeSettingsHTML(rule.to)}</textarea>
+        </div>
+      </div>
+    </div>
+  `).join('');
+}
+
 function claudePromptSettingsHTML() {
   const injectionEnabled = !!curSettings.claude_prompt_injection_enabled;
   const replacementEnabled = !!curSettings.claude_prompt_replacement_enabled;
   const position = curSettings.claude_prompt_injection_position === 'prepend' ? 'prepend' : 'append';
+  claudeReplacementRules = configuredClaudeReplacementRules();
+  if (!claudeReplacementRules.length) claudeReplacementRules.push({ from: '', to: '' });
   return `
     <div class="settings-section-title">🧩 Claude 系统提示词处理</div>
     <div class="claude-prompt-config">
@@ -49,21 +92,17 @@ function claudePromptSettingsHTML() {
         <div class="field bool">
           <div class="min-w-0">
             <label for="set_claude_prompt_replacement_enabled">启用片段替换</label>
-            <div class="desc mt-4px">对收到的 Claude system 提示词执行字面量全量替换；不使用正则表达式。</div>
+            <div class="desc mt-4px">可配置多条字面量规则，按列表顺序逐条执行；不使用正则表达式。</div>
           </div>
           <label class="toggle"><input type="checkbox" id="set_claude_prompt_replacement_enabled" ${replacementEnabled ? 'checked' : ''}><span class="track"></span></label>
         </div>
-        <div class="grid grid-2 claude-rule-fields" id="claudeReplacementFields">
-          <div class="field">
-            <label for="set_claude_prompt_replace_from">查找内容</label>
-            <textarea id="set_claude_prompt_replace_from" rows="7" maxlength="1048576" class="font-mono" placeholder="需要被替换的原文片段">${escapeSettingsHTML(curSettings.claude_prompt_replace_from)}</textarea>
-            <div class="desc">精确区分大小写和空白；所有匹配位置都会替换。</div>
+        <div class="claude-rule-fields" id="claudeReplacementFields">
+          <div class="claude-replacement-toolbar">
+            <div class="desc">区分大小写、空白和换行；每条规则会替换所有匹配。前一条规则的结果可继续被后一条匹配，最多 ${CLAUDE_PROMPT_MAX_RULES} 条。</div>
+            <button type="button" class="btn ghost" data-click-action="addClaudeReplacementRule">添加规则</button>
           </div>
-          <div class="field">
-            <label for="set_claude_prompt_replace_to">替换为</label>
-            <textarea id="set_claude_prompt_replace_to" rows="7" maxlength="1048576" class="font-mono" placeholder="新的提示词片段；留空表示删除匹配内容">${escapeSettingsHTML(curSettings.claude_prompt_replace_to)}</textarea>
-            <div class="desc">替换在注入之前执行，因此不会改写下面新注入的内容。</div>
-          </div>
+          <div class="claude-replacement-list" id="claudeReplacementRules">${claudeReplacementRowsHTML()}</div>
+          <div class="desc">所有替换完成后才执行提示词注入，所以规则不会改写新注入的内容。</div>
         </div>
       </div>
 
@@ -98,7 +137,7 @@ function claudePromptSettingsHTML() {
           </div>
           <div class="toolbar m-0 gap-8">
             <button type="button" class="btn ghost" data-click-action="refreshLatestClaudePrompt">刷新</button>
-            <button type="button" class="btn ghost" id="useLatestClaudePromptBtn" data-click-action="useLatestClaudePromptAsFind" disabled>用作查找内容</button>
+            <button type="button" class="btn ghost" id="useLatestClaudePromptBtn" data-click-action="useLatestClaudePromptAsFind" disabled>添加为替换规则</button>
             <button type="button" class="btn ghost" id="copyLatestClaudePromptBtn" data-click-action="copyLatestClaudePrompt" disabled>复制原始</button>
             <button type="button" class="btn danger" id="clearLatestClaudePromptBtn" data-click-action="clearLatestClaudePrompt" disabled>清除</button>
           </div>
@@ -126,12 +165,67 @@ function updateClaudePromptControls() {
   const injectionFields = $('#claudeInjectionFields');
   if (replacementFields) {
     replacementFields.classList.toggle('claude-rule-disabled', !replacementEnabled);
-    replacementFields.querySelectorAll('textarea,select,input').forEach(el => { el.disabled = !replacementEnabled; });
+    replacementFields.querySelectorAll('textarea,select,input,button').forEach(el => { el.disabled = !replacementEnabled; });
   }
   if (injectionFields) {
     injectionFields.classList.toggle('claude-rule-disabled', !injectionEnabled);
     injectionFields.querySelectorAll('textarea,select,input').forEach(el => { el.disabled = !injectionEnabled; });
   }
+}
+
+function syncClaudeReplacementRulesFromDOM() {
+  const rows = document.querySelectorAll('#claudeReplacementRules .claude-replacement-row');
+  claudeReplacementRules = Array.from(rows).map(row => ({
+    from: row.querySelector('[data-rule-field="from"]')?.value || '',
+    to: row.querySelector('[data-rule-field="to"]')?.value || ''
+  }));
+}
+
+function renderClaudeReplacementRules(focusIndex) {
+  const container = $('#claudeReplacementRules');
+  if (!container) return;
+  if (!claudeReplacementRules.length) claudeReplacementRules.push({ from: '', to: '' });
+  container.innerHTML = claudeReplacementRowsHTML();
+  updateClaudePromptControls();
+  if (Number.isInteger(focusIndex)) {
+    $('#set_claude_prompt_rule_from_' + focusIndex)?.focus();
+  }
+}
+
+function addClaudeReplacementRule(rule) {
+  syncClaudeReplacementRulesFromDOM();
+  if (claudeReplacementRules.length >= CLAUDE_PROMPT_MAX_RULES) {
+    return toast('Claude 提示词替换规则最多 32 条');
+  }
+  const next = rule || { from: '', to: '' };
+  if (claudeReplacementRules.length === 1 &&
+      claudeReplacementRules[0].from === '' && claudeReplacementRules[0].to === '') {
+    claudeReplacementRules[0] = next;
+  } else {
+    claudeReplacementRules.push(next);
+  }
+  window.hasUnsavedSettings = true;
+  renderClaudeReplacementRules(claudeReplacementRules.length - 1);
+}
+
+function removeClaudeReplacementRule(element) {
+  syncClaudeReplacementRulesFromDOM();
+  const index = Number(element.dataset.ruleIndex);
+  if (!Number.isInteger(index) || index < 0 || index >= claudeReplacementRules.length) return;
+  claudeReplacementRules.splice(index, 1);
+  window.hasUnsavedSettings = true;
+  renderClaudeReplacementRules(Math.min(index, claudeReplacementRules.length - 1));
+}
+
+function moveClaudeReplacementRule(element) {
+  syncClaudeReplacementRulesFromDOM();
+  const index = Number(element.dataset.ruleIndex);
+  const target = index + Number(element.dataset.direction);
+  if (!Number.isInteger(index) || target < 0 || target >= claudeReplacementRules.length) return;
+  [claudeReplacementRules[index], claudeReplacementRules[target]] =
+    [claudeReplacementRules[target], claudeReplacementRules[index]];
+  window.hasUnsavedSettings = true;
+  renderClaudeReplacementRules(target);
 }
 
 async function loadLatestClaudePrompt() {
@@ -170,7 +264,22 @@ async function loadLatestClaudePrompt() {
     ? new Date(latestClaudePrompt.received_at).toLocaleString()
     : '未知时间';
   const actions = [];
-  if (latestClaudePrompt.replacement_count) actions.push('替换 ' + latestClaudePrompt.replacement_count + ' 处');
+  if (latestClaudePrompt.replacement_count) {
+    let replacementSummary = '替换 ' + latestClaudePrompt.replacement_count + ' 处';
+    if (latestClaudePrompt.replacement_rules) {
+      replacementSummary += '（命中 ' + (latestClaudePrompt.matched_rules || 0) +
+        '/' + latestClaudePrompt.replacement_rules + ' 条规则）';
+    }
+    actions.push(replacementSummary);
+    if (Array.isArray(latestClaudePrompt.rule_match_counts)) {
+      const hitDetails = latestClaudePrompt.rule_match_counts
+        .map((count, index) => count ? ('#' + (index + 1) + '×' + count) : '')
+        .filter(Boolean);
+      if (hitDetails.length) actions.push('规则命中 ' + hitDetails.join('、'));
+    }
+  } else if (latestClaudePrompt.replacement_rules) {
+    actions.push('替换规则均未命中（0/' + latestClaudePrompt.replacement_rules + '）');
+  }
   if (latestClaudePrompt.injection_applied) actions.push('已注入');
   if (!actions.length) actions.push('未改写');
   const truncated = latestClaudePrompt.original_truncated || latestClaudePrompt.effective_truncated
@@ -186,14 +295,13 @@ async function loadLatestClaudePrompt() {
 
 function useLatestClaudePromptAsFind() {
   if (!latestClaudePrompt) return toast('暂无最近 Claude 提示词');
-  $('#set_claude_prompt_replace_from').value = latestClaudePrompt.original_prompt || '';
+  if (!latestClaudePrompt.original_prompt) return toast('最近请求没有可用的原始 system 提示词');
   $('#set_claude_prompt_replacement_enabled').checked = true;
-  updateClaudePromptControls();
-  window.hasUnsavedSettings = true;
+  addClaudeReplacementRule({ from: latestClaudePrompt.original_prompt || '', to: '' });
   if (latestClaudePrompt.original_truncated) {
     toast('最近提示词超过 1 MiB，已载入截断内容');
   } else {
-    toast('已填入查找内容，请编辑“替换为”后保存');
+    toast('已添加替换规则，请填写“替换为”后保存');
   }
 }
 
@@ -383,12 +491,35 @@ async function saveSettings() {
   }
   const replacementEnabled = $('#set_claude_prompt_replacement_enabled').checked;
   const injectionEnabled = $('#set_claude_prompt_injection_enabled').checked;
-  const replaceFrom = $('#set_claude_prompt_replace_from').value;
-  const replaceTo = $('#set_claude_prompt_replace_to').value;
   const injectionText = $('#set_claude_prompt_injection_text').value;
-  if (replacementEnabled && replaceFrom === '') {
-    toast('启用 Claude 提示词替换时，查找内容不能为空');
-    $('#set_claude_prompt_replace_from').focus();
+  syncClaudeReplacementRulesFromDOM();
+  const replacements = [];
+  const seenReplacementSources = new Set();
+  let replacementBytes = 0;
+  for (let index = 0; index < claudeReplacementRules.length; index++) {
+    const rule = claudeReplacementRules[index];
+    if (rule.from === '' && rule.to === '') continue;
+    if (rule.from === '') {
+      toast('替换规则 ' + (index + 1) + ' 的查找内容不能为空');
+      $('#set_claude_prompt_rule_from_' + index)?.focus();
+      return;
+    }
+    if (seenReplacementSources.has(rule.from)) {
+      toast('替换规则 ' + (index + 1) + ' 的查找内容重复');
+      $('#set_claude_prompt_rule_from_' + index)?.focus();
+      return;
+    }
+    seenReplacementSources.add(rule.from);
+    replacementBytes += settingsUTF8Bytes(rule.from) + settingsUTF8Bytes(rule.to);
+    replacements.push({ from: rule.from, to: rule.to });
+  }
+  if (replacementEnabled && replacements.length === 0) {
+    toast('启用 Claude 提示词替换时，至少需要一条规则');
+    $('#set_claude_prompt_rule_from_0')?.focus();
+    return;
+  }
+  if (replacementBytes > CLAUDE_PROMPT_MAX_BYTES) {
+    toast('Claude 提示词替换规则文本总计不能超过 1 MiB');
     return;
   }
   if (injectionEnabled && injectionText.trim() === '') {
@@ -396,20 +527,13 @@ async function saveSettings() {
     $('#set_claude_prompt_injection_text').focus();
     return;
   }
-  for (const field of [
-    ['查找内容', replaceFrom, '#set_claude_prompt_replace_from'],
-    ['替换内容', replaceTo, '#set_claude_prompt_replace_to'],
-    ['注入内容', injectionText, '#set_claude_prompt_injection_text']
-  ]) {
-    if (settingsUTF8Bytes(field[1]) > CLAUDE_PROMPT_MAX_BYTES) {
-      toast(field[0] + '不能超过 1 MiB');
-      $(field[2]).focus();
-      return;
-    }
+  if (settingsUTF8Bytes(injectionText) > CLAUDE_PROMPT_MAX_BYTES) {
+    toast('注入内容不能超过 1 MiB');
+    $('#set_claude_prompt_injection_text').focus();
+    return;
   }
   out.claude_prompt_replacement_enabled = replacementEnabled;
-  out.claude_prompt_replace_from = replaceFrom;
-  out.claude_prompt_replace_to = replaceTo;
+  out.claude_prompt_replacements = replacements;
   out.claude_prompt_injection_enabled = injectionEnabled;
   out.claude_prompt_injection_position = $('#set_claude_prompt_injection_position').value;
   out.claude_prompt_injection_text = injectionText;
@@ -468,6 +592,9 @@ async function submitChangePassword() {
 
 registerActions({
   saveSettings: function () { saveSettings(); },
+  addClaudeReplacementRule: function () { addClaudeReplacementRule(); },
+  removeClaudeReplacementRule: function (element) { removeClaudeReplacementRule(element); },
+  moveClaudeReplacementRule: function (element) { moveClaudeReplacementRule(element); },
   refreshLatestClaudePrompt: function () { loadLatestClaudePrompt(); },
   useLatestClaudePromptAsFind: function () { useLatestClaudePromptAsFind(); },
   copyLatestClaudePrompt: function () { copyLatestClaudePrompt(); },

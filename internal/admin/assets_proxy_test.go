@@ -113,8 +113,12 @@ func TestClaudePromptSettingsUIIsEmbedded(t *testing.T) {
 	script := string(settingsScript)
 	for _, token := range []string{
 		"set_claude_prompt_replacement_enabled",
-		"set_claude_prompt_replace_from",
-		"set_claude_prompt_replace_to",
+		"set_claude_prompt_rule_from_",
+		"set_claude_prompt_rule_to_",
+		"addClaudeReplacementRule",
+		"moveClaudeReplacementRule",
+		"removeClaudeReplacementRule",
+		"rule_match_counts",
 		"set_claude_prompt_injection_enabled",
 		"set_claude_prompt_injection_position",
 		"set_claude_prompt_injection_text",
