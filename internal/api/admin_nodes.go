@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/bsfdsagfadg/vertex/internal/config"
+	"github.com/bsfdsagfadg/vertex/internal/jsonx"
 	"github.com/bsfdsagfadg/vertex/internal/netx"
 	"github.com/bsfdsagfadg/vertex/internal/nodes"
 	"github.com/bsfdsagfadg/vertex/internal/recaptcha"
@@ -56,10 +57,7 @@ func (adm *AdminHandler) adminGetNodes(w http.ResponseWriter, r *http.Request) {
 
 	if urisOnly {
 		filteredURIs := nodes.LoadFilteredNodeURIs(match)
-		writeJSON(w, http.StatusOK, map[string]any{
-			"uris":  filteredURIs,
-			"total": len(filteredURIs),
-		})
+		writeAdminNodeURIsJSON(w, filteredURIs)
 		return
 	}
 
@@ -106,6 +104,23 @@ func (adm *AdminHandler) adminGetNodes(w http.ResponseWriter, r *http.Request) {
 		"health_cycle_estimate_minutes": healthCycleEstimateMinutes,
 		"recent_proxy":                  nodes.GetRecentProxyStatus(),
 		"recent_proxy_history":          nodes.GetRecentProxyHistory(10),
+	})
+}
+
+type adminNodeURIsResponse struct {
+	Total int      `json:"total"`
+	URIs  []string `json:"uris"`
+}
+
+func writeAdminNodeURIsJSON(w http.ResponseWriter, uris []string) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	// This closed wire type contains only an integer and strings, so JSON type
+	// serialization cannot fail. Write it directly to avoid retaining a second
+	// complete encoding buffer for large node pools.
+	_ = jsonx.EncodeNoTrailingNewline(w, adminNodeURIsResponse{
+		Total: len(uris),
+		URIs:  uris,
 	})
 }
 

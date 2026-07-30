@@ -70,6 +70,36 @@ func benchmarkAdminGetNodesLargePool(b *testing.B, prefix, querySuffix string) {
 	}
 }
 
+func TestWriteAdminNodeURIsJSONMatchesGenericEncoding(t *testing.T) {
+	uris := []string{
+		"http://user:pass@example.com:8080/path?x=<&>#中文",
+		"line\nbreak",
+		"unicode\u2028separator",
+		string([]byte{'i', 'n', 'v', 'a', 'l', 'i', 'd', '-', 0xff}),
+	}
+	direct := httptest.NewRecorder()
+	writeAdminNodeURIsJSON(direct, uris)
+	generic := httptest.NewRecorder()
+	writeJSON(generic, http.StatusOK, map[string]any{
+		"total": len(uris),
+		"uris":  uris,
+	})
+
+	if direct.Code != generic.Code ||
+		direct.Header().Get("Content-Type") != generic.Header().Get("Content-Type") ||
+		direct.Body.String() != generic.Body.String() {
+		t.Fatalf(
+			"direct URI response differs:\ndirect=%d %q %q\ngeneric=%d %q %q",
+			direct.Code,
+			direct.Header().Get("Content-Type"),
+			direct.Body.String(),
+			generic.Code,
+			generic.Header().Get("Content-Type"),
+			generic.Body.String(),
+		)
+	}
+}
+
 func TestReadLimitedSubscriptionBody(t *testing.T) {
 	data, err := readLimitedSubscriptionBody(strings.NewReader("proxy-list"), -1)
 	if err != nil || string(data) != "proxy-list" {
