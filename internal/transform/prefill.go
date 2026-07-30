@@ -84,15 +84,18 @@ func convertTrailingAssistantPrefill(contents []any) ([]any, string) {
 		return contents, ""
 	}
 
-	var prefill strings.Builder
-	prefill.Grow(prefillLength)
-	for _, rawPart := range parts {
-		part := rawPart.(map[string]any)
-		text := part["text"].(string)
-		prefill.WriteString(text)
+	prefix := ""
+	if len(parts) == 1 {
+		prefix = parts[0].(map[string]any)["text"].(string)
+	} else {
+		var prefill strings.Builder
+		prefill.Grow(prefillLength)
+		for _, rawPart := range parts {
+			part := rawPart.(map[string]any)
+			prefill.WriteString(part["text"].(string))
+		}
+		prefix = prefill.String()
 	}
-
-	prefix := prefill.String()
 
 	// Preserve the assistant role whenever the prefix follows a valid prompt
 	// turn. Gemini 3.6 only rejects a request that *ends* in a non-empty model

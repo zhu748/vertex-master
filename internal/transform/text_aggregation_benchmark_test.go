@@ -8,6 +8,27 @@ import (
 var benchmarkAggregatedText string //nolint:gochecknoglobals
 var benchmarkAdaptedContents []any //nolint:gochecknoglobals
 
+func BenchmarkConvertTrailingAssistantPrefillOneMiBSingle(b *testing.B) {
+	text := strings.Repeat("A", 1<<20)
+	userMessage := map[string]any{
+		"role": "user", "parts": []any{map[string]any{"text": "Continue"}},
+	}
+	modelMessage := map[string]any{
+		"role": "model", "parts": []any{map[string]any{"text": text}},
+	}
+	b.ReportAllocs()
+	b.SetBytes(1 << 20)
+	for range b.N {
+		contents := make([]any, 2)
+		contents[0] = userMessage
+		contents[1] = modelMessage
+		benchmarkAdaptedContents, benchmarkAggregatedText = convertTrailingAssistantPrefill(contents)
+		if len(benchmarkAggregatedText) != 1<<20 || len(benchmarkAdaptedContents) != 3 {
+			b.Fatal("unexpected prefill conversion result")
+		}
+	}
+}
+
 func BenchmarkConvertTrailingAssistantPrefillOneMiBSplit(b *testing.B) {
 	text := strings.Repeat("A", 64<<10)
 	parts := make([]any, 16)
