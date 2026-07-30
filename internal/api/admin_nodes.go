@@ -37,10 +37,11 @@ func (adm *AdminHandler) adminGetNodes(w http.ResponseWriter, r *http.Request) {
 	status := strings.ToLower(strings.TrimSpace(queryValues.Get("status")))
 	source := strings.ToLower(strings.TrimSpace(queryValues.Get("source")))
 	urisOnly := queryValues.Get("uris_only") == "true"
+	queryMatcher := newAdminNodeQueryMatcher(query)
 	match := func(node nodes.Node, nodeHealth *nodes.NodeHealth) bool {
-		if query != "" && !strings.Contains(strings.ToLower(node.Name), query) &&
-			!strings.Contains(strings.ToLower(node.RawURI), query) &&
-			!strings.Contains(strings.ToLower(node.Type), query) {
+		if query != "" && !queryMatcher.Contains(node.Name) &&
+			!queryMatcher.Contains(node.RawURI) &&
+			!queryMatcher.Contains(node.Type) {
 			return false
 		}
 		if nodeType != "" && nodeType != "all" && !strings.EqualFold(node.Type, nodeType) {
@@ -107,6 +108,67 @@ func (adm *AdminHandler) adminGetNodes(w http.ResponseWriter, r *http.Request) {
 		Total:                      snapshot.TotalMatches,
 		TotalPages:                 snapshot.TotalPages,
 	})
+}
+
+type adminNodeQueryMatcher struct {
+	query string
+	ascii bool
+}
+
+func newAdminNodeQueryMatcher(lowerQuery string) adminNodeQueryMatcher {
+	for index := range len(lowerQuery) {
+		if lowerQuery[index] >= 0x80 {
+			return adminNodeQueryMatcher{query: lowerQuery}
+		}
+	}
+	return adminNodeQueryMatcher{query: lowerQuery, ascii: true}
+}
+
+func (matcher adminNodeQueryMatcher) Contains(value string) bool {
+	if matcher.query == "" {
+		return true
+	}
+	if !matcher.ascii {
+		return strings.Contains(strings.ToLower(value), matcher.query)
+	}
+
+	hasUpper := false
+	for index := range len(value) {
+		current := value[index]
+		if current >= 0x80 {
+			return strings.Contains(strings.ToLower(value), matcher.query)
+		}
+		if current >= 'A' && current <= 'Z' {
+			hasUpper = true
+		}
+	}
+	if !hasUpper {
+		return strings.Contains(value, matcher.query)
+	}
+	return containsFoldedASCII(value, matcher.query)
+}
+
+func containsFoldedASCII(value, lowerQuery string) bool {
+	if len(lowerQuery) > len(value) {
+		return false
+	}
+	for start := 0; start <= len(value)-len(lowerQuery); start++ {
+		matched := true
+		for offset := range len(lowerQuery) {
+			current := value[start+offset]
+			if current >= 'A' && current <= 'Z' {
+				current += 'a' - 'A'
+			}
+			if current != lowerQuery[offset] {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
 }
 
 type adminNodesPageResponse struct {

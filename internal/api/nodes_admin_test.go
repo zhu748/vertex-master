@@ -31,6 +31,41 @@ func BenchmarkAdminGetNodesLargePoolURIsOnly(b *testing.B) {
 	benchmarkAdminGetNodesLargePool(b, "admin-uris-benchmark", "&status=healthy&uris_only=true")
 }
 
+func TestAdminNodeQueryMatcherMatchesLowercaseContains(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		query string
+	}{
+		{name: "empty query", value: "anything", query: ""},
+		{name: "lowercase match", value: "http://proxy.example", query: "proxy"},
+		{name: "lowercase miss", value: "http://proxy.example", query: "missing"},
+		{name: "uppercase ASCII", value: "HTTP://Proxy.Example", query: "proxy"},
+		{name: "mixed ASCII miss", value: "HTTP://Proxy.Example", query: "missing"},
+		{name: "unicode value", value: "节点-Ä-Kelvin", query: "kelvin"},
+		{name: "unicode query", value: "节点-Ä-Kelvin", query: "ä"},
+		{name: "invalid UTF-8", value: string([]byte{'n', 'o', 'd', 'e', 0xff, 'X'}), query: "x"},
+		{name: "longer query", value: "short", query: "a much longer query"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			lowerQuery := strings.ToLower(test.query)
+			matcher := newAdminNodeQueryMatcher(lowerQuery)
+			got := matcher.Contains(test.value)
+			want := strings.Contains(strings.ToLower(test.value), lowerQuery)
+			if got != want {
+				t.Fatalf(
+					"matcher.Contains(%q, %q)=%v, want %v",
+					test.value,
+					test.query,
+					got,
+					want,
+				)
+			}
+		})
+	}
+}
+
 func benchmarkAdminGetNodesLargePool(b *testing.B, prefix, querySuffix string) {
 	b.Helper()
 	const nodeCount = 5000
