@@ -773,19 +773,21 @@ func responseOutputItems(out protocolOutput) []any {
 			Content: [1]responsesOutputTextPart{{
 				Annotations: []any{}, Logprobs: []any{}, Text: out.Text, Type: "output_text",
 			}},
-			ID: "msg_" + reqID24(), Role: "assistant", Status: status, Type: "message",
+			ID: reqID24WithPrefix("msg_"), Role: "assistant", Status: status, Type: "message",
 		})
 	}
-	for _, tc := range out.ToolCalls {
-		items = append(items, &responsesFunctionCallItem{
+	toolItems := make([]responsesFunctionCallItem, len(out.ToolCalls))
+	for index, tc := range out.ToolCalls {
+		toolItems[index] = responsesFunctionCallItem{
 			Arguments: tc.Arguments,
 			CallID:    tc.ID,
-			ID:        "fc_" + reqID24(),
+			ID:        reqID24WithPrefix("fc_"),
 			Name:      tc.Name,
 			Namespace: tc.Namespace,
 			Status:    status,
 			Type:      "function_call",
-		})
+		}
+		items = append(items, &toolItems[index])
 	}
 	return items
 }

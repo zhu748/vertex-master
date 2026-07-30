@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"math"
 	"net/http/httptest"
@@ -380,6 +381,54 @@ func TestProtocolStreamStatesConsumeUsageOnlyFrame(t *testing.T) {
 	if anthropic.out.Input != 10 || anthropic.out.Output != 25 || anthropic.out.Total != 35 ||
 		anthropic.out.CachedInputTokens != 4 || anthropic.out.ReasoningTokens != 5 {
 		t.Fatalf("Anthropic 流丢失独立 usage 帧: %+v", anthropic.out)
+	}
+}
+
+func TestResponseOutputItemsKeepPackedToolsIndependent(t *testing.T) {
+	items := responseOutputItems(protocolOutput{
+		Finish: "STOP",
+		ToolCalls: []protocolToolCall{
+			{
+				ID: "call_first", Name: "lookup", Namespace: "mcp__one",
+				Arguments: `{"query":"first"}`,
+			},
+			{
+				ID: "call_second", Name: "search", Namespace: "mcp__two",
+				Arguments: `{"query":"second"}`,
+			},
+		},
+	})
+	if len(items) != 2 {
+		t.Fatalf("output items=%d, want 2", len(items))
+	}
+	first, firstOK := items[0].(*responsesFunctionCallItem)
+	second, secondOK := items[1].(*responsesFunctionCallItem)
+	if !firstOK || !secondOK || first == second {
+		t.Fatalf("packed tool item types/addresses changed: %#v", items)
+	}
+	if first.CallID != "call_first" || first.Name != "lookup" ||
+		first.Namespace != "mcp__one" || first.Arguments != `{"query":"first"}` {
+		t.Fatalf("first tool item=%#v", first)
+	}
+	for _, item := range []*responsesFunctionCallItem{first, second} {
+		if !strings.HasPrefix(item.ID, "fc_") || len(item.ID) != len("fc_")+24 {
+			t.Fatalf("tool item ID=%q", item.ID)
+		}
+		if _, err := hex.DecodeString(strings.TrimPrefix(item.ID, "fc_")); err != nil {
+			t.Fatalf("tool item ID is not hexadecimal: %q: %v", item.ID, err)
+		}
+	}
+	if second.CallID != "call_second" || second.Name != "search" ||
+		second.Namespace != "mcp__two" || second.Arguments != `{"query":"second"}` {
+		t.Fatalf("second tool item=%#v", second)
+	}
+
+	setResponsesOutputItemStatus(items, "incomplete")
+	if first.Status != "incomplete" || second.Status != "incomplete" {
+		t.Fatalf("packed statuses not independently mutable: first=%q second=%q",
+			first.Status,
+			second.Status,
+		)
 	}
 }
 

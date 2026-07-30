@@ -120,27 +120,44 @@ func newSSEWriter(w http.ResponseWriter, contentType string) *sseWriter {
 
 var reqCounter uint64 //nolint:gochecknoglobals
 
-func reqID24() string {
+func reqIDBytes() [12]byte {
 	var buf [12]byte
-	if _, err := cryptorand.Read(buf[:]); err != nil {
-		now := time.Now().UnixNano()
-		count := atomic.AddUint64(&reqCounter, 1)
-		var fallback [12]byte
-		fallback[0] = byte(now >> 56)
-		fallback[1] = byte(now >> 48)
-		fallback[2] = byte(now >> 40)
-		fallback[3] = byte(now >> 32)
-		fallback[4] = byte(now >> 24)
-		fallback[5] = byte(now >> 16)
-		fallback[6] = byte(now >> 8)
-		fallback[7] = byte(now)
-		fallback[8] = byte(count >> 24)
-		fallback[9] = byte(count >> 16)
-		fallback[10] = byte(count >> 8)
-		fallback[11] = byte(count)
-		return hex.EncodeToString(fallback[:])
+	if _, err := cryptorand.Read(buf[:]); err == nil {
+		return buf
 	}
+
+	now := time.Now().UnixNano()
+	count := atomic.AddUint64(&reqCounter, 1)
+	buf[0] = byte(now >> 56)
+	buf[1] = byte(now >> 48)
+	buf[2] = byte(now >> 40)
+	buf[3] = byte(now >> 32)
+	buf[4] = byte(now >> 24)
+	buf[5] = byte(now >> 16)
+	buf[6] = byte(now >> 8)
+	buf[7] = byte(now)
+	buf[8] = byte(count >> 24)
+	buf[9] = byte(count >> 16)
+	buf[10] = byte(count >> 8)
+	buf[11] = byte(count)
+	return buf
+}
+
+func reqID24() string {
+	buf := reqIDBytes()
 	return hex.EncodeToString(buf[:])
+}
+
+func reqID24WithPrefix(prefix string) string {
+	buf := reqIDBytes()
+	var encoded [24]byte
+	hex.Encode(encoded[:], buf[:])
+
+	var id strings.Builder
+	id.Grow(len(prefix) + len(encoded))
+	id.WriteString(prefix)
+	_, _ = id.Write(encoded[:])
+	return id.String()
 }
 
 func vertexErrorToOAI(e *vertex.VertexError) map[string]any {
