@@ -303,6 +303,55 @@ func TestMarshalHTMLViewMatchesStandardMarshal(t *testing.T) {
 	}
 }
 
+func TestMarshalHTMLJSONValueRandomizedEquivalence(t *testing.T) {
+	random := rand.New(rand.NewSource(2)) //nolint:gosec
+	for iteration := range 2000 {
+		value := randomDecodedJSONValue(random, 0)
+		want, err := json.Marshal(value)
+		if err != nil {
+			t.Fatalf("iteration %d reference marshal: %v", iteration, err)
+		}
+		got, ok := MarshalHTMLJSONValue(value)
+		if !ok {
+			t.Fatalf("iteration %d standard JSON value missed fast path: %#v", iteration, value)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("iteration %d:\nfast=%q\nwant=%q\nvalue=%#v", iteration, got, want, value)
+		}
+	}
+
+	if encoded, ok := MarshalHTMLJSONValue(map[string]any{"unsupported": 1}); ok {
+		t.Fatalf("unsupported integer unexpectedly encoded as %q", encoded)
+	}
+}
+
+func TestMarshalHTMLJSONValueViewMatchesOwnedResult(t *testing.T) {
+	value := map[string]any{
+		"<key>":  "node <one> & two",
+		"nested": []any{true, nil, float64(2)},
+	}
+	want, ok := MarshalHTMLJSONValue(value)
+	if !ok {
+		t.Fatal("owned HTML JSON fast path rejected supported value")
+	}
+	var got []byte
+	if ok := MarshalHTMLJSONValueView(value, func(view []byte) {
+		got = append(got, view...)
+	}); !ok {
+		t.Fatal("view HTML JSON fast path rejected supported value")
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("MarshalHTMLJSONValueView()=%q, owned=%q", got, want)
+	}
+
+	called := false
+	if ok := MarshalHTMLJSONValueView(map[string]any{"unsupported": 1}, func([]byte) {
+		called = true
+	}); ok || called {
+		t.Fatalf("unsupported value: ok=%v called=%v", ok, called)
+	}
+}
+
 func TestMarshalJSONValueStringMatchesMarshalString(t *testing.T) {
 	invalidUTF8 := string([]byte{'a', 0xff, 'b'})
 	tests := []any{
@@ -499,6 +548,20 @@ func TestMarshalJSONValueStringSimpleMapAllocatesOnce(t *testing.T) {
 	})
 	if allocations != 1 {
 		t.Fatalf("simple map allocated %.1f times, want 1", allocations)
+	}
+}
+
+func TestMarshalHTMLJSONValueSimpleMapAllocatesOnce(t *testing.T) {
+	value := map[string]any{"<query>": "weather & alerts"}
+	allocations := testing.AllocsPerRun(100, func() {
+		encoded, ok := MarshalHTMLJSONValue(value)
+		if !ok || string(encoded) != `{"\u003cquery\u003e":"weather \u0026 alerts"}` {
+			t.Fatal("simple HTML-escaped map encoding failed")
+		}
+		benchmarkMarshalBytes = encoded
+	})
+	if allocations != 1 {
+		t.Fatalf("simple HTML-escaped map allocated %.1f times, want 1", allocations)
 	}
 }
 

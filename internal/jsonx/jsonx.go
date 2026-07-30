@@ -145,6 +145,46 @@ func MarshalJSONValue(value any) (encoded []byte, ok bool) {
 	return buffer, true
 }
 
+// MarshalHTMLJSONValue is the standard-HTML-escaping counterpart of
+// MarshalJSONValue. It keeps encoding/json.Marshal-compatible bytes while
+// avoiding reflection for values decoded into generic JSON containers.
+func MarshalHTMLJSONValue(value any) (encoded []byte, ok bool) {
+	size, ok := jsonValueEncodedSizeMode(value, 0, true)
+	if !ok {
+		return nil, false
+	}
+	buffer := make([]byte, 0, size)
+	buffer, ok = appendJSONValueMode(buffer, value, 0, true)
+	if !ok || len(buffer) != size {
+		return nil, false
+	}
+	return buffer, true
+}
+
+// MarshalHTMLJSONValueView is the pooled callback form of
+// MarshalHTMLJSONValue. The view is read-only and valid only for the duration
+// of consume. consume is not called when value is outside the supported
+// decoded-JSON value set.
+func MarshalHTMLJSONValueView(value any, consume func([]byte)) bool {
+	size, ok := jsonValueEncodedSizeMode(value, 0, true)
+	if !ok {
+		return false
+	}
+	buf := marshalBufferPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer releaseMarshalBuffer(buf)
+
+	buf.Grow(size)
+	view := buf.AvailableBuffer()
+	view, ok = appendJSONValueMode(view, value, 0, true)
+	if !ok || len(view) != size {
+		return false
+	}
+	_, _ = buf.Write(view)
+	consume(buf.Bytes())
+	return true
+}
+
 // AppendJSONValue appends the finite decoded-JSON value set supported by
 // MarshalJSONValue to dst. On failure it returns dst unchanged. Callers can
 // therefore pack several independent values into one backing buffer and retain
@@ -177,6 +217,10 @@ func MarshalJSONValueString(value any) (encoded string, ok bool) {
 }
 
 func jsonValueEncodedSize(value any, depth int) (int, bool) {
+	return jsonValueEncodedSizeMode(value, depth, false)
+}
+
+func jsonValueEncodedSizeMode(value any, depth int, escapeHTML bool) (int, bool) {
 	if depth > maxFastJSONValueDepth {
 		return 0, false
 	}
@@ -189,7 +233,7 @@ func jsonValueEncodedSize(value any, depth int) (int, bool) {
 		}
 		return len("false"), true
 	case string:
-		return jsonStringEncodedSize(typed), true
+		return jsonStringEncodedSizeMode(typed, escapeHTML), true
 	case float64:
 		if math.IsInf(typed, 0) || math.IsNaN(typed) {
 			return 0, false
@@ -202,7 +246,7 @@ func jsonValueEncodedSize(value any, depth int) (int, bool) {
 		}
 		size := 2
 		for index, item := range typed {
-			itemSize, itemOK := jsonValueEncodedSize(item, depth+1)
+			itemSize, itemOK := jsonValueEncodedSizeMode(item, depth+1, escapeHTML)
 			if !itemOK || size > int(^uint(0)>>1)-itemSize {
 				return 0, false
 			}
@@ -219,8 +263,8 @@ func jsonValueEncodedSize(value any, depth int) (int, bool) {
 		size := 2
 		index := 0
 		for key, item := range typed {
-			keySize := jsonStringEncodedSize(key)
-			itemSize, itemOK := jsonValueEncodedSize(item, depth+1)
+			keySize := jsonStringEncodedSizeMode(key, escapeHTML)
+			itemSize, itemOK := jsonValueEncodedSizeMode(item, depth+1, escapeHTML)
 			if !itemOK || keySize > int(^uint(0)>>1)-itemSize-1 ||
 				size > int(^uint(0)>>1)-keySize-itemSize-1 {
 				return 0, false
@@ -238,6 +282,10 @@ func jsonValueEncodedSize(value any, depth int) (int, bool) {
 }
 
 func appendJSONValue(buffer []byte, value any, depth int) ([]byte, bool) {
+	return appendJSONValueMode(buffer, value, depth, false)
+}
+
+func appendJSONValueMode(buffer []byte, value any, depth int, escapeHTML bool) ([]byte, bool) {
 	if depth > maxFastJSONValueDepth {
 		return buffer, false
 	}
@@ -247,7 +295,7 @@ func appendJSONValue(buffer []byte, value any, depth int) ([]byte, bool) {
 	case bool:
 		return strconv.AppendBool(buffer, typed), true
 	case string:
-		return appendJSONString(buffer, typed), true
+		return appendJSONStringMode(buffer, typed, escapeHTML), true
 	case float64:
 		if math.IsInf(typed, 0) || math.IsNaN(typed) {
 			return buffer, false
@@ -263,7 +311,7 @@ func appendJSONValue(buffer []byte, value any, depth int) ([]byte, bool) {
 				buffer = append(buffer, ',')
 			}
 			var ok bool
-			buffer, ok = appendJSONValue(buffer, item, depth+1)
+			buffer, ok = appendJSONValueMode(buffer, item, depth+1, escapeHTML)
 			if !ok {
 				return buffer, false
 			}
@@ -287,10 +335,10 @@ func appendJSONValue(buffer []byte, value any, depth int) ([]byte, bool) {
 			if index > 0 {
 				buffer = append(buffer, ',')
 			}
-			buffer = appendJSONString(buffer, key)
+			buffer = appendJSONStringMode(buffer, key, escapeHTML)
 			buffer = append(buffer, ':')
 			var ok bool
-			buffer, ok = appendJSONValue(buffer, typed[key], depth+1)
+			buffer, ok = appendJSONValueMode(buffer, typed[key], depth+1, escapeHTML)
 			if !ok {
 				return buffer, false
 			}
@@ -319,6 +367,10 @@ func appendJSONFloat(buffer []byte, value float64) []byte {
 }
 
 func jsonStringEncodedSize(value string) int {
+	return jsonStringEncodedSizeMode(value, false)
+}
+
+func jsonStringEncodedSizeMode(value string, escapeHTML bool) int {
 	size := 2
 	for index := 0; index < len(value); {
 		char := value[index]
@@ -327,7 +379,7 @@ func jsonStringEncodedSize(value string) int {
 			case '\\', '"', '\b', '\f', '\n', '\r', '\t':
 				size += 2
 			default:
-				if char < 0x20 {
+				if char < 0x20 || escapeHTML && (char == '<' || char == '>' || char == '&') {
 					size += 6
 				} else {
 					size++
@@ -351,12 +403,17 @@ func jsonStringEncodedSize(value string) int {
 }
 
 func appendJSONString(buffer []byte, value string) []byte {
+	return appendJSONStringMode(buffer, value, false)
+}
+
+func appendJSONStringMode(buffer []byte, value string, escapeHTML bool) []byte {
 	buffer = append(buffer, '"')
 	start := 0
 	for index := 0; index < len(value); {
 		char := value[index]
 		if char < utf8.RuneSelf {
-			if char >= 0x20 && char != '\\' && char != '"' {
+			if char >= 0x20 && char != '\\' && char != '"' &&
+				(!escapeHTML || char != '<' && char != '>' && char != '&') {
 				index++
 				continue
 			}

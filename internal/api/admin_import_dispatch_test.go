@@ -11,7 +11,7 @@ func TestEncodeClashProxyURIMatchesCanonicalEncoding(t *testing.T) {
 		"name":    "node <one>",
 		"type":    "http",
 		"server":  "proxy.example.com",
-		"port":    8080,
+		"port":    float64(8080),
 		"headers": map[string]any{"X-Test": "a&b"},
 	}
 	body, err := json.Marshal(proxy)

@@ -125,21 +125,30 @@ func buildClashURI(proxy map[string]any) string {
 }
 
 func encodeClashProxyURI(proxy map[string]any) string {
-	const prefix = "clash://"
 	var uri string
+	if jsonx.MarshalHTMLJSONValueView(proxy, func(body []byte) {
+		uri = encodeClashProxyJSON(body)
+	}) {
+		return uri
+	}
 	err := jsonx.MarshalHTMLView(proxy, func(body []byte) {
-		encoded := make([]byte, len(prefix)+base64.StdEncoding.EncodedLen(len(body)))
-		copy(encoded, prefix)
-		base64.StdEncoding.Encode(encoded[len(prefix):], body)
-		// encoded is freshly allocated and never mutated after publication. Reusing
-		// its backing storage avoids a temporary Base64 string plus a second prefix
-		// concatenation allocation for every imported node.
-		uri = unsafe.String(unsafe.SliceData(encoded), len(encoded))
+		uri = encodeClashProxyJSON(body)
 	})
 	if err != nil {
 		return ""
 	}
 	return uri
+}
+
+func encodeClashProxyJSON(body []byte) string {
+	const prefix = "clash://"
+	encoded := make([]byte, len(prefix)+base64.StdEncoding.EncodedLen(len(body)))
+	copy(encoded, prefix)
+	base64.StdEncoding.Encode(encoded[len(prefix):], body)
+	// encoded is freshly allocated and never mutated after publication. Reusing
+	// its backing storage avoids a temporary Base64 string plus a second prefix
+	// concatenation allocation for every imported node.
+	return unsafe.String(unsafe.SliceData(encoded), len(encoded))
 }
 
 func v2rayNConfigType(v any) int {
