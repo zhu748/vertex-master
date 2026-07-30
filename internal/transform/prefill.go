@@ -276,10 +276,12 @@ func StripAssistantPrefillFromGemini(response map[string]any, prefill string) {
 // several upstream chunks. It buffers only while output is still an exact
 // prefix candidate, then releases text immediately once a mismatch is known.
 type AssistantPrefillStreamFilter struct {
-	prefill        string
-	candidates     map[int]*assistantPrefillCandidateState
-	candidateOrder []int
-	sawText        bool
+	prefill     string
+	primary     assistantPrefillCandidateState
+	primarySeen bool
+	others      map[int]*assistantPrefillCandidateState
+	otherOrder  []int
+	sawText     bool
 }
 
 type assistantPrefillCandidateState struct {
@@ -303,7 +305,7 @@ func (f *AssistantPrefillStreamFilter) filterText(text string, final bool) strin
 }
 
 func (f *AssistantPrefillStreamFilter) filterCandidateText(candidateIndex int, text string, final bool) string {
-	if text != "" {
+	if candidateIndex == 0 && text != "" {
 		f.sawText = true
 	}
 	if f.prefill == "" {
@@ -347,15 +349,19 @@ func (f *AssistantPrefillStreamFilter) filterCandidateText(candidateIndex int, t
 }
 
 func (f *AssistantPrefillStreamFilter) candidateState(index int) *assistantPrefillCandidateState {
-	if f.candidates == nil {
-		f.candidates = make(map[int]*assistantPrefillCandidateState)
+	if index == 0 {
+		f.primarySeen = true
+		return &f.primary
 	}
-	if state := f.candidates[index]; state != nil {
+	if f.others == nil {
+		f.others = make(map[int]*assistantPrefillCandidateState)
+	}
+	if state := f.others[index]; state != nil {
 		return state
 	}
 	state := &assistantPrefillCandidateState{}
-	f.candidates[index] = state
-	f.candidateOrder = append(f.candidateOrder, index)
+	f.others[index] = state
+	f.otherOrder = append(f.otherOrder, index)
 	return state
 }
 
@@ -456,13 +462,19 @@ func (f *AssistantPrefillStreamFilter) Finalize() string {
 }
 
 // FinalizeGemini releases every candidate's still-ambiguous partial prefix.
-// The result follows first-seen order so native stream output is deterministic.
+// Candidate zero is returned first, followed by other candidates in first-seen
+// order, so native stream output is deterministic.
 func (f *AssistantPrefillStreamFilter) FinalizeGemini() []GeminiPrefillTail {
 	if f == nil || f.prefill == "" {
 		return nil
 	}
 	var tails []GeminiPrefillTail
-	for _, index := range f.candidateOrder {
+	if f.primarySeen {
+		if text := f.filterCandidateText(0, "", true); text != "" {
+			tails = append(tails, GeminiPrefillTail{Index: 0, Text: text})
+		}
+	}
+	for _, index := range f.otherOrder {
 		if text := f.filterCandidateText(index, "", true); text != "" {
 			tails = append(tails, GeminiPrefillTail{Index: index, Text: text})
 		}

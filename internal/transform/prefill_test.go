@@ -299,6 +299,25 @@ func TestAssistantPrefillNativeFinalizeReleasesEveryCandidate(t *testing.T) {
 	}
 }
 
+func TestAssistantPrefillSawTextTracksPrimaryCandidateOnly(t *testing.T) {
+	filter := NewAssistantPrefillStreamFilter("ABC")
+	secondaryOnly := map[string]any{"candidates": []any{
+		prefillTestCandidate(1, "secondary", "STOP"),
+	}}
+	filter.FilterGeminiChunk(secondaryOnly)
+	if filter.SawText() {
+		t.Fatal("兼容协议只输出主候选，空响应判断不应计入非主候选文本")
+	}
+
+	primary := map[string]any{"candidates": []any{
+		prefillTestCandidate(0, "primary", "STOP"),
+	}}
+	filter.FilterGeminiChunk(primary)
+	if !filter.SawText() {
+		t.Fatal("主候选文本必须计入空响应判断")
+	}
+}
+
 func TestAssistantPrefillStreamFilterPreservesMismatchAndPartialFinish(t *testing.T) {
 	noEcho := NewAssistantPrefillStreamFilter("Alice:")
 	chunk := prefillTestChunk("Hello", "STOP")
