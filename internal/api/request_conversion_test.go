@@ -26,6 +26,49 @@ func TestReusableResponsesMessageOnlyAcceptsCanonicalReadOnlyShape(t *testing.T)
 	}
 }
 
+func TestAnthropicMessagePassThroughOnlyAcceptsCanonicalReadOnlyShape(t *testing.T) {
+	userTextBlocks := map[string]any{
+		"role": "user",
+		"content": []any{
+			map[string]any{"type": "text", "text": "hello", "cache_control": map[string]any{"type": "ephemeral"}},
+		},
+	}
+	if !anthropicMessageCanPassThrough(userTextBlocks, "user") {
+		t.Fatalf("canonical user text message was not reusable: %#v", userTextBlocks)
+	}
+	assistantText := map[string]any{"role": "assistant", "content": "hello"}
+	if !anthropicMessageCanPassThrough(assistantText, "assistant") {
+		t.Fatalf("canonical assistant string message was not reusable: %#v", assistantText)
+	}
+
+	for name, message := range map[string]map[string]any{
+		"assistant blocks require flattening": {
+			"role": "assistant",
+			"content": []any{
+				map[string]any{"type": "text", "text": "hello"},
+			},
+		},
+		"extra fields must be sanitized": {
+			"role": "user", "content": "hello", "tool_call_id": "must-not-leak",
+		},
+		"empty blocks do not produce a message": {
+			"role": "user", "content": []any{},
+		},
+		"invalid text block requires validation": {
+			"role": "user",
+			"content": []any{
+				map[string]any{"type": "text", "text": float64(1)},
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if anthropicMessageCanPassThrough(message, stringValue(message["role"])) {
+				t.Fatalf("non-canonical message was reused: %#v", message)
+			}
+		})
+	}
+}
+
 func TestProtocolArrayTextConversionPreservesSeparatorsAndInput(t *testing.T) {
 	parts := []any{
 		map[string]any{"type": "text", "text": "first"},

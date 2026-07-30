@@ -157,7 +157,10 @@ func (h *AnthropicHandler) readAnthropicBody(w http.ResponseWriter, r *http.Requ
 }
 
 func anthropicToChatRequest(body map[string]any) (map[string]any, error) {
-	chat := make(map[string]any, 12)
+	// At most nine Anthropic fields map into the internal Chat request. Bound
+	// the hint so unknown client extensions cannot cause a large duplicate map.
+	const maxChatFields = 9
+	chat := make(map[string]any, min(len(body), maxChatFields))
 	for _, pair := range [][2]string{
 		{"max_tokens", "max_completion_tokens"}, {"temperature", "temperature"},
 		{"top_p", "top_p"}, {"top_k", "top_k"}, {"stop_sequences", "stop"},
@@ -202,6 +205,10 @@ func anthropicToChatRequest(body map[string]any) (map[string]any, error) {
 		}
 		if role != "user" && role != "assistant" {
 			return nil, fmt.Errorf("message role %q must be 'user' or 'assistant'", role)
+		}
+		if anthropicMessageCanPassThrough(message, role) {
+			messages = append(messages, message)
+			continue
 		}
 		var err error
 		messages, err = appendAnthropicMessageToChat(messages, role, message["content"])
@@ -265,6 +272,24 @@ func anthropicToChatRequest(body map[string]any) (map[string]any, error) {
 		}
 	}
 	return chat, nil
+}
+
+func anthropicMessageCanPassThrough(message map[string]any, role string) bool {
+	if len(message) != 2 {
+		return false
+	}
+	if _, ok := message["role"].(string); !ok {
+		return false
+	}
+	content := message["content"]
+	if _, ok := content.(string); ok {
+		return true
+	}
+	if role != "user" {
+		return false
+	}
+	_, ok := anthropicUserTextContentCanPassThrough(content)
+	return ok
 }
 
 func anthropicInstructionText(v any) (string, error) {
