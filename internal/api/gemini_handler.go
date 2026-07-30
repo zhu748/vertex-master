@@ -80,6 +80,16 @@ func (g *GeminiHandler) readGeminiBody(w http.ResponseWriter, r *http.Request) (
 		g.geminiError(w, http.StatusBadRequest, "请求格式错误，JSON 解析失败 (invalid JSON)", "INVALID_ARGUMENT")
 		return nil, false
 	}
+	body, err = normalizeGeminiRequestBody(body)
+	if err != nil {
+		g.geminiError(
+			w,
+			http.StatusBadRequest,
+			"请求内容格式错误 (invalid request content): "+err.Error(),
+			"INVALID_ARGUMENT",
+		)
+		return nil, false
+	}
 	return body, true
 }
 
@@ -88,9 +98,6 @@ func (g *GeminiHandler) handleGeminiGenerate(w http.ResponseWriter, r *http.Requ
 	body, ok := g.readGeminiBody(w, r)
 	if !ok {
 		return
-	}
-	if reqObj, ok2 := body["generateContentRequest"].(map[string]any); ok2 {
-		body = reqObj
 	}
 	prefill := transform.AdaptGemini36Prefill(g.cfg.ResolveModelName(actualModel), body)
 	log.Printf("[Server] [GeminiGenerate] 收到请求: 模型=%s, 真模型=%s", model, actualModel)
@@ -121,9 +128,6 @@ func (g *GeminiHandler) handleGeminiStreamGenerate(w http.ResponseWriter, r *htt
 	body, ok := g.readGeminiBody(w, r)
 	if !ok {
 		return
-	}
-	if reqObj, ok2 := body["generateContentRequest"].(map[string]any); ok2 {
-		body = reqObj
 	}
 	transform.AdaptGemini36Prefill(g.cfg.ResolveModelName(actualModel), body)
 	log.Printf("[Server] [GeminiStreamGenerate] 收到请求: 模型=%s, 真模型=%s, 假流式=%v", model, actualModel, useFake)
@@ -435,12 +439,7 @@ func (g *GeminiHandler) handleCountTokens(w http.ResponseWriter, r *http.Request
 	}
 	log.Printf("[Server] [CountTokens] 收到请求: 模型=%s, 真模型=%s", model, actualModel)
 
-	countPayload := body
-	if reqObj, ok2 := body["generateContentRequest"].(map[string]any); ok2 {
-		countPayload = reqObj
-	}
-
-	total, countErr := g.vc.CountTokensExact(r.Context(), actualModel, protocolInputContents(countPayload))
+	total, countErr := g.vc.CountTokensExact(r.Context(), actualModel, protocolInputContents(body))
 	if countErr != nil {
 		ve := toVertexError(countErr)
 		writeJSON(w, ve.Code, vertexErrorToGemini(ve))
