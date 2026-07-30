@@ -20,17 +20,22 @@ const (
 	maxClaudeReplacementWorkBytes   = 64 << 20
 )
 
+const claudeCodePromotionPrompt = ` - The most recent Claude models are the Claude 5 family and Haiku 4.5. Model IDs — Fable 5: 'claude-fable-5', Opus 5: 'claude-opus-5', Sonnet 5: 'claude-sonnet-5', Haiku 4.5: 'claude-haiku-4-5-20251001'. When building AI applications, default to the latest and most capable Claude models.
+ - Claude Code is available as a CLI in the terminal, desktop app (Mac/Windows), web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).
+ - Fast mode for Claude Code uses Claude Opus with faster output (it does not downgrade to a smaller model). It can be toggled with /fast and is available on Opus 5/4.8/4.7.`
+
 type claudePromptPolicyResult struct {
-	OriginalPrompt   string
-	EffectivePrompt  string
-	HadSystem        bool
-	ReplacementCount int
-	ReplacementRules int
-	ApplicableRules  int
-	MatchedRules     int
-	RuleMatchCounts  []int
-	RuleApplicable   []bool
-	InjectionApplied bool
+	OriginalPrompt        string
+	EffectivePrompt       string
+	HadSystem             bool
+	PromotionRemovalCount int
+	ReplacementCount      int
+	ReplacementRules      int
+	ApplicableRules       int
+	MatchedRules          int
+	RuleMatchCounts       []int
+	RuleApplicable        []bool
+	InjectionApplied      bool
 }
 
 type claudePromptPolicyError struct {
@@ -61,9 +66,8 @@ func claudePromptLimitError(detail string) error {
 }
 
 // applyClaudePromptPolicy operates on the normalized Chat request produced
-// from an Anthropic Messages request. Literal replacements are applied first,
-// then the configured text is injected, so replacement rules cannot
-// accidentally rewrite newly injected policy text.
+// from an Anthropic Messages request. The built-in promotion removal runs
+// first, followed by literal replacement rules and configured injection.
 func applyClaudePromptPolicy(
 	chatBody map[string]any,
 	cfg config.ConfigProvider,
@@ -105,7 +109,8 @@ func applyClaudePromptPolicy(
 		return result, claudePromptConfigError(err)
 	}
 	limit := maxClaudePromptBytesForPolicy(policy)
-	if (policy.ReplacementEnabled || policy.InjectionEnabled) && len(original) > limit {
+	if (policy.StripPromotions || policy.ReplacementEnabled || policy.InjectionEnabled) &&
+		len(original) > limit {
 		return result, claudePromptLimitError(fmt.Sprintf(
 			"claude system prompt exceeds %d bytes before processing",
 			limit,
@@ -115,12 +120,48 @@ func applyClaudePromptPolicy(
 	effectiveSegments := append([]string(nil), systemTexts...)
 	effective := original
 	collapsedSegments := false
+	workBytes := 0
+	if policy.StripPromotions {
+		promotionTargets := [...]string{
+			claudeCodePromotionPrompt,
+			strings.ReplaceAll(claudeCodePromotionPrompt, "\n", "\r\n"),
+		}
+		for _, promotionTarget := range promotionTargets {
+			scanBytes := len(joinClaudeSystemPromptSegments(effectiveSegments))
+			nextWorkBytes, withinWorkLimit := addClaudeReplacementWork(workBytes, scanBytes)
+			if !withinWorkLimit {
+				return result, claudePromptLimitError(fmt.Sprintf(
+					"claude prompt replacement work exceeds %d bytes at default promotion removal",
+					maxClaudeReplacementWorkBytes,
+				))
+			}
+			workBytes = nextWorkBytes
+			for segmentIndex, segment := range effectiveSegments {
+				replaced, matches, err := replaceAllClaudeLiteralWithinLimit(
+					segment,
+					promotionTarget,
+					"",
+					limit,
+				)
+				if err != nil {
+					return result, claudePromptLimitError(fmt.Sprintf(
+						"claude system prompt exceeds %d bytes after default promotion removal",
+						limit,
+					))
+				}
+				effectiveSegments[segmentIndex] = replaced
+				result.PromotionRemovalCount += matches
+			}
+		}
+		if result.PromotionRemovalCount > 0 {
+			effective = joinClaudeSystemPromptSegments(effectiveSegments)
+		}
+	}
 	if policy.ReplacementEnabled {
 		rules := policy.ReplacementRules
 		result.ReplacementRules = len(rules)
 		result.RuleMatchCounts = make([]int, len(rules))
 		result.RuleApplicable = make([]bool, len(rules))
-		workBytes := 0
 		for index, rule := range rules {
 			if rule.Disabled || !claudePromptRuleAppliesToModel(rule, requestedModel, actualModel) {
 				continue
@@ -495,23 +536,24 @@ func maxClaudePromptBytesForPolicy(policy config.ClaudePromptPolicyConfig) int {
 }
 
 type claudePromptRecord struct {
-	OriginalPrompt     string
-	EffectivePrompt    string
-	Model              string
-	Endpoint           string
-	ReceivedAt         time.Time
-	HadSystem          bool
-	ReplacementCount   int
-	ReplacementRules   int
-	ApplicableRules    int
-	MatchedRules       int
-	RuleMatchCounts    []int
-	RuleApplicable     []bool
-	InjectionApplied   bool
-	OriginalBytes      int
-	EffectiveBytes     int
-	OriginalTruncated  bool
-	EffectiveTruncated bool
+	OriginalPrompt        string
+	EffectivePrompt       string
+	Model                 string
+	Endpoint              string
+	ReceivedAt            time.Time
+	HadSystem             bool
+	PromotionRemovalCount int
+	ReplacementCount      int
+	ReplacementRules      int
+	ApplicableRules       int
+	MatchedRules          int
+	RuleMatchCounts       []int
+	RuleApplicable        []bool
+	InjectionApplied      bool
+	OriginalBytes         int
+	EffectiveBytes        int
+	OriginalTruncated     bool
+	EffectiveTruncated    bool
 }
 
 type claudePromptStore struct {
@@ -532,23 +574,24 @@ func (s *claudePromptStore) Record(
 	ruleMatchCounts := append([]int(nil), result.RuleMatchCounts...)
 	ruleApplicable := append([]bool(nil), result.RuleApplicable...)
 	s.slot(endpoint).Store(&claudePromptRecord{
-		OriginalPrompt:     original,
-		EffectivePrompt:    effective,
-		Model:              model,
-		Endpoint:           endpoint,
-		ReceivedAt:         time.Now().UTC(),
-		HadSystem:          result.HadSystem,
-		ReplacementCount:   result.ReplacementCount,
-		ReplacementRules:   result.ReplacementRules,
-		ApplicableRules:    result.ApplicableRules,
-		MatchedRules:       result.MatchedRules,
-		RuleMatchCounts:    ruleMatchCounts,
-		RuleApplicable:     ruleApplicable,
-		InjectionApplied:   result.InjectionApplied,
-		OriginalBytes:      len(result.OriginalPrompt),
-		EffectiveBytes:     len(result.EffectivePrompt),
-		OriginalTruncated:  originalTruncated,
-		EffectiveTruncated: effectiveTruncated,
+		OriginalPrompt:        original,
+		EffectivePrompt:       effective,
+		Model:                 model,
+		Endpoint:              endpoint,
+		ReceivedAt:            time.Now().UTC(),
+		HadSystem:             result.HadSystem,
+		PromotionRemovalCount: result.PromotionRemovalCount,
+		ReplacementCount:      result.ReplacementCount,
+		ReplacementRules:      result.ReplacementRules,
+		ApplicableRules:       result.ApplicableRules,
+		MatchedRules:          result.MatchedRules,
+		RuleMatchCounts:       ruleMatchCounts,
+		RuleApplicable:        ruleApplicable,
+		InjectionApplied:      result.InjectionApplied,
+		OriginalBytes:         len(result.OriginalPrompt),
+		EffectiveBytes:        len(result.EffectivePrompt),
+		OriginalTruncated:     originalTruncated,
+		EffectiveTruncated:    effectiveTruncated,
 	})
 }
 
@@ -606,6 +649,7 @@ func truncateClaudePromptRecord(value string) (string, bool) {
 type claudePromptPreviewRequest struct {
 	OriginalPrompt     string                               `json:"original_prompt"`
 	Model              string                               `json:"model"`
+	StripPromotions    *bool                                `json:"strip_claude_code_promotions"`
 	ReplacementEnabled bool                                 `json:"replacement_enabled"`
 	Replacements       []config.ClaudePromptReplacementRule `json:"replacements"`
 	InjectionEnabled   bool                                 `json:"injection_enabled"`
@@ -644,6 +688,9 @@ func (adm *AdminHandler) adminClaudePromptPreview(w http.ResponseWriter, r *http
 	if adm.cfg != nil {
 		previewConfig.MaxRequestMB = adm.cfg.MaxRequestMB()
 	}
+	if body.StripPromotions != nil {
+		previewConfig.ClaudePromptStripPromotions = *body.StripPromotions
+	}
 	previewConfig.ClaudePromptReplacementEnabled = body.ReplacementEnabled
 	previewConfig.ClaudePromptReplacements = body.Replacements
 	previewConfig.ClaudePromptInjectionEnabled = body.InjectionEnabled
@@ -677,15 +724,16 @@ func (adm *AdminHandler) adminClaudePromptPreview(w http.ResponseWriter, r *http
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"effective_prompt":  result.EffectivePrompt,
-		"replacement_count": result.ReplacementCount,
-		"replacement_rules": result.ReplacementRules,
-		"applicable_rules":  result.ApplicableRules,
-		"matched_rules":     result.MatchedRules,
-		"rule_match_counts": result.RuleMatchCounts,
-		"rule_applicable":   result.RuleApplicable,
-		"injection_applied": result.InjectionApplied,
-		"effective_bytes":   len(result.EffectivePrompt),
+		"effective_prompt":        result.EffectivePrompt,
+		"promotion_removal_count": result.PromotionRemovalCount,
+		"replacement_count":       result.ReplacementCount,
+		"replacement_rules":       result.ReplacementRules,
+		"applicable_rules":        result.ApplicableRules,
+		"matched_rules":           result.MatchedRules,
+		"rule_match_counts":       result.RuleMatchCounts,
+		"rule_applicable":         result.RuleApplicable,
+		"injection_applied":       result.InjectionApplied,
+		"effective_bytes":         len(result.EffectivePrompt),
 	})
 }
 
@@ -707,24 +755,25 @@ func (adm *AdminHandler) adminClaudePromptLatest(w http.ResponseWriter, r *http.
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"available":           true,
-			"original_prompt":     record.OriginalPrompt,
-			"effective_prompt":    record.EffectivePrompt,
-			"model":               record.Model,
-			"endpoint":            record.Endpoint,
-			"received_at":         record.ReceivedAt.Format(time.RFC3339Nano),
-			"had_system":          record.HadSystem,
-			"replacement_count":   record.ReplacementCount,
-			"replacement_rules":   record.ReplacementRules,
-			"applicable_rules":    record.ApplicableRules,
-			"matched_rules":       record.MatchedRules,
-			"rule_match_counts":   record.RuleMatchCounts,
-			"rule_applicable":     record.RuleApplicable,
-			"injection_applied":   record.InjectionApplied,
-			"original_bytes":      record.OriginalBytes,
-			"effective_bytes":     record.EffectiveBytes,
-			"original_truncated":  record.OriginalTruncated,
-			"effective_truncated": record.EffectiveTruncated,
+			"available":               true,
+			"original_prompt":         record.OriginalPrompt,
+			"effective_prompt":        record.EffectivePrompt,
+			"model":                   record.Model,
+			"endpoint":                record.Endpoint,
+			"received_at":             record.ReceivedAt.Format(time.RFC3339Nano),
+			"had_system":              record.HadSystem,
+			"promotion_removal_count": record.PromotionRemovalCount,
+			"replacement_count":       record.ReplacementCount,
+			"replacement_rules":       record.ReplacementRules,
+			"applicable_rules":        record.ApplicableRules,
+			"matched_rules":           record.MatchedRules,
+			"rule_match_counts":       record.RuleMatchCounts,
+			"rule_applicable":         record.RuleApplicable,
+			"injection_applied":       record.InjectionApplied,
+			"original_bytes":          record.OriginalBytes,
+			"effective_bytes":         record.EffectiveBytes,
+			"original_truncated":      record.OriginalTruncated,
+			"effective_truncated":     record.EffectiveTruncated,
 		})
 	case http.MethodDelete:
 		adm.claudePrompts.Clear(endpoint)

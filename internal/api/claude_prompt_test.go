@@ -13,6 +13,81 @@ import (
 	"github.com/bsfdsagfadg/vertex/internal/transform"
 )
 
+func TestClaudePromptPolicyStripsClaudeCodePromotionsByDefault(t *testing.T) {
+	cfg := config.DefaultConfig()
+	chatBody := map[string]any{"messages": []any{
+		map[string]any{
+			"role":    "system",
+			"content": "environment before\n" + claudeCodePromotionPrompt + "\ncontext after",
+		},
+		map[string]any{"role": "user", "content": "hello"},
+	}}
+
+	result, err := applyClaudePromptPolicy(chatBody, config.StaticProvider(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.PromotionRemovalCount != 1 ||
+		result.ReplacementCount != 0 ||
+		strings.Contains(result.EffectivePrompt, "Claude Fable 5") ||
+		result.EffectivePrompt != "environment before\n\ncontext after" {
+		t.Fatalf("unexpected default promotion removal: %#v", result)
+	}
+	messages := chatBody["messages"].([]any)
+	if got := messages[0].(map[string]any)["content"]; got != result.EffectivePrompt {
+		t.Fatalf("upstream system=%q, want %q", got, result.EffectivePrompt)
+	}
+
+	crlfPrompt := strings.ReplaceAll(claudeCodePromotionPrompt, "\n", "\r\n")
+	crlfBody := map[string]any{"messages": []any{
+		map[string]any{"role": "system", "content": crlfPrompt},
+		map[string]any{"role": "user", "content": "hello"},
+	}}
+	result, err = applyClaudePromptPolicy(crlfBody, config.StaticProvider(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.PromotionRemovalCount != 1 || result.EffectivePrompt != "" {
+		t.Fatalf("CRLF promotion block was not removed: %#v", result)
+	}
+
+	cfg.ClaudePromptStripPromotions = false
+	unchangedBody := map[string]any{"messages": []any{
+		map[string]any{"role": "system", "content": claudeCodePromotionPrompt},
+		map[string]any{"role": "user", "content": "hello"},
+	}}
+	result, err = applyClaudePromptPolicy(unchangedBody, config.StaticProvider(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.PromotionRemovalCount != 0 || result.EffectivePrompt != claudeCodePromotionPrompt {
+		t.Fatalf("promotion-removal opt-out was ignored: %#v", result)
+	}
+}
+
+func TestClaudePromptPolicyDoesNotPartiallyStripChangedPromotionBlock(t *testing.T) {
+	changed := strings.Replace(
+		claudeCodePromotionPrompt,
+		"available on Opus 5/4.8/4.7",
+		"available on another model",
+		1,
+	)
+	chatBody := map[string]any{"messages": []any{
+		map[string]any{"role": "system", "content": changed},
+		map[string]any{"role": "user", "content": "hello"},
+	}}
+	result, err := applyClaudePromptPolicy(
+		chatBody,
+		config.StaticProvider(config.DefaultConfig()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.PromotionRemovalCount != 0 || result.EffectivePrompt != changed {
+		t.Fatalf("changed prompt was partially stripped: %#v", result)
+	}
+}
+
 func TestClaudePromptPolicyReplacesBeforeAppendingInjection(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.ClaudePromptReplacementEnabled = true
@@ -422,13 +497,14 @@ func TestAdminClaudePromptLatestLifecycle(t *testing.T) {
 	}
 
 	store.Record("claude-alias", "messages", claudePromptPolicyResult{
-		OriginalPrompt:   "before",
-		EffectivePrompt:  "after",
-		HadSystem:        true,
-		ReplacementCount: 1,
-		ReplacementRules: 1,
-		MatchedRules:     1,
-		RuleMatchCounts:  []int{1},
+		OriginalPrompt:        "before",
+		EffectivePrompt:       "after",
+		HadSystem:             true,
+		PromotionRemovalCount: 1,
+		ReplacementCount:      1,
+		ReplacementRules:      1,
+		MatchedRules:          1,
+		RuleMatchCounts:       []int{1},
 	})
 	get := httptest.NewRecorder()
 	adm.adminClaudePromptLatest(
@@ -440,6 +516,7 @@ func TestAdminClaudePromptLatestLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	if response["original_prompt"] != "before" || response["effective_prompt"] != "after" ||
+		response["promotion_removal_count"] != float64(1) ||
 		response["replacement_count"] != float64(1) ||
 		response["replacement_rules"] != float64(1) ||
 		response["matched_rules"] != float64(1) {
@@ -733,5 +810,39 @@ func TestAdminClaudePromptPreviewUsesUnsavedPolicy(t *testing.T) {
 		response["replacement_count"] != float64(1) ||
 		response["applicable_rules"] != float64(1) {
 		t.Fatalf("unexpected preview response: %#v", response)
+	}
+}
+
+func TestAdminClaudePromptPreviewReportsDefaultPromotionRemoval(t *testing.T) {
+	adm := &AdminHandler{
+		handler: handler{cfg: config.StaticProvider(config.DefaultConfig())},
+	} //nolint:exhaustruct
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/api/admin/claude-prompt/preview",
+		strings.NewReader(fmt.Sprintf(`{
+			"original_prompt":%q,
+			"strip_claude_code_promotions":true,
+			"replacement_enabled":false,
+			"replacements":[],
+			"injection_enabled":false,
+			"injection_position":"append",
+			"injection_text":""
+		}`, claudeCodePromotionPrompt)),
+	)
+
+	adm.adminClaudePromptPreview(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("preview status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response["effective_prompt"] != "" ||
+		response["promotion_removal_count"] != float64(1) ||
+		response["replacement_count"] != float64(0) {
+		t.Fatalf("unexpected promotion-removal preview: %#v", response)
 	}
 }

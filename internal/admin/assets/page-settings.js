@@ -43,16 +43,28 @@ function escapeSettingsHTML(value) {
 
 function configuredClaudeReplacementRules() {
   if (Array.isArray(curSettings.claude_prompt_replacements)) {
-    return curSettings.claude_prompt_replacements.map(rule => ({
-      from: String(rule?.from ?? ''),
-      to: String(rule?.to ?? ''),
-      disabled: !!rule?.disabled,
-      models: Array.isArray(rule?.models) ? rule.models.map(model => String(model)) : []
-    }));
+    return curSettings.claude_prompt_replacements.map(rule => {
+      const from = String(rule?.from ?? '');
+      const to = String(rule?.to ?? '');
+      return {
+        from,
+        to,
+        action: from !== '' && to === '' ? 'delete' : 'replace',
+        disabled: !!rule?.disabled,
+        models: Array.isArray(rule?.models) ? rule.models.map(model => String(model)) : []
+      };
+    });
   }
   const legacyFrom = String(curSettings.claude_prompt_replace_from ?? '');
   if (legacyFrom !== '') {
-    return [{ from: legacyFrom, to: String(curSettings.claude_prompt_replace_to ?? ''), disabled: false, models: [] }];
+    const legacyTo = String(curSettings.claude_prompt_replace_to ?? '');
+    return [{
+      from: legacyFrom,
+      to: legacyTo,
+      action: legacyTo === '' ? 'delete' : 'replace',
+      disabled: false,
+      models: []
+    }];
   }
   return [];
 }
@@ -66,8 +78,16 @@ function claudeReplacementRowsHTML() {
           <label class="claude-rule-enabled"><input type="checkbox" data-rule-field="enabled" ${rule.disabled ? '' : 'checked'}> 启用</label>
           <button type="button" class="btn ghost compact" data-click-action="moveClaudeReplacementRule" data-rule-index="${index}" data-direction="-1" title="上移" ${index === 0 ? 'disabled' : ''}>↑</button>
           <button type="button" class="btn ghost compact" data-click-action="moveClaudeReplacementRule" data-rule-index="${index}" data-direction="1" title="下移" ${index === claudeReplacementRules.length - 1 ? 'disabled' : ''}>↓</button>
-          <button type="button" class="btn danger compact" data-click-action="removeClaudeReplacementRule" data-rule-index="${index}">删除</button>
+          <button type="button" class="btn danger compact" data-click-action="removeClaudeReplacementRule" data-rule-index="${index}">移除规则</button>
         </div>
+      </div>
+      <div class="field">
+        <label for="set_claude_prompt_rule_action_${index}">匹配后操作</label>
+        <select id="set_claude_prompt_rule_action_${index}" data-rule-field="action">
+          <option value="replace" ${rule.action === 'delete' ? '' : 'selected'}>替换为指定内容</option>
+          <option value="delete" ${rule.action === 'delete' ? 'selected' : ''}>删除匹配片段</option>
+        </select>
+        <div class="desc">删除模式会将匹配内容替换为空字符串；保存格式与旧版本完全兼容。</div>
       </div>
       <div class="field">
         <div class="claude-rule-model-head">
@@ -84,7 +104,7 @@ function claudeReplacementRowsHTML() {
         </div>
         <div class="field">
           <label for="set_claude_prompt_rule_to_${index}">替换为</label>
-          <textarea id="set_claude_prompt_rule_to_${index}" data-rule-field="to" rows="6" maxlength="1048576" class="font-mono" placeholder="新的提示词片段；留空表示删除匹配内容">${escapeSettingsHTML(rule.to)}</textarea>
+          <textarea id="set_claude_prompt_rule_to_${index}" data-rule-field="to" rows="6" maxlength="1048576" class="font-mono" placeholder="新的提示词片段">${escapeSettingsHTML(rule.to)}</textarea>
         </div>
       </div>
     </div>
@@ -94,12 +114,25 @@ function claudeReplacementRowsHTML() {
 function claudePromptSettingsHTML() {
   const injectionEnabled = !!curSettings.claude_prompt_injection_enabled;
   const replacementEnabled = !!curSettings.claude_prompt_replacement_enabled;
+  const stripPromotions = curSettings.claude_prompt_strip_claude_code_promotions !== false;
   const position = curSettings.claude_prompt_injection_position === 'prepend' ? 'prepend' : 'append';
   claudeReplacementRules = configuredClaudeReplacementRules();
-  if (!claudeReplacementRules.length) claudeReplacementRules.push({ from: '', to: '', disabled: false, models: [] });
+  if (!claudeReplacementRules.length) {
+    claudeReplacementRules.push({ from: '', to: '', action: 'replace', disabled: false, models: [] });
+  }
   return `
     <div class="settings-section-title">🧩 Claude 系统提示词处理</div>
     <div class="claude-prompt-config">
+      <div class="claude-prompt-rule">
+        <div class="field bool">
+          <div class="min-w-0">
+            <label for="set_claude_prompt_strip_claude_code_promotions">移除 Claude Code 推广提示</label>
+            <div class="desc mt-4px">默认开启，精确删除 Claude Code 注入的 Claude 5 模型推荐、产品入口及 Fast mode 推广三行；其他 system 内容不受影响。</div>
+          </div>
+          <label class="toggle"><input type="checkbox" id="set_claude_prompt_strip_claude_code_promotions" ${stripPromotions ? 'checked' : ''}><span class="track"></span></label>
+        </div>
+      </div>
+
       <div class="claude-prompt-rule">
         <div class="field bool">
           <div class="min-w-0">
@@ -183,6 +216,7 @@ function updateClaudePromptControls() {
   if (replacementFields) {
     replacementFields.classList.toggle('claude-rule-disabled', !replacementEnabled);
     replacementFields.querySelectorAll('textarea,select,input,button').forEach(el => { el.disabled = !replacementEnabled; });
+    updateClaudeReplacementActionControls();
   }
   if (injectionFields) {
     injectionFields.classList.toggle('claude-rule-disabled', !injectionEnabled);
@@ -190,11 +224,24 @@ function updateClaudePromptControls() {
   }
 }
 
+function updateClaudeReplacementActionControls() {
+  const replacementEnabled = $('#set_claude_prompt_replacement_enabled')?.checked;
+  document.querySelectorAll('#claudeReplacementRules .claude-replacement-row').forEach(row => {
+    const action = row.querySelector('[data-rule-field="action"]')?.value || 'replace';
+    const target = row.querySelector('[data-rule-field="to"]');
+    if (!target) return;
+    const deleting = action === 'delete';
+    target.disabled = !replacementEnabled || deleting;
+    target.closest('.field')?.classList.toggle('claude-rule-disabled', deleting);
+  });
+}
+
 function syncClaudeReplacementRulesFromDOM() {
   const rows = document.querySelectorAll('#claudeReplacementRules .claude-replacement-row');
   claudeReplacementRules = Array.from(rows).map(row => ({
     from: row.querySelector('[data-rule-field="from"]')?.value || '',
     to: row.querySelector('[data-rule-field="to"]')?.value || '',
+    action: row.querySelector('[data-rule-field="action"]')?.value === 'delete' ? 'delete' : 'replace',
     disabled: !(row.querySelector('[data-rule-field="enabled"]')?.checked ?? true),
     models: (row.querySelector('[data-rule-field="models"]')?.value || '')
       .split(/[，,\n]/).map(model => model.trim()).filter(Boolean)
@@ -204,7 +251,9 @@ function syncClaudeReplacementRulesFromDOM() {
 function renderClaudeReplacementRules(focusIndex) {
   const container = $('#claudeReplacementRules');
   if (!container) return;
-  if (!claudeReplacementRules.length) claudeReplacementRules.push({ from: '', to: '', disabled: false, models: [] });
+  if (!claudeReplacementRules.length) {
+    claudeReplacementRules.push({ from: '', to: '', action: 'replace', disabled: false, models: [] });
+  }
   container.innerHTML = claudeReplacementRowsHTML();
   updateClaudePromptControls();
   if (Number.isInteger(focusIndex)) {
@@ -217,7 +266,7 @@ function addClaudeReplacementRule(rule) {
   if (claudeReplacementRules.length >= CLAUDE_PROMPT_MAX_RULES) {
     return toast('Claude 提示词替换规则最多 32 条');
   }
-  const next = Object.assign({ from: '', to: '', disabled: false, models: [] }, rule || {});
+  const next = Object.assign({ from: '', to: '', action: 'replace', disabled: false, models: [] }, rule || {});
   if (claudeReplacementRules.length === 1 &&
       claudeReplacementRules[0].from === '' && claudeReplacementRules[0].to === '') {
     claudeReplacementRules[0] = next;
@@ -290,6 +339,9 @@ async function loadLatestClaudePrompt() {
     ? new Date(latestClaudePrompt.received_at).toLocaleString()
     : '未知时间';
   const actions = [];
+  if (latestClaudePrompt.promotion_removal_count) {
+    actions.push('已移除 Claude Code 推广片段×' + latestClaudePrompt.promotion_removal_count);
+  }
   if (latestClaudePrompt.replacement_count) {
     let replacementSummary = '替换 ' + latestClaudePrompt.replacement_count + ' 处';
     if (latestClaudePrompt.replacement_rules) {
@@ -329,6 +381,7 @@ function useLatestClaudePromptAsFind() {
   addClaudeReplacementRule({
     from: latestClaudePrompt.original_prompt || '',
     to: '',
+    action: 'replace',
     disabled: false,
     models: []
   });
@@ -353,7 +406,7 @@ function currentClaudeReplacementRulesForRequest() {
     .filter(rule => rule.from !== '' || rule.to !== '' || (rule.models || []).length)
     .map(rule => ({
       from: rule.from,
-      to: rule.to,
+      to: rule.action === 'delete' ? '' : rule.to,
       disabled: !!rule.disabled,
       models: rule.models || []
     }));
@@ -368,6 +421,8 @@ async function previewClaudePrompt() {
     const result = await API.claudePrompt.preview({
       original_prompt: latestClaudePrompt.original_prompt || '',
       model: latestClaudePrompt.model || '',
+      strip_claude_code_promotions:
+        $('#set_claude_prompt_strip_claude_code_promotions').checked,
       replacement_enabled: $('#set_claude_prompt_replacement_enabled').checked,
       replacements: currentClaudeReplacementRulesForRequest(),
       injection_enabled: $('#set_claude_prompt_injection_enabled').checked,
@@ -375,7 +430,8 @@ async function previewClaudePrompt() {
       injection_text: $('#set_claude_prompt_injection_text').value
     });
     effective.value = result.effective_prompt || '';
-    meta.textContent = '当前页面设置预览（尚未保存） · 替换 ' +
+    meta.textContent = '当前页面设置预览（尚未保存） · 默认清理 ' +
+      (result.promotion_removal_count || 0) + ' 处 · 自定义替换 ' +
       (result.replacement_count || 0) + ' 处 · 命中 ' +
       (result.matched_rules || 0) + '/' + (result.applicable_rules || 0) +
       ' 条适用规则 · 最终 ' + (result.effective_bytes || 0) + 'B';
@@ -487,7 +543,12 @@ async function loadSettings() {
     '<button class="btn mt-14px" data-click-action="saveSettings">保存设置</button>';
 
   $('#settingsForm').addEventListener('input', () => window.hasUnsavedSettings = true);
-  $('#settingsForm').addEventListener('change', () => window.hasUnsavedSettings = true);
+  $('#settingsForm').addEventListener('change', event => {
+    window.hasUnsavedSettings = true;
+    if (event.target?.matches('[data-rule-field="action"]')) {
+      updateClaudeReplacementActionControls();
+    }
+  });
   window.hasUnsavedSettings = false;
 
   if (!window._hasSettingsUnloadListener) {
@@ -579,7 +640,8 @@ async function saveSettings() {
   let replacementBytes = 0;
   for (let index = 0; index < claudeReplacementRules.length; index++) {
     const rule = claudeReplacementRules[index];
-    if (rule.from === '' && rule.to === '') continue;
+    const replacementTarget = rule.action === 'delete' ? '' : rule.to;
+    if (rule.from === '' && replacementTarget === '') continue;
     if (rule.from === '') {
       toast('替换规则 ' + (index + 1) + ' 的查找内容不能为空');
       $('#set_claude_prompt_rule_from_' + index)?.focus();
@@ -607,10 +669,10 @@ async function saveSettings() {
       return;
     }
     seenReplacementSources.add(rule.from);
-    replacementBytes += settingsUTF8Bytes(rule.from) + settingsUTF8Bytes(rule.to);
+    replacementBytes += settingsUTF8Bytes(rule.from) + settingsUTF8Bytes(replacementTarget);
     replacements.push({
       from: rule.from,
-      to: rule.to,
+      to: replacementTarget,
       disabled: !!rule.disabled,
       models: rule.models || []
     });
@@ -636,6 +698,8 @@ async function saveSettings() {
   }
   out.claude_prompt_replacement_enabled = replacementEnabled;
   out.claude_prompt_replacements = replacements;
+  out.claude_prompt_strip_claude_code_promotions =
+    $('#set_claude_prompt_strip_claude_code_promotions').checked;
   out.claude_prompt_injection_enabled = injectionEnabled;
   out.claude_prompt_injection_position = $('#set_claude_prompt_injection_position').value;
   out.claude_prompt_injection_text = injectionText;

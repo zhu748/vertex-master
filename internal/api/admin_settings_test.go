@@ -82,6 +82,11 @@ func TestAdminPutSettingsRejectsInvalidProxySettings(t *testing.T) {
 			wantMessage: "至少需要一条规则",
 		},
 		{
+			name:        "Claude promotion removal wrong type",
+			body:        `{"settings":{"claude_prompt_strip_claude_code_promotions":"true"}}`,
+			wantMessage: "claude_prompt_strip_claude_code_promotions 必须是布尔值",
+		},
+		{
 			name:        "Claude replacement rule missing search text",
 			body:        `{"settings":{"claude_prompt_replacements":[{"from":"","to":"value"}]}}`,
 			wantMessage: "查找内容不能为空",
@@ -176,6 +181,7 @@ func TestAdminPutSettingsAcceptsValidProxySettings(t *testing.T) {
 		"claude_prompt_injection_enabled":true,
 		"claude_prompt_injection_position":"prepend",
 		"claude_prompt_injection_text":"injected policy",
+		"claude_prompt_strip_claude_code_promotions":false,
 		"claude_prompt_replacement_enabled":true,
 		"claude_prompt_replacements":[
 			{"from":"old policy","to":"new policy","models":["fake-gemini-3.6-flash"]},
@@ -199,25 +205,26 @@ func TestAdminPutSettingsAcceptsValidProxySettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	expected := map[string]any{
-		"proxy_url":                           "http://127.0.0.1:8080",
-		"parallel_pool_enabled":               true,
-		"parallel_pool_size":                  float64(6),
-		"parallel_pool_delay_dynamic":         false,
-		"parallel_pool_delay_ms":              float64(1250),
-		"proxy_failover_max_attempts":         float64(24),
-		"proxy_health_check_enabled":          true,
-		"proxy_health_check_interval_minutes": float64(30),
-		"proxy_health_check_batch_size":       float64(100),
-		"proxy_health_check_concurrency":      float64(8),
-		"proxy_health_check_timeout_seconds":  float64(12),
-		"sticky_node_priority":                true,
-		"parallel_pool_retry_enabled":         true,
-		"claude_prompt_injection_enabled":     true,
-		"claude_prompt_injection_position":    "prepend",
-		"claude_prompt_injection_text":        "injected policy",
-		"claude_prompt_replacement_enabled":   true,
-		"claude_prompt_replace_from":          "",
-		"claude_prompt_replace_to":            "",
+		"proxy_url":                                  "http://127.0.0.1:8080",
+		"parallel_pool_enabled":                      true,
+		"parallel_pool_size":                         float64(6),
+		"parallel_pool_delay_dynamic":                false,
+		"parallel_pool_delay_ms":                     float64(1250),
+		"proxy_failover_max_attempts":                float64(24),
+		"proxy_health_check_enabled":                 true,
+		"proxy_health_check_interval_minutes":        float64(30),
+		"proxy_health_check_batch_size":              float64(100),
+		"proxy_health_check_concurrency":             float64(8),
+		"proxy_health_check_timeout_seconds":         float64(12),
+		"sticky_node_priority":                       true,
+		"parallel_pool_retry_enabled":                true,
+		"claude_prompt_injection_enabled":            true,
+		"claude_prompt_injection_position":           "prepend",
+		"claude_prompt_injection_text":               "injected policy",
+		"claude_prompt_strip_claude_code_promotions": false,
+		"claude_prompt_replacement_enabled":          true,
+		"claude_prompt_replace_from":                 "",
+		"claude_prompt_replace_to":                   "",
 	}
 	for key, want := range expected {
 		if got := raw[key]; got != want {
@@ -549,6 +556,7 @@ func TestAdminSettingsExposeAndRejectEnvironmentManagedFields(t *testing.T) {
 	}
 	if response.Settings["claude_prompt_injection_position"] != "append" ||
 		response.Settings["claude_prompt_injection_enabled"] != false ||
+		response.Settings["claude_prompt_strip_claude_code_promotions"] != true ||
 		response.Settings["claude_prompt_replacement_enabled"] != false {
 		t.Fatalf("Claude prompt settings missing from admin response: %#v", response.Settings)
 	}

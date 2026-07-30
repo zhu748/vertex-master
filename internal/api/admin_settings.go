@@ -17,15 +17,16 @@ var adminAllowedSettings = map[string]bool{
 	"max_retries": true, "max_spill_mb": true,
 	"max_request_mb": true, "max_concurrent_requests": true, "max_n": true, "aggregate_stream": true,
 	"drop_max_tokens": true, "proxy_url": true,
-	"claude_prompt_injection_enabled":   true,
-	"claude_prompt_injection_position":  true,
-	"claude_prompt_injection_text":      true,
-	"claude_prompt_replacement_enabled": true,
-	"claude_prompt_replacements":        true,
-	"claude_prompt_replace_from":        true,
-	"claude_prompt_replace_to":          true,
-	"request_timeout":                   true,
-	"parallel_pool_enabled":             true, "parallel_pool_size": true,
+	"claude_prompt_injection_enabled":            true,
+	"claude_prompt_injection_position":           true,
+	"claude_prompt_injection_text":               true,
+	"claude_prompt_strip_claude_code_promotions": true,
+	"claude_prompt_replacement_enabled":          true,
+	"claude_prompt_replacements":                 true,
+	"claude_prompt_replace_from":                 true,
+	"claude_prompt_replace_to":                   true,
+	"request_timeout":                            true,
+	"parallel_pool_enabled":                      true, "parallel_pool_size": true,
 	"parallel_pool_delay_dynamic":         true,
 	"parallel_pool_delay_ms":              true,
 	"proxy_failover_max_attempts":         true,
@@ -69,7 +70,8 @@ func environmentManagedAdminSettings() map[string]string {
 }
 
 func (adm *AdminHandler) adminGetSettings(w http.ResponseWriter, _ *http.Request) {
-	rules := adm.cfg.ClaudePromptReplacementRules()
+	policy := adm.cfg.ClaudePromptPolicy()
+	rules := policy.ReplacementRules
 	legacyFrom := ""
 	legacyTo := ""
 	if len(rules) > 0 {
@@ -79,22 +81,23 @@ func (adm *AdminHandler) adminGetSettings(w http.ResponseWriter, _ *http.Request
 	writeJSON(w, http.StatusOK, map[string]any{
 		"managed_fields": environmentManagedAdminSettings(),
 		"settings": map[string]any{
-			"max_retries":                       adm.cfg.MaxRetries(),
-			"max_spill_mb":                      adm.cfg.MaxSpillMB(),
-			"max_request_mb":                    adm.cfg.MaxRequestMB(),
-			"max_concurrent_requests":           adm.cfg.MaxConcurrentRequests(),
-			"max_n":                             adm.cfg.MaxN(),
-			"aggregate_stream":                  adm.cfg.AggregateStream(),
-			"drop_max_tokens":                   adm.cfg.DropMaxTokens(),
-			"claude_prompt_injection_enabled":   adm.cfg.ClaudePromptInjectionEnabled(),
-			"claude_prompt_injection_position":  adm.cfg.ClaudePromptInjectionPosition(),
-			"claude_prompt_injection_text":      adm.cfg.ClaudePromptInjectionText(),
-			"claude_prompt_replacement_enabled": adm.cfg.ClaudePromptReplacementEnabled(),
-			"claude_prompt_replacements":        rules,
-			"claude_prompt_replace_from":        legacyFrom,
-			"claude_prompt_replace_to":          legacyTo,
-			"request_timeout":                   adm.cfg.RequestTimeout(),
-			"proxy_url":                         adm.cfg.ProxyURL(), "parallel_pool_enabled": adm.cfg.ParallelPoolEnabled(), "parallel_pool_size": adm.cfg.ParallelPoolSize(), "active_node_uri": adm.cfg.ActiveNodeURI(),
+			"max_retries":                                adm.cfg.MaxRetries(),
+			"max_spill_mb":                               adm.cfg.MaxSpillMB(),
+			"max_request_mb":                             adm.cfg.MaxRequestMB(),
+			"max_concurrent_requests":                    adm.cfg.MaxConcurrentRequests(),
+			"max_n":                                      adm.cfg.MaxN(),
+			"aggregate_stream":                           adm.cfg.AggregateStream(),
+			"drop_max_tokens":                            adm.cfg.DropMaxTokens(),
+			"claude_prompt_injection_enabled":            adm.cfg.ClaudePromptInjectionEnabled(),
+			"claude_prompt_injection_position":           adm.cfg.ClaudePromptInjectionPosition(),
+			"claude_prompt_injection_text":               adm.cfg.ClaudePromptInjectionText(),
+			"claude_prompt_strip_claude_code_promotions": policy.StripPromotions,
+			"claude_prompt_replacement_enabled":          adm.cfg.ClaudePromptReplacementEnabled(),
+			"claude_prompt_replacements":                 rules,
+			"claude_prompt_replace_from":                 legacyFrom,
+			"claude_prompt_replace_to":                   legacyTo,
+			"request_timeout":                            adm.cfg.RequestTimeout(),
+			"proxy_url":                                  adm.cfg.ProxyURL(), "parallel_pool_enabled": adm.cfg.ParallelPoolEnabled(), "parallel_pool_size": adm.cfg.ParallelPoolSize(), "active_node_uri": adm.cfg.ActiveNodeURI(),
 			"parallel_pool_delay_dynamic":         adm.cfg.ParallelPoolDelayDynamic(),
 			"parallel_pool_delay_ms":              adm.cfg.ParallelPoolDelayMs(),
 			"proxy_failover_max_attempts":         adm.cfg.ProxyFailoverMaxAttempts(),
@@ -165,7 +168,8 @@ func (adm *AdminHandler) adminPutSettings(w http.ResponseWriter, r *http.Request
 			"parallel_pool_enabled", "parallel_pool_delay_dynamic",
 			"proxy_health_check_enabled", "sticky_node_priority",
 			"parallel_pool_retry_enabled", "debug_mode", "auto_refresh_logs",
-			"claude_prompt_injection_enabled", "claude_prompt_replacement_enabled":
+			"claude_prompt_injection_enabled", "claude_prompt_replacement_enabled",
+			"claude_prompt_strip_claude_code_promotions":
 			if _, ok := v.(bool); !ok {
 				writeJSON(w, http.StatusBadRequest, adminErr(k+" 必须是布尔值"))
 				return
@@ -370,6 +374,9 @@ func (adm *AdminHandler) adminPutSettings(w http.ResponseWriter, r *http.Request
 	promptPolicyChanged := !reflect.DeepEqual(currentClaudeReplacementRules, claudeReplacementRules)
 	if value, ok := updates["claude_prompt_replacement_enabled"].(bool); ok {
 		promptPolicyChanged = promptPolicyChanged || value != currentClaudePolicy.ReplacementEnabled
+	}
+	if value, ok := updates["claude_prompt_strip_claude_code_promotions"].(bool); ok {
+		promptPolicyChanged = promptPolicyChanged || value != currentClaudePolicy.StripPromotions
 	}
 	if value, ok := updates["claude_prompt_injection_enabled"].(bool); ok {
 		promptPolicyChanged = promptPolicyChanged || value != currentClaudePolicy.InjectionEnabled
