@@ -61,6 +61,82 @@ type nativeDefaultDescriptionSchema struct {
 	Type        string `json:"type"`
 }
 
+type compactNativeSchemaLeafKind uint8
+
+const (
+	compactNativeTypeOnly compactNativeSchemaLeafKind = iota + 1
+	compactNativeDescription
+	compactNativeEnum
+	compactNativeDescriptionEnum
+	compactNativeDefault
+	compactNativeDefaultDescription
+)
+
+type compactNativeSchemaLeafValue struct {
+	kind        compactNativeSchemaLeafKind
+	typ         string
+	defaultVal  any
+	description any
+	enum        any
+}
+
+type compactNativeSchemaStorage struct {
+	typeOnly     []nativeTypeOnlySchema
+	descriptions []nativeDescriptionSchema
+}
+
+func (storage *compactNativeSchemaStorage) store(
+	leaf compactNativeSchemaLeafValue,
+	capacityHint int,
+) any {
+	switch leaf.kind {
+	case compactNativeTypeOnly:
+		if storage.typeOnly == nil {
+			storage.typeOnly = make([]nativeTypeOnlySchema, 0, capacityHint)
+		}
+		storage.typeOnly = append(storage.typeOnly, nativeTypeOnlySchema{Type: leaf.typ})
+		return &storage.typeOnly[len(storage.typeOnly)-1]
+	case compactNativeDescription:
+		if storage.descriptions == nil {
+			storage.descriptions = make([]nativeDescriptionSchema, 0, capacityHint)
+		}
+		storage.descriptions = append(storage.descriptions, nativeDescriptionSchema{
+			Description: leaf.description,
+			Type:        leaf.typ,
+		})
+		return &storage.descriptions[len(storage.descriptions)-1]
+	case compactNativeEnum,
+		compactNativeDescriptionEnum,
+		compactNativeDefault,
+		compactNativeDefaultDescription:
+		return leaf.value()
+	}
+	return nil
+}
+
+func (leaf compactNativeSchemaLeafValue) value() any {
+	switch leaf.kind {
+	case compactNativeTypeOnly:
+		return nativeTypeOnlySchema{Type: leaf.typ}
+	case compactNativeDescription:
+		return nativeDescriptionSchema{Description: leaf.description, Type: leaf.typ}
+	case compactNativeEnum:
+		return nativeEnumSchema{Enum: leaf.enum, Type: leaf.typ}
+	case compactNativeDescriptionEnum:
+		return nativeDescriptionEnumSchema{
+			Description: leaf.description, Enum: leaf.enum, Type: leaf.typ,
+		}
+	case compactNativeDefault:
+		return nativeDefaultSchema{Default: leaf.defaultVal, Type: leaf.typ}
+	case compactNativeDefaultDescription:
+		return nativeDefaultDescriptionSchema{
+			Default: leaf.defaultVal, Description: leaf.description, Type: leaf.typ,
+		}
+	default:
+		return nil
+	}
+}
+
 // cleanNativeFunctionParameters 在一次递归中用 Gemini 白名单清洗 JSON
 // Schema，并转换为匿名 Vertex UI 端点需要的原生 Map-style Schema。
 func cleanNativeFunctionParameters(schema any) any {
@@ -88,7 +164,17 @@ func cleanNativeFunctionParameters(schema any) any {
 			case "properties":
 				if vm, ok := value.(map[string]any); ok {
 					props := make(nativeSchemaProperties, 0, len(vm))
+					var compactStorage compactNativeSchemaStorage
 					for k, v := range vm {
+						if leafSchema, ok := v.(map[string]any); ok &&
+							len(leafSchema) <= compactNativeSchemaFieldLimit {
+							if leaf, compact := parseCompactNativeSchemaLeaf(leafSchema); compact {
+								props = append(props, nativeSchemaProperty{
+									Key: k, Value: compactStorage.store(leaf, len(vm)),
+								})
+								continue
+							}
+						}
 						props = append(props, nativeSchemaProperty{
 							Key: k, Value: cleanNativeFunctionParameters(v),
 						})
@@ -119,6 +205,14 @@ func cleanNativeFunctionParameters(schema any) any {
 // schema leaves. Unsupported and unknown JSON-Schema fields are intentionally
 // ignored exactly as in the general cleaning path.
 func compactNativeSchemaLeaf(schema map[string]any) (any, bool) {
+	leaf, ok := parseCompactNativeSchemaLeaf(schema)
+	if !ok {
+		return nil, false
+	}
+	return leaf.value(), true
+}
+
+func parseCompactNativeSchemaLeaf(schema map[string]any) (compactNativeSchemaLeafValue, bool) {
 	var rawType, defaultValue, description, enum any
 	var hasDefault, hasDescription, hasEnum bool
 	for key, value := range schema {
@@ -135,29 +229,37 @@ func compactNativeSchemaLeaf(schema map[string]any) (any, bool) {
 		case "enum":
 			enum, hasEnum = value, true
 		default:
-			return nil, false
+			return compactNativeSchemaLeafValue{}, false
 		}
 	}
 	typ := nativeSchemaType(rawType)
 	switch {
 	case hasDefault && hasDescription && !hasEnum:
-		return nativeDefaultDescriptionSchema{
-			Default: defaultValue, Description: description, Type: typ,
+		return compactNativeSchemaLeafValue{
+			kind: compactNativeDefaultDescription, typ: typ,
+			defaultVal: defaultValue, description: description,
 		}, true
 	case hasDefault && !hasDescription && !hasEnum:
-		return nativeDefaultSchema{Default: defaultValue, Type: typ}, true
+		return compactNativeSchemaLeafValue{
+			kind: compactNativeDefault, typ: typ, defaultVal: defaultValue,
+		}, true
 	case !hasDefault && hasDescription && hasEnum:
-		return nativeDescriptionEnumSchema{
-			Description: description, Enum: enum, Type: typ,
+		return compactNativeSchemaLeafValue{
+			kind: compactNativeDescriptionEnum, typ: typ,
+			description: description, enum: enum,
 		}, true
 	case !hasDefault && hasDescription:
-		return nativeDescriptionSchema{Description: description, Type: typ}, true
+		return compactNativeSchemaLeafValue{
+			kind: compactNativeDescription, typ: typ, description: description,
+		}, true
 	case !hasDefault && hasEnum:
-		return nativeEnumSchema{Enum: enum, Type: typ}, true
+		return compactNativeSchemaLeafValue{
+			kind: compactNativeEnum, typ: typ, enum: enum,
+		}, true
 	case !hasDefault:
-		return nativeTypeOnlySchema{Type: typ}, true
+		return compactNativeSchemaLeafValue{kind: compactNativeTypeOnly, typ: typ}, true
 	default:
-		return nil, false
+		return compactNativeSchemaLeafValue{}, false
 	}
 }
 
@@ -269,7 +371,8 @@ func convertNativeSchemaNumericConstraints(schema map[string]any) {
 func canonicalNativeSchema(schema any) bool {
 	switch schema.(type) {
 	case nativeTypeOnlySchema, nativeDescriptionSchema, nativeEnumSchema,
-		nativeDescriptionEnumSchema, nativeDefaultSchema, nativeDefaultDescriptionSchema:
+		nativeDescriptionEnumSchema, nativeDefaultSchema, nativeDefaultDescriptionSchema,
+		*nativeTypeOnlySchema, *nativeDescriptionSchema:
 		return true
 	}
 	m, ok := schema.(map[string]any)

@@ -1060,6 +1060,7 @@ func TestCleanNativeFunctionParametersFusesCleaningWithoutMutatingInput(t *testi
 			"maxLength": float64(8),
 			"properties": map[string]any{
 				"enabled": map[string]any{"type": "boolean", "$ref": "removed"},
+				"label":   map[string]any{"type": "string", "description": "display name"},
 			},
 		},
 	}
@@ -1083,13 +1084,20 @@ func TestCleanNativeFunctionParametersFusesCleaningWithoutMutatingInput(t *testi
 		t.Fatalf("native items=%#v", items)
 	}
 	properties := items["properties"].(nativeSchemaProperties)
-	if len(properties) != 1 {
+	if len(properties) != 2 {
 		t.Fatalf("native properties=%#v", properties)
 	}
-	property := properties[0]
-	value, ok := property.Value.(nativeTypeOnlySchema)
-	if !ok || property.Key != "enabled" || value.Type != "BOOLEAN" {
-		t.Fatalf("native property=%#v", property)
+	propertiesByKey := make(map[string]any, len(properties))
+	for _, property := range properties {
+		propertiesByKey[property.Key] = property.Value
+	}
+	enabled, ok := propertiesByKey["enabled"].(*nativeTypeOnlySchema)
+	if !ok || enabled.Type != "BOOLEAN" {
+		t.Fatalf("native enabled property=%#v", propertiesByKey["enabled"])
+	}
+	label, ok := propertiesByKey["label"].(*nativeDescriptionSchema)
+	if !ok || label.Type != "STRING" || label.Description != "display name" {
+		t.Fatalf("native label property=%#v", propertiesByKey["label"])
 	}
 	encodedProperties, err := json.Marshal(properties)
 	if err != nil {
@@ -1099,7 +1107,7 @@ func TestCleanNativeFunctionParametersFusesCleaningWithoutMutatingInput(t *testi
 	if err := json.Unmarshal(encodedProperties, &genericProperties); err != nil {
 		t.Fatal(err)
 	}
-	if genericProperties[0]["key"] != "enabled" {
+	if len(genericProperties) != 2 {
 		t.Fatalf("紧凑属性切片的 JSON 结构不兼容: %s", encodedProperties)
 	}
 }
