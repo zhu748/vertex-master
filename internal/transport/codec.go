@@ -402,31 +402,49 @@ func parseVmess(uri string) (map[string]any, error) {
 	if err := json.Unmarshal(b, &d); err != nil {
 		return nil, fmt.Errorf("解析 vmess 节点 JSON 载荷: %w", err)
 	}
-	portStr := fmt.Sprintf("%v", d["port"])
-	port, _ := strconv.Atoi(portStr)
+	server, serverOK := d["add"].(string)
+	server = strings.TrimSpace(server)
+	if !serverOK || server == "" {
+		return nil, fmt.Errorf("解析 vmess 节点 JSON 载荷: 缺少服务器地址")
+	}
+	uuid, uuidOK := d["id"].(string)
+	uuid = strings.TrimSpace(uuid)
+	if !uuidOK || uuid == "" {
+		return nil, fmt.Errorf("解析 vmess 节点 JSON 载荷: 缺少 UUID")
+	}
+	port, portOK := xhttpIntValue(d["port"])
+	if !portOK || port < 1 || port > 65535 {
+		return nil, fmt.Errorf("解析 vmess 节点 JSON 载荷: 端口无效")
+	}
+	name, _ := d["ps"].(string)
+	if strings.TrimSpace(name) == "" {
+		name = "vmess-" + server + ":" + strconv.Itoa(port)
+	}
+	cipher := "auto"
+	if configuredCipher, ok := d["scy"].(string); ok && configuredCipher != "" {
+		cipher = configuredCipher
+	}
 
 	// 初始化 VMess 出站基本参数
 	out := map[string]any{
-		"name":   d["ps"],
+		"name":   name,
 		"type":   "vmess",
-		"server": d["add"],
+		"server": server,
 		"port":   port,
-		"uuid":   d["id"],
-		"cipher": "auto",
+		"uuid":   uuid,
+		"cipher": cipher,
+		"udp":    true,
+		"xudp":   true,
 	}
 
 	// 1. 映射 alterId (aid)
-	if aidVal, ok := d["aid"]; ok {
-		switch v := aidVal.(type) {
-		case float64:
-			out["alterId"] = int(v)
-		case int:
-			out["alterId"] = v
-		case string:
-			if n, err := strconv.Atoi(v); err == nil {
-				out["alterId"] = n
-			}
+	out["alterId"] = 0
+	if aidValue, exists := d["aid"]; exists {
+		alterID, valid := xhttpIntValue(aidValue)
+		if !valid || alterID < 0 {
+			return nil, fmt.Errorf("解析 vmess 节点 JSON 载荷: alterId 无效")
 		}
+		out["alterId"] = alterID
 	}
 
 	// 2. 补全 TLS 配置（极关键，修复免费-日本1等节点的 TLS 缺失）
@@ -462,6 +480,12 @@ func parseVmess(uri string) (map[string]any, error) {
 	// 3. 补全 V2Ray 传输层配置（WS / gRPC，修复 IEPL 等节点的 WS 缺失）
 	netType, _ := d["net"].(string)
 	netType = strings.ToLower(strings.TrimSpace(netType))
+	headerType, _ := d["type"].(string)
+	if strings.EqualFold(headerType, "http") {
+		netType = "http"
+	} else if netType == "http" {
+		netType = "h2"
+	}
 	if netType != "" && netType != "tcp" {
 		path, _ := d["path"].(string)
 		host, _ := d["host"].(string)
@@ -470,6 +494,9 @@ func parseVmess(uri string) (map[string]any, error) {
 
 		switch netType {
 		case "ws":
+			if path == "" {
+				path = "/"
+			}
 			out["ws-opts"] = map[string]any{
 				"path": path,
 				"headers": map[string]any{
@@ -480,7 +507,7 @@ func parseVmess(uri string) (map[string]any, error) {
 			out["grpc-opts"] = map[string]any{
 				"grpc-service-name": path,
 			}
-		case "http", "h2":
+		case "http":
 			hPath := path
 			if hPath == "" {
 				hPath = "/"
@@ -490,6 +517,16 @@ func parseVmess(uri string) (map[string]any, error) {
 				"path":    []string{hPath},
 				"headers": map[string][]string{"Host": {host}},
 			}
+		case "h2":
+			hPath := path
+			if hPath == "" {
+				hPath = "/"
+			}
+			h2Options := map[string]any{"path": hPath}
+			if host != "" {
+				h2Options["host"] = []string{host}
+			}
+			out["h2-opts"] = h2Options
 		}
 	}
 
@@ -509,8 +546,12 @@ func parseShadowsocksURI(uri string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	port, _ := strconv.Atoi(u.Port())
-	if port == 0 {
+	method = strings.TrimSpace(method)
+	if method == "" || password == "" {
+		return nil, fmt.Errorf("ss parse failed: cipher and password are required")
+	}
+	port, err := strconv.Atoi(u.Port())
+	if err != nil || port < 1 || port > 65535 {
 		return nil, fmt.Errorf("ss parse failed: invalid host:port")
 	}
 	name := u.Fragment
@@ -525,6 +566,7 @@ func parseShadowsocksURI(uri string) (map[string]any, error) {
 		"port":     port,
 		"cipher":   method,
 		"password": password,
+		"udp":      true,
 	}
 	applySSPlugin(out, u.Query().Get("plugin"))
 	return out, nil
@@ -613,7 +655,11 @@ func parseSS(uri string) (map[string]any, error) {
 		if len(hp) < 2 {
 			return nil, fmt.Errorf("ss parse failed: invalid host:port")
 		}
-		port, _ := strconv.Atoi(hp[1])
+		server := strings.TrimSpace(hp[0])
+		port, err := strconv.Atoi(hp[1])
+		if server == "" || err != nil || port < 1 || port > 65535 {
+			return nil, fmt.Errorf("ss parse failed: invalid host:port")
+		}
 
 		var method, password string
 
@@ -656,10 +702,11 @@ func parseSS(uri string) (map[string]any, error) {
 		return map[string]any{
 			"name":     name,
 			"type":     "ss",
-			"server":   hp[0],
+			"server":   server,
 			"port":     port,
 			"cipher":   method,
 			"password": password,
+			"udp":      true,
 		}, nil
 	}
 	return nil, fmt.Errorf("ss parse failed")

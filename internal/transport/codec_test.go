@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/url"
+	"strconv"
 	"testing"
 
 	"github.com/metacubex/mihomo/adapter"
@@ -55,6 +56,43 @@ func TestParseURIShadowsocksKeepsPortAndPlugin(t *testing.T) {
 	}
 	if opts["mode"] != "http" || opts["host"] != "cdn.example.com" {
 		t.Fatalf("unexpected plugin opts: %#v", opts)
+	}
+	if out["udp"] != true {
+		t.Fatalf("expected UDP support, got %#v", out)
+	}
+}
+
+func TestParseURIShadowsocksRejectsInvalidEndpointOrCredentials(t *testing.T) {
+	for _, raw := range []string{
+		"ss://:password@example.com:8388",
+		"ss://aes-128-gcm:@example.com:8388",
+		"ss://aes-128-gcm:password@example.com:0",
+		"ss://aes-128-gcm:password@example.com:65536",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			if out, err := ParseURI(raw); err == nil {
+				t.Fatalf("ParseURI(%q) returned success with %#v", raw, out)
+			}
+		})
+	}
+}
+
+func TestParseSSLegacyValidatesEndpoint(t *testing.T) {
+	method := base64.RawStdEncoding.EncodeToString([]byte("aes-128-gcm"))
+	password := base64.RawStdEncoding.EncodeToString([]byte("secret"))
+	out, err := parseSS("ss://" + method + ":" + password + "@legacy.example.com:8388#legacy")
+	if err != nil {
+		t.Fatalf("parseSS(valid legacy URI): %v", err)
+	}
+	if out["server"] != "legacy.example.com" || out["port"] != 8388 ||
+		out["cipher"] != "aes-128-gcm" || out["password"] != "secret" ||
+		out["udp"] != true {
+		t.Fatalf("legacy Shadowsocks options not preserved: %#v", out)
+	}
+	if parsed, parseErr := parseSS(
+		"ss://" + method + ":" + password + "@legacy.example.com:0",
+	); parseErr == nil {
+		t.Fatalf("legacy Shadowsocks port 0 returned success with %#v", parsed)
 	}
 }
 
@@ -285,7 +323,7 @@ func TestParseURITUICKeepsCredentialsAndTransportOptions(t *testing.T) {
 }
 
 func TestParseURIVmessKeepsSNIAndFingerprint(t *testing.T) {
-	rawJSON := `{"v":"2","ps":"demo","add":"vmess.example.com","port":"443","id":"12345678-1234-1234-1234-123456789012","aid":"0","net":"ws","host":"edge.example.com","path":"/ws","tls":"tls","sni":"edge.example.com","fp":"chrome","alpn":"h2,http/1.1","allowInsecure":"1"}`
+	rawJSON := `{"v":"2","ps":"demo","add":"vmess.example.com","port":"443","id":"12345678-1234-1234-1234-123456789012","aid":"0","scy":"aes-128-gcm","net":"ws","host":"edge.example.com","path":"/ws","tls":"tls","sni":"edge.example.com","fp":"chrome","alpn":"h2,http/1.1","allowInsecure":"1"}`
 	raw := "vmess://" + base64.StdEncoding.EncodeToString([]byte(rawJSON))
 
 	out, err := ParseURI(raw)
@@ -296,9 +334,83 @@ func TestParseURIVmessKeepsSNIAndFingerprint(t *testing.T) {
 	if out["servername"] != "edge.example.com" || out["client-fingerprint"] != "chrome" {
 		t.Fatalf("tls metadata not preserved: %#v", out)
 	}
+	if out["cipher"] != "aes-128-gcm" || out["udp"] != true || out["xudp"] != true {
+		t.Fatalf("VMess common options not preserved: %#v", out)
+	}
 	alpn, ok := out["alpn"].([]string)
 	if !ok || len(alpn) != 2 || alpn[0] != "h2" {
 		t.Fatalf("alpn not preserved: %#v", out["alpn"])
+	}
+}
+
+func TestParseURIVmessKeepsH2OptionsAndValidatesRequiredFields(t *testing.T) {
+	validJSON, err := json.Marshal(map[string]any{
+		"ps":   "h2 demo",
+		"add":  "vmess.example.com",
+		"port": 443,
+		"id":   "12345678-1234-1234-1234-123456789012",
+		"aid":  0,
+		"net":  "http",
+		"host": "edge.example.com",
+		"path": "/h2",
+		"tls":  "tls",
+	})
+	if err != nil {
+		t.Fatalf("Marshal VMess config: %v", err)
+	}
+	out, err := ParseURI(
+		"vmess://" + base64.StdEncoding.EncodeToString(validJSON),
+	)
+	if err != nil {
+		t.Fatalf("ParseURI(valid VMess H2): %v", err)
+	}
+	h2Options, ok := out["h2-opts"].(map[string]any)
+	if !ok || h2Options["path"] != "/h2" {
+		t.Fatalf("VMess H2 options not preserved: %#v", out)
+	}
+	hosts, ok := h2Options["host"].([]string)
+	if !ok || len(hosts) != 1 || hosts[0] != "edge.example.com" {
+		t.Fatalf("VMess H2 host not preserved: %#v", h2Options)
+	}
+	if _, stale := out["http-opts"]; stale {
+		t.Fatalf("VMess H2 options were written as HTTP options: %#v", out)
+	}
+	proxy, err := adapter.ParseProxy(out)
+	if err != nil {
+		t.Fatalf("Mihomo rejected parsed VMess H2 options: %v", err)
+	}
+	closeProxy(proxy)
+
+	invalidPayloads := []any{
+		nil,
+		map[string]any{},
+		map[string]any{
+			"add": "vmess.example.com", "port": 443,
+		},
+		map[string]any{
+			"add": "vmess.example.com", "port": 0,
+			"id": "12345678-1234-1234-1234-123456789012",
+		},
+		map[string]any{
+			"add": "vmess.example.com", "port": 65536,
+			"id": "12345678-1234-1234-1234-123456789012",
+		},
+		map[string]any{
+			"add": "vmess.example.com", "port": 443,
+			"id": "12345678-1234-1234-1234-123456789012", "aid": -1,
+		},
+	}
+	for index, payload := range invalidPayloads {
+		t.Run(strconv.Itoa(index), func(t *testing.T) {
+			data, marshalErr := json.Marshal(payload)
+			if marshalErr != nil {
+				t.Fatalf("Marshal invalid VMess payload: %v", marshalErr)
+			}
+			raw := "vmess://" + base64.StdEncoding.EncodeToString(data)
+			if parsed, parseErr := ParseURI(raw); parseErr == nil {
+				t.Fatalf("invalid VMess payload returned success with %#v", parsed)
+			}
+		})
 	}
 }
 
