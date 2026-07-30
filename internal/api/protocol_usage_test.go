@@ -146,7 +146,7 @@ func TestOutputFromGeminiChunkPreservesPartOrderAndInput(t *testing.T) {
 	}
 }
 
-func TestAnthropicCanonicalToolInputMatchesParsedWireFormat(t *testing.T) {
+func TestAnthropicValidToolInputMatchesParsedWireFormat(t *testing.T) {
 	geminiResponse := map[string]any{
 		"candidates": []any{map[string]any{
 			"content": map[string]any{"parts": []any{map[string]any{
@@ -158,8 +158,8 @@ func TestAnthropicCanonicalToolInputMatchesParsedWireFormat(t *testing.T) {
 		}},
 	}
 	out := outputFromOAI(transform.GeminiJSONToOAIJSON(geminiResponse, "gemini-test"))
-	if len(out.ToolCalls) != 1 || !out.ToolCalls[0].argumentsCanonical {
-		t.Fatalf("locally serialized arguments were not marked canonical: %+v", out.ToolCalls)
+	if len(out.ToolCalls) != 1 {
+		t.Fatalf("tool calls=%d, want 1", len(out.ToolCalls))
 	}
 
 	fast, err := jsonx.Marshal(anthropicMessage("claude-test", "msg_fast", out))
@@ -168,7 +168,7 @@ func TestAnthropicCanonicalToolInputMatchesParsedWireFormat(t *testing.T) {
 	}
 	legacyOut := out
 	legacyOut.ToolCalls = append([]protocolToolCall(nil), out.ToolCalls...)
-	legacyOut.ToolCalls[0].argumentsCanonical = false
+	legacyOut.ToolCalls[0].argumentsValue = jsonValue(legacyOut.ToolCalls[0].Arguments)
 	legacy, err := jsonx.Marshal(anthropicMessage("claude-test", "msg_fast", legacyOut))
 	if err != nil {
 		t.Fatal(err)
@@ -185,8 +185,38 @@ func TestAnthropicCanonicalToolInputMatchesParsedWireFormat(t *testing.T) {
 			},
 		}}},
 	}}})
-	if len(rawOut.ToolCalls) != 1 || rawOut.ToolCalls[0].argumentsCanonical {
-		t.Fatalf("client-provided argument string must keep the parsed compatibility path: %+v", rawOut.ToolCalls)
+	if len(rawOut.ToolCalls) != 1 {
+		t.Fatalf("raw tool calls=%d, want 1", len(rawOut.ToolCalls))
+	}
+	packedInput, _ := anthropicToolInputPacked(rawOut.ToolCalls[0], nil)
+	rawInput, ok := packedInput.(json.RawMessage)
+	if !ok || string(rawInput) != `{"z":1,"a":2}` {
+		t.Fatalf("valid raw tool input=%T(%q), want preserved JSON", rawInput, rawInput)
+	}
+}
+
+func TestAnthropicMessageKeepsPackedToolInputsIndependent(t *testing.T) {
+	message := anthropicMessage("claude-test", "msg_packed", protocolOutput{
+		ToolCalls: []protocolToolCall{
+			{ID: "call_first", Name: "lookup", Arguments: `{"query":"first"}`},
+			{ID: "call_second", Name: "lookup", Arguments: `{"query":"second"}`},
+		},
+	})
+	if len(message.Content) != 2 {
+		t.Fatalf("content blocks=%d, want 2", len(message.Content))
+	}
+	first, firstOK := message.Content[0].(*anthropicToolUseContent)
+	second, secondOK := message.Content[1].(*anthropicToolUseContent)
+	if !firstOK || !secondOK || first == second {
+		t.Fatalf("packed tool block types/addresses changed: %#v", message.Content)
+	}
+	firstInput, firstInputOK := first.Input.(json.RawMessage)
+	secondInput, secondInputOK := second.Input.(json.RawMessage)
+	if !firstInputOK || string(firstInput) != `{"query":"first"}` {
+		t.Fatalf("first packed input=%T(%q)", first.Input, firstInput)
+	}
+	if !secondInputOK || string(secondInput) != `{"query":"second"}` {
+		t.Fatalf("second packed input=%T(%q)", second.Input, secondInput)
 	}
 }
 
@@ -268,8 +298,7 @@ func TestOutputFromCanonicalResponseRawArgumentsFallback(t *testing.T) {
 	toolCall := out.ToolCalls[0]
 	if len(toolCall.argumentsRaw) != 0 ||
 		toolCall.argumentsValue == nil ||
-		toolCall.Arguments != "" ||
-		toolCall.argumentsCanonical {
+		toolCall.Arguments != "" {
 		t.Fatalf("unsupported argument value did not use compatibility path: %#v", toolCall)
 	}
 	if !reflect.DeepEqual(toolCall.argumentsValue, arguments) {

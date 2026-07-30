@@ -28,11 +28,6 @@ type protocolToolCall struct {
 	// argumentsRaw contains locally encoded JSON for adapters that can embed it
 	// directly without reflecting over the decoded argument object again.
 	argumentsRaw json.RawMessage
-
-	// argumentsCanonical is true only when Arguments was serialized locally by
-	// jsonx. Anthropic responses can then embed it directly without parsing the
-	// same JSON back into a generic object first.
-	argumentsCanonical bool
 }
 
 type protocolOutput struct {
@@ -424,7 +419,6 @@ func outputFromOAI(resp map[string]any) protocolOutput {
 				}
 				out.ToolCalls = append(out.ToolCalls, protocolToolCall{
 					ID: id, Name: tc.Function.Name, Arguments: tc.Function.Arguments,
-					argumentsCanonical: true,
 				})
 				continue
 			}
@@ -434,10 +428,9 @@ func outputFromOAI(resp map[string]any) protocolOutput {
 			if id == "" {
 				id = reqID24WithPrefix("call_")
 			}
-			arguments, argumentsCanonical := jsonStringWithCanonical(fn["arguments"])
+			arguments := jsonString(fn["arguments"])
 			out.ToolCalls = append(out.ToolCalls, protocolToolCall{
 				ID: id, Name: stringValue(fn["name"]), Arguments: arguments,
-				argumentsCanonical: argumentsCanonical,
 			})
 		}
 	}
@@ -512,7 +505,7 @@ func outputFromCanonicalResponse(
 		for index, toolCall := range response.ToolCalls {
 			protocolCall := protocolToolCall{ID: toolCall.ID, Name: toolCall.Name}
 			if materializeArguments {
-				protocolCall.Arguments, protocolCall.argumentsCanonical = jsonStringWithCanonical(toolCall.Arguments)
+				protocolCall.Arguments = jsonString(toolCall.Arguments)
 			} else {
 				arguments := normalizedIntermediateJSONValue(toolCall.Arguments)
 				start := len(rawArguments)
@@ -583,10 +576,9 @@ func outputFromGeminiChunkWithUsage(
 				if id == "" {
 					id = reqID24WithPrefix("call_")
 				}
-				arguments, argumentsCanonical := jsonStringWithCanonical(fc["args"])
+				arguments := jsonString(fc["args"])
 				out.ToolCalls = append(out.ToolCalls, protocolToolCall{
 					ID: id, Name: stringValue(fc["name"]), Arguments: arguments,
-					argumentsCanonical: argumentsCanonical,
 				})
 				continue
 			}
@@ -681,31 +673,26 @@ func addProtocolCounts(left, right int) int {
 }
 
 func jsonString(v any) string {
-	value, _ := jsonStringWithCanonical(v)
-	return value
-}
-
-func jsonStringWithCanonical(v any) (string, bool) {
 	if canonical, ok := transform.CanonicalJSONStringValue(v); ok {
-		return canonical, true
+		return canonical
 	}
 	if s, ok := v.(string); ok {
 		if strings.TrimSpace(s) == "" {
-			return "{}", true
+			return "{}"
 		}
-		return s, false
+		return s
 	}
 	if v == nil {
-		return "{}", true
+		return "{}"
 	}
 	if data, ok := jsonx.MarshalJSONValueString(v); ok {
-		return data, true
+		return data
 	}
 	data, err := jsonx.MarshalString(v)
 	if err != nil {
-		return "{}", true
+		return "{}"
 	}
-	return data, true
+	return data
 }
 
 func normalizedIntermediateJSONValue(value any) any {

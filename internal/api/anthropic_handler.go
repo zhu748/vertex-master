@@ -564,9 +564,12 @@ func anthropicMessage(model, id string, out protocolOutput) *anthropicMessageRes
 		message.Content = append(message.Content, &anthropicTextContent{Text: out.Text, Type: "text"})
 	}
 	toolContent := make([]anthropicToolUseContent, len(out.ToolCalls))
+	packedInputRaw := make([]byte, 0, anthropicToolInputRawCapacity(out.ToolCalls))
 	for index, tc := range out.ToolCalls {
+		var input any
+		input, packedInputRaw = anthropicToolInputPacked(tc, packedInputRaw)
 		toolContent[index] = anthropicToolUseContent{
-			ID: tc.ID, Input: anthropicToolInput(tc), Name: tc.Name, Type: "tool_use",
+			ID: tc.ID, Input: input, Name: tc.Name, Type: "tool_use",
 		}
 		message.Content = append(message.Content, &toolContent[index])
 	}
@@ -575,20 +578,38 @@ func anthropicMessage(model, id string, out protocolOutput) *anthropicMessageRes
 	return message
 }
 
-func anthropicToolInput(toolCall protocolToolCall) any {
+// Reserve one shared backing buffer for string-backed tool inputs. Validation is
+// deliberately deferred to anthropicToolInputPacked so each argument is scanned
+// only once on the response hot path.
+func anthropicToolInputRawCapacity(toolCalls []protocolToolCall) int {
+	capacity := 0
+	for _, toolCall := range toolCalls {
+		if toolCall.argumentsValue != nil || len(toolCall.argumentsRaw) > 0 {
+			continue
+		}
+		if len(toolCall.Arguments) > int(^uint(0)>>1)-capacity {
+			return 0
+		}
+		capacity += len(toolCall.Arguments)
+	}
+	return capacity
+}
+
+func anthropicToolInputPacked(toolCall protocolToolCall, packedRaw []byte) (any, []byte) {
 	if toolCall.argumentsValue != nil {
-		return toolCall.argumentsValue
+		return toolCall.argumentsValue, packedRaw
 	}
 	if len(toolCall.argumentsRaw) > 0 {
-		return toolCall.argumentsRaw
+		return toolCall.argumentsRaw, packedRaw
 	}
-	if toolCall.argumentsCanonical {
-		raw := json.RawMessage(toolCall.Arguments)
-		if json.Valid(raw) {
-			return raw
-		}
+	raw := json.RawMessage(toolCall.Arguments)
+	if json.Valid(raw) {
+		start := len(packedRaw)
+		packedRaw = append(packedRaw, raw...)
+		end := len(packedRaw)
+		return json.RawMessage(packedRaw[start:end:end]), packedRaw
 	}
-	return jsonValue(toolCall.Arguments)
+	return jsonValue(toolCall.Arguments), packedRaw
 }
 
 func anthropicUsage(out protocolOutput) *anthropicUsageData {
