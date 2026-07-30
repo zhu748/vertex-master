@@ -2434,7 +2434,6 @@ type NodePoolStats struct {
 }
 
 type healthCheckCandidate struct {
-	node     Node
 	priority int
 	lastSeen int64
 	order    int
@@ -2529,7 +2528,15 @@ func SelectNodesForHealthCheck(limit int, staleAfter time.Duration, now time.Tim
 
 	nowUnix := now.Unix()
 	staleBefore := now.Add(-staleAfter).Unix()
-	candidates := make([]healthCheckCandidate, 0, min(limit, len(nodeList)))
+	candidateLimit := min(limit, len(nodeList))
+	const inlineHealthCheckCandidateLimit = 64
+	var inlineCandidates [inlineHealthCheckCandidateLimit]healthCheckCandidate
+	var candidates []healthCheckCandidate
+	if candidateLimit <= len(inlineCandidates) {
+		candidates = inlineCandidates[:0:candidateLimit]
+	} else {
+		candidates = make([]healthCheckCandidate, 0, candidateLimit)
+	}
 	for order, node := range nodeList {
 		if node.Disabled {
 			continue
@@ -2538,23 +2545,22 @@ func SelectNodesForHealthCheck(limit int, staleAfter time.Duration, now time.Tim
 		var candidate healthCheckCandidate
 		switch {
 		case health == nil || (health.LastSuccessAt == 0 && health.LastFailAt == 0):
-			candidate = healthCheckCandidate{node: node, priority: 0, order: order}
+			candidate = healthCheckCandidate{priority: 0, order: order}
 		case health.CooldownUntil > nowUnix:
 			continue
 		case health.ConsecutiveFailures > 0:
 			candidate = healthCheckCandidate{
-				node: node, priority: 1, lastSeen: health.LastFailAt, order: order,
+				priority: 1, lastSeen: health.LastFailAt, order: order,
 			}
 		case staleAfter <= 0 || health.LastSuccessAt <= staleBefore:
 			candidate = healthCheckCandidate{
-				node: node, priority: 2, lastSeen: health.LastSuccessAt, order: order,
+				priority: 2, lastSeen: health.LastSuccessAt, order: order,
 			}
 		default:
 			continue
 		}
 		candidates = retainEarliestHealthCheck(candidates, candidate, limit)
 	}
-	mu.RUnlock()
 	slices.SortFunc(candidates, func(left, right healthCheckCandidate) int {
 		if healthCheckEarlier(left, right) {
 			return -1
@@ -2566,8 +2572,9 @@ func SelectNodesForHealthCheck(limit int, staleAfter time.Duration, now time.Tim
 	})
 	selected := make([]Node, len(candidates))
 	for i := range candidates {
-		selected[i] = candidates[i].node
+		selected[i] = nodeList[candidates[i].order]
 	}
+	mu.RUnlock()
 	return selected
 }
 

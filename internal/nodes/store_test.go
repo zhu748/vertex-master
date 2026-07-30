@@ -1306,14 +1306,16 @@ func TestSelectNodesForHealthCheckPreservesStableOrderAtLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	selected := SelectNodesForHealthCheck(5, time.Hour, time.Now())
-	if len(selected) != 5 {
-		t.Fatalf("selected %d nodes, want 5", len(selected))
-	}
-	for index, node := range selected {
-		want := fmt.Sprintf("untested-%03d", index)
-		if node.RawURI != want {
-			t.Fatalf("selected[%d]=%q, want %q", index, node.RawURI, want)
+	for _, limit := range []int{5, 80} {
+		selected := SelectNodesForHealthCheck(limit, time.Hour, time.Now())
+		if len(selected) != limit {
+			t.Fatalf("limit %d selected %d nodes", limit, len(selected))
+		}
+		for index, node := range selected {
+			want := fmt.Sprintf("untested-%03d", index)
+			if node.RawURI != want {
+				t.Fatalf("limit %d selected[%d]=%q, want %q", limit, index, node.RawURI, want)
+			}
 		}
 	}
 }
