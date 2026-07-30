@@ -3,6 +3,8 @@ package transport
 import (
 	"encoding/base64"
 	"testing"
+
+	"github.com/metacubex/mihomo/adapter"
 )
 
 var benchmarkParsedURI map[string]any //nolint:gochecknoglobals
@@ -111,6 +113,51 @@ func TestParseURIHy2KeepsPortRange(t *testing.T) {
 	if got := out["skip-cert-verify"]; got != true {
 		t.Fatalf("expected skip-cert-verify=true, got %#v", got)
 	}
+}
+
+func TestParseURITUICKeepsCredentialsAndTransportOptions(t *testing.T) {
+	raw := "tuic://12345678-1234-1234-1234-123456789012:p%40ss@tuic.example.com:443" +
+		"?sni=edge.example.com&allowInsecure=1&congestion_control=bbr" +
+		"&alpn=h3%2Chq-29&disable_sni=1&udp_relay_mode=native#demo"
+
+	out, err := ParseURI(raw)
+	if err != nil {
+		t.Fatalf("ParseURI returned error: %v", err)
+	}
+	if out["uuid"] != "12345678-1234-1234-1234-123456789012" ||
+		out["password"] != "p@ss" {
+		t.Fatalf("TUIC v5 credentials not preserved: %#v", out)
+	}
+	if out["udp"] != true || out["congestion-controller"] != "bbr" ||
+		out["disable-sni"] != true || out["udp-relay-mode"] != "native" {
+		t.Fatalf("TUIC transport options not preserved: %#v", out)
+	}
+	if out["sni"] != "edge.example.com" || out["skip-cert-verify"] != true {
+		t.Fatalf("TUIC TLS options not preserved: %#v", out)
+	}
+	alpn, ok := out["alpn"].([]string)
+	if !ok || len(alpn) != 2 || alpn[0] != "h3" || alpn[1] != "hq-29" {
+		t.Fatalf("TUIC ALPN not preserved: %#v", out["alpn"])
+	}
+	proxy, err := adapter.ParseProxy(out)
+	if err != nil {
+		t.Fatalf("Mihomo rejected parsed TUIC v5 options: %v", err)
+	}
+	closeProxy(proxy)
+
+	legacy, err := ParseURI("tuic://legacy-token@tuic.example.com:443#legacy")
+	if err != nil {
+		t.Fatalf("ParseURI(TUIC v4) returned error: %v", err)
+	}
+	if legacy["token"] != "legacy-token" || legacy["uuid"] != nil ||
+		legacy["password"] != nil {
+		t.Fatalf("TUIC v4 token not preserved: %#v", legacy)
+	}
+	proxy, err = adapter.ParseProxy(legacy)
+	if err != nil {
+		t.Fatalf("Mihomo rejected parsed TUIC v4 options: %v", err)
+	}
+	closeProxy(proxy)
 }
 
 func TestParseURIVmessKeepsSNIAndFingerprint(t *testing.T) {

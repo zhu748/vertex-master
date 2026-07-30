@@ -122,12 +122,24 @@ func parseSimple(uri, typ string) (map[string]any, error) {
 	out := map[string]any{"name": name, "type": typ, "server": u.Hostname(), "port": port}
 
 	username := ""
+	password := ""
+	hasPassword := false
 	if u.User != nil {
 		username = u.User.Username()
+		password, hasPassword = u.User.Password()
 	}
-	if typ == "trojan" || typ == "hysteria2" {
+	switch typ {
+	case "trojan", "hysteria2":
 		out["password"] = username
-	} else {
+	case "tuic":
+		out["udp"] = true
+		if hasPassword {
+			out["uuid"] = username
+			out["password"] = password
+		} else {
+			out["token"] = username
+		}
+	default:
 		out["uuid"] = username
 	}
 
@@ -205,6 +217,26 @@ func parseSimple(uri, typ string) (map[string]any, error) {
 		}
 		if alpn := q.Get("alpn"); alpn != "" {
 			out["alpn"] = strings.Split(alpn, ",")
+		}
+	}
+	if typ == "tuic" {
+		if congestionController := firstNonEmpty(
+			q.Get("congestion_control"),
+			q.Get("congestion-controller"),
+		); congestionController != "" {
+			out["congestion-controller"] = congestionController
+		}
+		if alpn := q.Get("alpn"); alpn != "" {
+			out["alpn"] = strings.Split(alpn, ",")
+		}
+		if queryFlag(q, "disable_sni", "disable-sni") {
+			out["disable-sni"] = true
+		}
+		if udpRelayMode := firstNonEmpty(
+			q.Get("udp_relay_mode"),
+			q.Get("udp-relay-mode"),
+		); udpRelayMode != "" {
+			out["udp-relay-mode"] = udpRelayMode
 		}
 	}
 	return out, nil
