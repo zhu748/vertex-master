@@ -359,7 +359,10 @@ func extractParts(parts []any, forStream, canonicalToolCalls bool) (string, []an
 				args = map[string]any{}
 			}
 			arguments, _ := jsonx.MarshalString(args)
-			id := "call_" + reqID()
+			id := toString(fc["id"])
+			if id == "" {
+				id = "call_" + reqID()
+			}
 			name := toString(fc["name"])
 			if canonicalToolCalls {
 				toolCalls = append(toolCalls, CanonicalOAIResponseToolCall{

@@ -107,6 +107,36 @@ func TestExtractParts_EmptyTextNotTreatedAsText(t *testing.T) {
 	}
 }
 
+func TestExtractPartsPreservesFunctionCallID(t *testing.T) {
+	part := map[string]any{"functionCall": map[string]any{
+		"id": "toolu_upstream", "name": "lookup", "args": map[string]any{"q": "x"},
+	}}
+	for _, forStream := range []bool{false, true} {
+		_, tools, _ := ExtractParts([]any{part}, forStream)
+		if len(tools) != 1 {
+			t.Fatalf("forStream=%v tool_calls len=%d, want 1", forStream, len(tools))
+		}
+		toolCall := tools[0].(map[string]any)
+		if toolCall["id"] != "toolu_upstream" {
+			t.Fatalf("forStream=%v id=%v, want toolu_upstream", forStream, toolCall["id"])
+		}
+	}
+}
+
+func TestExtractPartsGeneratesMissingFunctionCallID(t *testing.T) {
+	part := map[string]any{"functionCall": map[string]any{
+		"name": "lookup", "args": map[string]any{},
+	}}
+	_, tools, _ := ExtractParts([]any{part}, false)
+	if len(tools) != 1 {
+		t.Fatalf("tool_calls len=%d, want 1", len(tools))
+	}
+	id, _ := tools[0].(map[string]any)["id"].(string)
+	if !strings.HasPrefix(id, "call_") || len(id) <= len("call_") {
+		t.Fatalf("generated id=%q, want non-empty call_ prefix", id)
+	}
+}
+
 func TestExtractPartsSinglePartPreservesFunctionAndImagePrecedence(t *testing.T) {
 	text, tools, reasoning := ExtractParts([]any{map[string]any{
 		"text": "must-not-win", "thought": true,

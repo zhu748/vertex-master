@@ -328,6 +328,7 @@ func TestGeminiJSONToOAIJSONCanonicalToolCallPreservesWireFormat(t *testing.T) {
 		"candidates": []any{map[string]any{
 			"content": map[string]any{"parts": []any{map[string]any{
 				"functionCall": map[string]any{
+					"id":   "toolu_upstream",
 					"name": "lookup",
 					"args": map[string]any{"z": "<tag>", "a": float64(1)},
 				},
@@ -344,6 +345,9 @@ func TestGeminiJSONToOAIJSONCanonicalToolCallPreservesWireFormat(t *testing.T) {
 	canonical, ok := toolCalls[0].(CanonicalOAIResponseToolCall)
 	if !ok {
 		t.Fatalf("tool call type=%T, want CanonicalOAIResponseToolCall", toolCalls[0])
+	}
+	if canonical.ID != "toolu_upstream" {
+		t.Fatalf("tool call id=%q, want toolu_upstream", canonical.ID)
 	}
 
 	legacy := map[string]any{
