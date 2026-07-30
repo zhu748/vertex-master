@@ -258,7 +258,13 @@ func responsesToChatRequest(body map[string]any) (map[string]any, error) {
 
 	if choice, ok := body["tool_choice"]; ok {
 		if m, isMap := choice.(map[string]any); isMap && stringValue(m["type"]) == "function" {
-			chat["tool_choice"] = map[string]any{"type": "function", "function": map[string]any{"name": m["name"]}}
+			name := stringValue(m["name"])
+			if namespace := stringValue(m["namespace"]); namespace != "" {
+				name = flattenResponsesToolName(namespace, name)
+			}
+			chat["tool_choice"] = map[string]any{
+				"type": "function", "function": map[string]any{"name": name},
+			}
 		} else {
 			chat["tool_choice"] = choice
 		}
@@ -267,7 +273,13 @@ func responsesToChatRequest(body map[string]any) (map[string]any, error) {
 }
 
 func convertResponsesTools(raw any) ([]any, map[string]responsesNamespacedTool, error) {
-	rawTools := anySlice(raw)
+	if raw == nil {
+		return nil, nil, nil
+	}
+	rawTools, ok := raw.([]any)
+	if !ok {
+		return nil, nil, fmt.Errorf("tools must be an array")
+	}
 	if len(rawTools) == 0 {
 		return nil, nil, nil
 	}
@@ -312,7 +324,14 @@ func convertResponsesTools(raw any) ([]any, map[string]responsesNamespacedTool, 
 			}
 			// Codex 可能只发送 namespace 声明而不附带子工具（例如内置
 			// collaboration）。这种声明无法由 Gemini 调用，安全忽略即可。
-			nestedTools := anySlice(tool["tools"])
+			var nestedTools []any
+			if rawNestedTools, exists := tool["tools"]; exists && rawNestedTools != nil {
+				var ok bool
+				nestedTools, ok = rawNestedTools.([]any)
+				if !ok {
+					return nil, nil, fmt.Errorf("tools[%d].tools must be an array", toolIndex)
+				}
+			}
 			for nestedIndex, rawNested := range nestedTools {
 				nested, _ := rawNested.(map[string]any)
 				if nested == nil {
@@ -322,7 +341,22 @@ func convertResponsesTools(raw any) ([]any, map[string]responsesNamespacedTool, 
 						nestedIndex,
 					)
 				}
+				if typ := stringValue(nested["type"]); typ != "" && typ != "function" {
+					return nil, nil, fmt.Errorf(
+						"tools[%d].tools[%d] has unsupported type %q",
+						toolIndex,
+						nestedIndex,
+						typ,
+					)
+				}
 				name := stringValue(nested["name"])
+				if name == "" {
+					return nil, nil, fmt.Errorf(
+						"tools[%d].tools[%d] function is missing required field 'name'",
+						toolIndex,
+						nestedIndex,
+					)
+				}
 				flatName := flattenResponsesToolName(namespace, name)
 				if err := appendFunction(nested, flatName); err != nil {
 					return nil, nil, err

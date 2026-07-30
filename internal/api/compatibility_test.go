@@ -288,6 +288,47 @@ func TestResponsesRequestConversionSupportsCodexNamespaceAndHostedTools(t *testi
 	}
 }
 
+func TestResponsesNamespaceToolChoiceUsesFlattenedName(t *testing.T) {
+	body := map[string]any{
+		"model": "gemini-test",
+		"input": "hello",
+		"tools": []any{map[string]any{
+			"type": "namespace", "name": "mcp__demo",
+			"tools": []any{map[string]any{
+				"type": "function", "name": "lookup",
+				"parameters": map[string]any{"type": "object"},
+			}},
+		}},
+		"tool_choice": map[string]any{
+			"type": "function", "namespace": "mcp__demo", "name": "lookup",
+		},
+	}
+
+	chat, err := responsesToChatRequest(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	choice := chat["tool_choice"].(map[string]any)
+	function := choice["function"].(map[string]any)
+	if got := function["name"]; got != "mcp__demo__lookup" {
+		t.Fatalf("namespace tool_choice 未展平: %#v", choice)
+	}
+
+	_, payload, err := transform.ConvertChatRequest(
+		chat,
+		config.StaticProvider(config.DefaultConfig()),
+	)
+	if err != nil {
+		t.Fatalf("展平后的 namespace tool_choice 应通过完整转换: %v", err)
+	}
+	toolConfig := payload["toolConfig"].(map[string]any)
+	callingConfig := toolConfig["functionCallingConfig"].(map[string]any)
+	allowed := callingConfig["allowedFunctionNames"].([]any)
+	if len(allowed) != 1 || allowed[0] != "mcp__demo__lookup" {
+		t.Fatalf("Gemini allowedFunctionNames 未保留展平工具名: %#v", callingConfig)
+	}
+}
+
 func TestAnthropicMessagesAcceptsClaudeCodeSystemRole(t *testing.T) {
 	chat, err := anthropicToChatRequest(map[string]any{
 		"max_tokens": float64(128),

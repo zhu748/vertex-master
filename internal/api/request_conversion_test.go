@@ -161,6 +161,13 @@ func TestResponsesConversionRejectsItemsThatWouldLoseContext(t *testing.T) {
 			},
 		},
 		{
+			name: "tools is not an array",
+			body: map[string]any{
+				"input": "keep",
+				"tools": map[string]any{"type": "function", "name": "drop-me"},
+			},
+		},
+		{
 			name: "non-object namespace tool",
 			body: map[string]any{
 				"input": "keep",
@@ -169,6 +176,40 @@ func TestResponsesConversionRejectsItemsThatWouldLoseContext(t *testing.T) {
 					"tools": []any{
 						map[string]any{"type": "function", "name": "valid"},
 						"drop-me",
+					},
+				}},
+			},
+		},
+		{
+			name: "namespace tools is not an array",
+			body: map[string]any{
+				"input": "keep",
+				"tools": []any{map[string]any{
+					"type": "namespace", "name": "demo",
+					"tools": map[string]any{"type": "function", "name": "drop-me"},
+				}},
+			},
+		},
+		{
+			name: "namespace child without name",
+			body: map[string]any{
+				"input": "keep",
+				"tools": []any{map[string]any{
+					"type": "namespace", "name": "demo",
+					"tools": []any{
+						map[string]any{"type": "function", "parameters": map[string]any{}},
+					},
+				}},
+			},
+		},
+		{
+			name: "unsupported namespace child type",
+			body: map[string]any{
+				"input": "keep",
+				"tools": []any{map[string]any{
+					"type": "namespace", "name": "demo",
+					"tools": []any{
+						map[string]any{"type": "future_tool", "name": "drop-me"},
 					},
 				}},
 			},
