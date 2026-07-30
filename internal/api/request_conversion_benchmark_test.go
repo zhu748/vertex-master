@@ -26,13 +26,13 @@ func BenchmarkProtocolArrayTextConversion(b *testing.B) {
 		b.Run("responses_"+benchmark.name, func(b *testing.B) {
 			b.ReportAllocs()
 			for range b.N {
-				benchmarkRequestConversionText = responseInstructions(benchmark.parts)
+				benchmarkRequestConversionText, _ = responseInstructions(benchmark.parts)
 			}
 		})
 		b.Run("anthropic_"+benchmark.name, func(b *testing.B) {
 			b.ReportAllocs()
 			for range b.N {
-				benchmarkRequestConversionText = anthropicText(benchmark.parts)
+				benchmarkRequestConversionText, _ = anthropicTextBlocks(benchmark.parts)
 			}
 		})
 	}

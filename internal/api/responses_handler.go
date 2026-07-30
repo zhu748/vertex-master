@@ -146,7 +146,11 @@ func responsesToChatRequest(body map[string]any) (map[string]any, error) {
 		messageCapacity = len(inputItems) + 1
 	}
 	messages := make([]any, 0, messageCapacity)
-	if instructions := responseInstructions(body["instructions"]); instructions != "" {
+	instructions, err := responseInstructions(body["instructions"])
+	if err != nil {
+		return nil, fmt.Errorf("instructions: %w", err)
+	}
+	if instructions != "" {
 		messages = append(messages, map[string]any{"role": "system", "content": instructions})
 	}
 	switch value := input.(type) {
@@ -396,20 +400,39 @@ func restoreResponsesToolNamespaces(out *protocolOutput, mappings map[string]res
 	}
 }
 
-func responseInstructions(v any) string {
-	if s, ok := v.(string); ok {
-		return s
+func responseInstructions(v any) (string, error) {
+	switch value := v.(type) {
+	case nil:
+		return "", nil
+	case string:
+		return value, nil
+	case []any:
+		v = value
+	default:
+		return "", fmt.Errorf("must be a string or text block array")
 	}
+
 	var inline [8]string
 	parts := inline[:0]
-	for _, raw := range anySlice(v) {
-		if item, ok := raw.(map[string]any); ok {
-			if value := stringValue(item["text"]); value != "" {
-				parts = append(parts, value)
-			}
+	for index, raw := range v.([]any) {
+		item, ok := raw.(map[string]any)
+		if !ok {
+			return "", fmt.Errorf("content[%d] must be an object", index)
+		}
+		switch typ := stringValue(item["type"]); typ {
+		case "", "text", "input_text", "output_text":
+		default:
+			return "", fmt.Errorf("content[%d] has unsupported type %q", index, typ)
+		}
+		text, ok := item["text"].(string)
+		if !ok {
+			return "", fmt.Errorf("content[%d].text must be a string", index)
+		}
+		if text != "" {
+			parts = append(parts, text)
 		}
 	}
-	return strings.Join(parts, "\n")
+	return strings.Join(parts, "\n"), nil
 }
 
 func responseContentToChat(v any) (any, error) {

@@ -29,18 +29,23 @@ func TestProtocolArrayTextConversionPreservesSeparatorsAndInput(t *testing.T) {
 	parts := []any{
 		map[string]any{"type": "text", "text": "first"},
 		map[string]any{"type": "text", "text": ""},
-		map[string]any{"type": "tool_use", "name": "ignored"},
 		map[string]any{"type": "text", "text": "second"},
 	}
 	before, err := json.Marshal(parts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := responseInstructions(parts); got != "first\nsecond" {
-		t.Fatalf("Responses text=%q", got)
+	responseParts := []any{
+		map[string]any{"type": "text", "text": "first"},
+		map[string]any{"type": "text", "text": ""},
+		map[string]any{"type": "text", "text": "second"},
 	}
-	if got := anthropicText(parts); got != "first\n\nsecond" {
-		t.Fatalf("Anthropic text=%q", got)
+	got, err := responseInstructions(responseParts)
+	if err != nil || got != "first\nsecond" {
+		t.Fatalf("Responses text=%q err=%v", got, err)
+	}
+	if got, ok := anthropicTextBlocks(parts); !ok || got != "first\n\nsecond" {
+		t.Fatalf("Anthropic text=%q ok=%v", got, ok)
 	}
 	after, err := json.Marshal(parts)
 	if err != nil {
@@ -123,6 +128,23 @@ func TestResponsesConversionRejectsItemsThatWouldLoseContext(t *testing.T) {
 				map[string]any{"type": "message", "role": "user", "content": "keep"},
 				map[string]any{"type": "future_item", "content": "drop-me"},
 			}},
+		},
+		{
+			name: "instructions is not a string or array",
+			body: map[string]any{
+				"instructions": map[string]any{"type": "text", "text": "drop-me"},
+				"input":        "keep",
+			},
+		},
+		{
+			name: "unknown instructions block",
+			body: map[string]any{
+				"instructions": []any{
+					map[string]any{"type": "input_text", "text": "keep"},
+					map[string]any{"type": "future_instruction", "text": "drop-me"},
+				},
+				"input": "keep",
+			},
 		},
 		{
 			name: "function call without identity",
@@ -222,6 +244,45 @@ func TestResponsesConversionRejectsItemsThatWouldLoseContext(t *testing.T) {
 				t.Fatalf("缺损上下文必须返回错误，got %#v", converted)
 			}
 		})
+	}
+}
+
+func TestAnthropicToolResultPreservesMixedContent(t *testing.T) {
+	converted, err := anthropicToChatRequest(map[string]any{
+		"max_tokens": float64(64),
+		"messages": []any{map[string]any{
+			"role": "user",
+			"content": []any{map[string]any{
+				"type": "tool_result", "tool_use_id": "call_1",
+				"content": []any{
+					map[string]any{"type": "text", "text": "visible"},
+					map[string]any{
+						"type": "image",
+						"source": map[string]any{
+							"type": "base64", "media_type": "image/png", "data": "aGVsbG8=",
+						},
+					},
+				},
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages := converted["messages"].([]any)
+	tool := messages[0].(map[string]any)
+	content := tool["content"].(string)
+	var blocks []any
+	if err := json.Unmarshal([]byte(content), &blocks); err != nil {
+		t.Fatalf("复合 tool_result 应保留为 JSON 数组，got %q: %v", content, err)
+	}
+	if len(blocks) != 2 {
+		t.Fatalf("复合 tool_result 丢失内容块: %#v", blocks)
+	}
+	image := blocks[1].(map[string]any)
+	source := image["source"].(map[string]any)
+	if source["data"] != "aGVsbG8=" {
+		t.Fatalf("复合 tool_result 图片数据未保留: %#v", blocks)
 	}
 }
 

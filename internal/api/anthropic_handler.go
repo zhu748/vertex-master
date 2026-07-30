@@ -293,19 +293,25 @@ func anthropicInstructionText(v any) (string, error) {
 	return strings.Join(values, "\n"), nil
 }
 
-func anthropicText(v any) string {
-	if text, ok := v.(string); ok {
-		return text
+func anthropicTextBlocks(v any) (string, bool) {
+	blocks, ok := v.([]any)
+	if !ok {
+		return "", false
 	}
 	var inline [8]string
 	values := inline[:0]
-	for _, raw := range anySlice(v) {
-		block, _ := raw.(map[string]any)
-		if stringValue(block["type"]) == "text" {
-			values = append(values, stringValue(block["text"]))
+	for _, raw := range blocks {
+		block, ok := raw.(map[string]any)
+		if !ok || stringValue(block["type"]) != "text" {
+			return "", false
 		}
+		text, ok := block["text"].(string)
+		if !ok {
+			return "", false
+		}
+		values = append(values, text)
 	}
-	return strings.Join(values, "\n")
+	return strings.Join(values, "\n"), true
 }
 
 func appendAnthropicMessageToChat(result []any, role string, content any) ([]any, error) {
@@ -454,7 +460,7 @@ func anthropicToolResult(v any) string {
 	if s, ok := v.(string); ok {
 		return s
 	}
-	if text := anthropicText(v); text != "" {
+	if text, ok := anthropicTextBlocks(v); ok && text != "" {
 		return text
 	}
 	return jsonString(v)
