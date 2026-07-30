@@ -12,6 +12,31 @@ type ResponseConverter interface {
 	AggregateN(responses []map[string]any, model string) map[string]any
 }
 
+// CanonicalResponse is the allocation-light response representation shared
+// with protocol adapters that do not need an intermediate OpenAI wire object.
+type CanonicalResponse struct {
+	Text      string
+	Reasoning string
+	ToolCalls []CanonicalToolCall
+	Finish    string
+	Usage     NormalizedUsage
+}
+
+// CanonicalToolCall keeps the decoded argument value until a concrete client
+// protocol determines whether it needs a JSON object or a JSON string.
+type CanonicalToolCall struct {
+	ID        string
+	Name      string
+	Arguments any
+}
+
+// CanonicalResponseConverter is an optional non-streaming fast path. Custom
+// converters only need to implement ResponseConverter; callers fall back to
+// ToOAI when this interface is unavailable.
+type CanonicalResponseConverter interface {
+	ToCanonical(geminiResp map[string]any, model string) CanonicalResponse
+}
+
 // StreamEventEncoder 把单个上游 chunk 转为一个或多个可直接 JSON 序列化的
 // OpenAI 流事件。emit 必须在返回前同步消费 payload，不能保留其引用。
 type StreamEventEncoder interface {
@@ -50,6 +75,10 @@ type defaultResponseConverter struct{}
 
 func (defaultResponseConverter) ToOAI(geminiResp map[string]any, model string) map[string]any {
 	return GeminiJSONToOAIJSON(geminiResp, model)
+}
+
+func (defaultResponseConverter) ToCanonical(geminiResp map[string]any, _ string) CanonicalResponse {
+	return GeminiJSONToCanonicalResponse(geminiResp)
 }
 
 func (defaultResponseConverter) StreamToSSE(chunk map[string]any, model, requestID string, isFirst bool) []string {

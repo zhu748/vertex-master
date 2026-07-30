@@ -84,8 +84,7 @@ func (h *ResponsesHandler) handleResponses(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, ve.Code, vertexErrorToOAI(ve))
 		return
 	}
-	oaiResp := h.respConv.ToOAI(geminiResp, model)
-	out := outputFromOAI(oaiResp)
+	out := outputFromResponseConverter(h.respConv, geminiResp, model)
 	out.Text = transform.StripAssistantPrefillEcho(
 		out.Text,
 		transform.AssistantPrefillFromPayload(payload),
@@ -829,7 +828,7 @@ func (h *ResponsesHandler) streamResponses(
 		if state.streamFailed() {
 			return
 		}
-		out := outputFromOAI(h.respConv.ToOAI(resp, model))
+		out := outputFromResponseConverter(h.respConv, resp, model)
 		out.Text = transform.StripAssistantPrefillEcho(
 			out.Text,
 			transform.AssistantPrefillFromPayload(payload),

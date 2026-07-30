@@ -6,6 +6,35 @@ import (
 	"time"
 )
 
+// GeminiJSONToCanonicalResponse extracts the protocol-neutral response fields
+// without first allocating an OpenAI response map.
+func GeminiJSONToCanonicalResponse(geminiResp map[string]any) CanonicalResponse {
+	candidate := firstCandidate(geminiResp)
+	text, toolCalls, reasoning := extractCanonicalResponseParts(candidateParts(candidate))
+	finish, _ := candidate["finishReason"].(string)
+
+	response := CanonicalResponse{
+		Text:      text,
+		Reasoning: reasoning,
+		ToolCalls: toolCalls,
+		Finish:    normalizedResponseFinish(finish, len(toolCalls)),
+	}
+	if usageMeta, ok := geminiResp["usageMetadata"].(map[string]any); ok {
+		response.Usage = NormalizeUsageForCandidate(usageMeta, candidate)
+	}
+	return response
+}
+
+func normalizedResponseFinish(finish string, toolCallCount int) string {
+	if finish != "" {
+		return MapFinishReason(finish, toolCallCount > 0)
+	}
+	if toolCallCount > 0 {
+		return "tool_calls"
+	}
+	return "stop"
+}
+
 // GeminiJSONToOAIJSON 把 Gemini 非流式响应转为 OpenAI ChatCompletion JSON。
 func GeminiJSONToOAIJSON(geminiResp map[string]any, model string) map[string]any {
 	candidate := firstCandidate(geminiResp)
@@ -14,14 +43,7 @@ func GeminiJSONToOAIJSON(geminiResp map[string]any, model string) map[string]any
 
 	text, toolCalls, reasoning := extractResponseParts(parts)
 
-	var oaiFinish string
-	if finish != "" {
-		oaiFinish = MapFinishReason(finish, len(toolCalls) > 0)
-	} else if len(toolCalls) > 0 {
-		oaiFinish = "tool_calls"
-	} else {
-		oaiFinish = "stop"
-	}
+	oaiFinish := normalizedResponseFinish(finish, len(toolCalls))
 
 	message := map[string]any{"role": "assistant"}
 	if text != "" {
@@ -65,14 +87,7 @@ func GeminiResponsesToOAIJSON(geminiResponses []map[string]any, model string) ma
 		finish, _ := candidate["finishReason"].(string)
 		text, toolCalls, reasoning := extractResponseParts(parts)
 
-		var oaiFinish string
-		if finish != "" {
-			oaiFinish = MapFinishReason(finish, len(toolCalls) > 0)
-		} else if len(toolCalls) > 0 {
-			oaiFinish = "tool_calls"
-		} else {
-			oaiFinish = "stop"
-		}
+		oaiFinish := normalizedResponseFinish(finish, len(toolCalls))
 
 		message := map[string]any{"role": "assistant"}
 		if text != "" {

@@ -311,16 +311,35 @@ type CanonicalOAIResponseFunctionCall struct {
 	Name      string `json:"name"`
 }
 
+type extractedToolCallMode uint8
+
+const (
+	extractedToolCallMaps extractedToolCallMode = iota
+	extractedToolCallCanonicalAny
+	extractedToolCallCanonicalSlice
+)
+
 // ExtractParts 从 Gemini parts 提取 (text_content, tool_calls, reasoning_content)。
 func ExtractParts(parts []any, forStream bool) (string, []any, string) {
-	return extractParts(parts, forStream, false)
+	text, toolCalls, _, reasoning := extractParts(parts, forStream, extractedToolCallMaps)
+	return text, toolCalls, reasoning
 }
 
 func extractResponseParts(parts []any) (string, []any, string) {
-	return extractParts(parts, false, true)
+	text, toolCalls, _, reasoning := extractParts(parts, false, extractedToolCallCanonicalAny)
+	return text, toolCalls, reasoning
 }
 
-func extractParts(parts []any, forStream, canonicalToolCalls bool) (string, []any, string) {
+func extractCanonicalResponseParts(parts []any) (string, []CanonicalToolCall, string) {
+	text, _, toolCalls, reasoning := extractParts(parts, false, extractedToolCallCanonicalSlice)
+	return text, toolCalls, reasoning
+}
+
+func extractParts(
+	parts []any,
+	forStream bool,
+	toolCallMode extractedToolCallMode,
+) (string, []any, []CanonicalToolCall, string) {
 	// 绝大多数流帧只有一个纯文本 part；先处理这一形状，避免为两个通用
 	// 累积器清零较大的内联存储。工具和图片仍按原优先级走完整路径。
 	if len(parts) == 1 {
@@ -330,9 +349,9 @@ func extractParts(parts []any, forStream, canonicalToolCalls bool) (string, []an
 			if !hasFunctionCall && !hasImage {
 				if text := toString(part["text"]); text != "" {
 					if isTruthy(part["thought"]) {
-						return "", nil, text
+						return "", nil, nil, text
 					}
-					return text, nil, ""
+					return text, nil, nil, ""
 				}
 			}
 		}
@@ -341,6 +360,7 @@ func extractParts(parts []any, forStream, canonicalToolCalls bool) (string, []an
 	var textParts StringAccumulator
 	var thoughtParts StringAccumulator
 	var toolCalls []any
+	var canonicalToolCalls []CanonicalToolCall
 	type inlineImage struct {
 		mime string
 		data string
@@ -348,7 +368,7 @@ func extractParts(parts []any, forStream, canonicalToolCalls bool) (string, []an
 	var images []inlineImage
 	imageBytes := 0
 
-	for _, pRaw := range parts {
+	for partIndex, pRaw := range parts {
 		part, ok := pRaw.(map[string]any)
 		if !ok {
 			continue
@@ -358,13 +378,26 @@ func extractParts(parts []any, forStream, canonicalToolCalls bool) (string, []an
 			if args == nil {
 				args = map[string]any{}
 			}
-			arguments, _ := jsonx.MarshalString(args)
 			id := toString(fc["id"])
 			if id == "" {
 				id = "call_" + reqID()
 			}
 			name := toString(fc["name"])
-			if canonicalToolCalls {
+			switch toolCallMode {
+			case extractedToolCallCanonicalSlice:
+				if canonicalToolCalls == nil {
+					canonicalToolCalls = make(
+						[]CanonicalToolCall, 0, countFunctionCalls(parts[partIndex:]),
+					)
+				}
+				canonicalToolCalls = append(canonicalToolCalls, CanonicalToolCall{
+					ID: id, Name: name, Arguments: args,
+				})
+			case extractedToolCallCanonicalAny:
+				if toolCalls == nil {
+					toolCalls = make([]any, 0, countFunctionCalls(parts[partIndex:]))
+				}
+				arguments, _ := jsonx.MarshalString(args)
 				toolCalls = append(toolCalls, CanonicalOAIResponseToolCall{
 					Function: CanonicalOAIResponseFunctionCall{
 						Arguments: arguments,
@@ -373,21 +406,25 @@ func extractParts(parts []any, forStream, canonicalToolCalls bool) (string, []an
 					ID:   id,
 					Type: "function",
 				})
-				continue
+			case extractedToolCallMaps:
+				if toolCalls == nil {
+					toolCalls = make([]any, 0, countFunctionCalls(parts[partIndex:]))
+				}
+				arguments, _ := jsonx.MarshalString(args)
+				tc := map[string]any{
+					"index": len(toolCalls),
+					"id":    id,
+					"type":  "function",
+					"function": map[string]any{
+						"name":      name,
+						"arguments": canonicalJSONString(arguments),
+					},
+				}
+				if !forStream {
+					delete(tc, "index")
+				}
+				toolCalls = append(toolCalls, tc)
 			}
-			tc := map[string]any{
-				"index": len(toolCalls),
-				"id":    id,
-				"type":  "function",
-				"function": map[string]any{
-					"name":      name,
-					"arguments": canonicalJSONString(arguments),
-				},
-			}
-			if !forStream {
-				delete(tc, "index")
-			}
-			toolCalls = append(toolCalls, tc)
 			continue
 		}
 		if mime, data, ok := inlineImageData(part); ok {
@@ -440,10 +477,24 @@ func extractParts(parts []any, forStream, canonicalToolCalls bool) (string, []an
 		textContent = textParts.String()
 	}
 	reasoning := thoughtParts.String()
-	if len(toolCalls) == 0 {
-		return textContent, nil, reasoning
+	if len(toolCalls) == 0 && len(canonicalToolCalls) == 0 {
+		return textContent, nil, nil, reasoning
 	}
-	return textContent, toolCalls, reasoning
+	return textContent, toolCalls, canonicalToolCalls, reasoning
+}
+
+func countFunctionCalls(parts []any) int {
+	count := 0
+	for _, raw := range parts {
+		part, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, ok := namedFunctionCall(part); ok {
+			count++
+		}
+	}
+	return count
 }
 
 // ---- 响应解析用的小工具 ----

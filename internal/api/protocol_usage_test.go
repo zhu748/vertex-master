@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"math"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -11,6 +12,10 @@ import (
 	"github.com/bsfdsagfadg/vertex/internal/transform"
 	"github.com/bsfdsagfadg/vertex/internal/vertex"
 )
+
+type oaiOnlyResponseConverter struct {
+	transform.ResponseConverter
+}
 
 func TestOutputFromGeminiChunkUsageOnly(t *testing.T) {
 	out := outputFromGeminiChunk(map[string]any{
@@ -180,6 +185,66 @@ func TestAnthropicCanonicalToolInputMatchesParsedWireFormat(t *testing.T) {
 	}}})
 	if len(rawOut.ToolCalls) != 1 || rawOut.ToolCalls[0].argumentsCanonical {
 		t.Fatalf("client-provided argument string must keep the parsed compatibility path: %+v", rawOut.ToolCalls)
+	}
+}
+
+func TestOutputFromResponseConverterMatchesOAICompatibilityPath(t *testing.T) {
+	geminiResponse := map[string]any{
+		"candidates": []any{map[string]any{
+			"finishReason": "STOP",
+			"content": map[string]any{"parts": []any{
+				map[string]any{"text": "thinking", "thought": true},
+				map[string]any{"text": "answer"},
+				map[string]any{"functionCall": map[string]any{
+					"id": "toolu_1", "name": "lookup",
+					"args": map[string]any{"z": "<tag>", "a": float64(1)},
+				}},
+			}},
+		}},
+		"usageMetadata": map[string]any{
+			"promptTokenCount":        float64(20),
+			"candidatesTokenCount":    float64(5),
+			"thoughtsTokenCount":      float64(3),
+			"cachedContentTokenCount": float64(4),
+			"totalTokenCount":         float64(28),
+		},
+	}
+	converter := transform.DefaultResponseConverter()
+	legacy := outputFromOAI(converter.ToOAI(geminiResponse, "gemini-test"))
+	direct := outputFromResponseConverter(converter, geminiResponse, "gemini-test")
+	if !reflect.DeepEqual(direct, legacy) {
+		t.Fatalf("canonical response path changed output:\n direct: %#v\n legacy: %#v", direct, legacy)
+	}
+
+	raw := outputFromResponseConverterWithRawArguments(converter, geminiResponse, "gemini-test")
+	if len(raw.ToolCalls) != 1 || raw.ToolCalls[0].argumentsValue == nil || raw.ToolCalls[0].Arguments != "" {
+		t.Fatalf("raw argument fast path was not preserved: %#v", raw.ToolCalls)
+	}
+	rawWire, err := jsonx.Marshal(anthropicMessage("claude-test", "msg_direct", raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyWire, err := jsonx.Marshal(anthropicMessage("claude-test", "msg_direct", legacy))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(rawWire) != string(legacyWire) {
+		t.Fatalf("raw argument fast path changed Anthropic wire JSON:\n direct: %s\n legacy: %s", rawWire, legacyWire)
+	}
+
+	fallbackConverter := oaiOnlyResponseConverter{ResponseConverter: converter}
+	if _, ok := any(fallbackConverter).(transform.CanonicalResponseConverter); ok {
+		t.Fatal("fallback converter unexpectedly exposes canonical fast path")
+	}
+	fallback := outputFromResponseConverter(fallbackConverter, geminiResponse, "gemini-test")
+	if !reflect.DeepEqual(fallback, legacy) {
+		t.Fatalf("custom converter fallback changed output:\n fallback: %#v\n legacy:   %#v", fallback, legacy)
+	}
+	rawFallback := outputFromResponseConverterWithRawArguments(
+		fallbackConverter, geminiResponse, "gemini-test",
+	)
+	if !reflect.DeepEqual(rawFallback, legacy) {
+		t.Fatalf("raw custom converter fallback changed output:\n fallback: %#v\n legacy:   %#v", rawFallback, legacy)
 	}
 }
 

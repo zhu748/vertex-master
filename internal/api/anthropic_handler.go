@@ -65,7 +65,7 @@ func (h *AnthropicHandler) handleMessages(w http.ResponseWriter, r *http.Request
 		h.writeAnthropicVertexError(w, toVertexError(vErr))
 		return
 	}
-	out := outputFromOAI(h.respConv.ToOAI(resp, model))
+	out := outputFromResponseConverterWithRawArguments(h.respConv, resp, model)
 	out.Text = transform.StripAssistantPrefillEcho(
 		out.Text,
 		transform.AssistantPrefillFromPayload(payload),
@@ -549,6 +549,9 @@ func anthropicMessage(model, id string, out protocolOutput) *anthropicMessageRes
 }
 
 func anthropicToolInput(toolCall protocolToolCall) any {
+	if toolCall.argumentsValue != nil {
+		return toolCall.argumentsValue
+	}
 	if toolCall.argumentsCanonical {
 		raw := json.RawMessage(toolCall.Arguments)
 		if json.Valid(raw) {
@@ -642,7 +645,7 @@ func (h *AnthropicHandler) streamMessages(
 			pingWg.Wait()
 			return
 		}
-		out := outputFromOAI(h.respConv.ToOAI(resp, model))
+		out := outputFromResponseConverter(h.respConv, resp, model)
 		out.Text = transform.StripAssistantPrefillEcho(
 			out.Text,
 			transform.AssistantPrefillFromPayload(payload),

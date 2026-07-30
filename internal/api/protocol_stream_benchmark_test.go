@@ -531,9 +531,10 @@ func BenchmarkAnthropicCompletedGeminiToolMessage(b *testing.B) {
 		"content": map[string]any{"parts": parts},
 	}}}
 	sw := &sseWriter{w: benchmarkResponseWriter{}}
+	converter := transform.DefaultResponseConverter()
 	b.ReportAllocs()
 	for range b.N {
-		out := outputFromOAI(transform.GeminiJSONToOAIJSON(chunk, "gemini-benchmark"))
+		out := outputFromResponseConverterWithRawArguments(converter, chunk, "gemini-benchmark")
 		message := anthropicMessage("gemini-benchmark", "msg_benchmark", out)
 		if !sw.writeData(message) || len(message.Content) != len(parts) {
 			b.Fatal("unexpected Anthropic Gemini tool message")

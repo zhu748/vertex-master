@@ -20,6 +20,10 @@ type protocolToolCall struct {
 	Namespace string
 	Arguments string
 
+	// argumentsValue keeps a locally decoded argument object for protocol
+	// adapters whose wire format accepts JSON directly.
+	argumentsValue any
+
 	// argumentsCanonical is true only when Arguments was serialized locally by
 	// jsonx. Anthropic responses can then embed it directly without parsing the
 	// same JSON back into a generic object first.
@@ -191,9 +195,13 @@ func protocolOutputContents(out protocolOutput) []any {
 		parts = append(parts, map[string]any{"text": out.Text})
 	}
 	for _, toolCall := range out.ToolCalls {
+		arguments := toolCall.argumentsValue
+		if arguments == nil {
+			arguments = jsonValue(toolCall.Arguments)
+		}
 		functionCall := map[string]any{
 			"name": toolCall.Name,
-			"args": jsonValue(toolCall.Arguments),
+			"args": arguments,
 		}
 		if toolCall.ID != "" {
 			functionCall["id"] = toolCall.ID
@@ -443,6 +451,63 @@ func outputFromOAI(resp map[string]any) protocolOutput {
 		out.Total = addProtocolCounts(out.Input, out.Output)
 	}
 	return out
+}
+
+func outputFromResponseConverter(
+	converter transform.ResponseConverter,
+	geminiResp map[string]any,
+	model string,
+) protocolOutput {
+	return outputFromResponseConverterMode(converter, geminiResp, model, true)
+}
+
+func outputFromResponseConverterWithRawArguments(
+	converter transform.ResponseConverter,
+	geminiResp map[string]any,
+	model string,
+) protocolOutput {
+	return outputFromResponseConverterMode(converter, geminiResp, model, false)
+}
+
+func outputFromResponseConverterMode(
+	converter transform.ResponseConverter,
+	geminiResp map[string]any,
+	model string,
+	materializeArguments bool,
+) protocolOutput {
+	if canonical, ok := converter.(transform.CanonicalResponseConverter); ok {
+		return outputFromCanonicalResponse(canonical.ToCanonical(geminiResp, model), materializeArguments)
+	}
+	return outputFromOAI(converter.ToOAI(geminiResp, model))
+}
+
+func outputFromCanonicalResponse(
+	response transform.CanonicalResponse,
+	materializeArguments bool,
+) protocolOutput {
+	out := protocolOutput{
+		Text:              response.Text,
+		Reasoning:         response.Reasoning,
+		Finish:            response.Finish,
+		Input:             response.Usage.PromptTokens,
+		Output:            response.Usage.CompletionTokens,
+		Total:             response.Usage.TotalTokens,
+		CachedInputTokens: response.Usage.CachedInputTokens,
+		ReasoningTokens:   response.Usage.ReasoningTokens,
+	}
+	if len(response.ToolCalls) > 0 {
+		out.ToolCalls = make([]protocolToolCall, len(response.ToolCalls))
+		for index, toolCall := range response.ToolCalls {
+			protocolCall := protocolToolCall{ID: toolCall.ID, Name: toolCall.Name}
+			if materializeArguments {
+				protocolCall.Arguments, protocolCall.argumentsCanonical = jsonStringWithCanonical(toolCall.Arguments)
+			} else {
+				protocolCall.argumentsValue = normalizedIntermediateJSONValue(toolCall.Arguments)
+			}
+			out.ToolCalls[index] = protocolCall
+		}
+	}
+	return normalizeProtocolUsage(out)
 }
 
 func outputFromGeminiChunk(chunk map[string]any) protocolOutput {
