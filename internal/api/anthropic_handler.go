@@ -552,6 +552,9 @@ func anthropicToolInput(toolCall protocolToolCall) any {
 	if toolCall.argumentsValue != nil {
 		return toolCall.argumentsValue
 	}
+	if len(toolCall.argumentsRaw) > 0 {
+		return toolCall.argumentsRaw
+	}
 	if toolCall.argumentsCanonical {
 		raw := json.RawMessage(toolCall.Arguments)
 		if json.Valid(raw) {

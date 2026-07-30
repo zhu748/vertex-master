@@ -217,7 +217,10 @@ func TestOutputFromResponseConverterMatchesOAICompatibilityPath(t *testing.T) {
 	}
 
 	raw := outputFromResponseConverterWithRawArguments(converter, geminiResponse, "gemini-test")
-	if len(raw.ToolCalls) != 1 || raw.ToolCalls[0].argumentsValue == nil || raw.ToolCalls[0].Arguments != "" {
+	if len(raw.ToolCalls) != 1 ||
+		len(raw.ToolCalls[0].argumentsRaw) == 0 ||
+		raw.ToolCalls[0].argumentsValue != nil ||
+		raw.ToolCalls[0].Arguments != "" {
 		t.Fatalf("raw argument fast path was not preserved: %#v", raw.ToolCalls)
 	}
 	rawWire, err := jsonx.Marshal(anthropicMessage("claude-test", "msg_direct", raw))
@@ -245,6 +248,30 @@ func TestOutputFromResponseConverterMatchesOAICompatibilityPath(t *testing.T) {
 	)
 	if !reflect.DeepEqual(rawFallback, legacy) {
 		t.Fatalf("raw custom converter fallback changed output:\n fallback: %#v\n legacy:   %#v", rawFallback, legacy)
+	}
+}
+
+func TestOutputFromCanonicalResponseRawArgumentsFallback(t *testing.T) {
+	arguments := map[string]any{"limit": 1}
+	out := outputFromCanonicalResponse(transform.CanonicalResponse{
+		ToolCalls: []transform.CanonicalToolCall{{
+			ID:        "toolu_1",
+			Name:      "lookup",
+			Arguments: arguments,
+		}},
+	}, false)
+	if len(out.ToolCalls) != 1 {
+		t.Fatalf("tool calls = %d, want 1", len(out.ToolCalls))
+	}
+	toolCall := out.ToolCalls[0]
+	if len(toolCall.argumentsRaw) != 0 ||
+		toolCall.argumentsValue == nil ||
+		toolCall.Arguments != "" ||
+		toolCall.argumentsCanonical {
+		t.Fatalf("unsupported argument value did not use compatibility path: %#v", toolCall)
+	}
+	if !reflect.DeepEqual(toolCall.argumentsValue, arguments) {
+		t.Fatalf("fallback arguments = %#v, want %#v", toolCall.argumentsValue, arguments)
 	}
 }
 

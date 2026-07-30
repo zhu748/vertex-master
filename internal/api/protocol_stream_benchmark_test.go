@@ -524,7 +524,7 @@ func BenchmarkAnthropicCompletedGeminiToolMessage(b *testing.B) {
 	for index := range parts {
 		parts[index] = map[string]any{"functionCall": map[string]any{
 			"id": "toolu_benchmark", "name": "lookup",
-			"args": map[string]any{"query": "benchmark", "index": index},
+			"args": map[string]any{"query": "benchmark", "index": float64(index)},
 		}}
 	}
 	chunk := map[string]any{"candidates": []any{map[string]any{

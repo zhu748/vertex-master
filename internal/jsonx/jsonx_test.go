@@ -347,6 +347,10 @@ func TestMarshalJSONValueStringMatchesMarshalString(t *testing.T) {
 		if got != want {
 			t.Fatalf("MarshalJSONValueString(%#v)=%q, MarshalString()=%q", value, got, want)
 		}
+		gotBytes, ok := MarshalJSONValue(value)
+		if !ok || string(gotBytes) != want {
+			t.Fatalf("MarshalJSONValue(%#v)=%q, MarshalString()=%q", value, gotBytes, want)
+		}
 	}
 }
 
@@ -362,11 +366,17 @@ func TestMarshalJSONValueStringFallsBackForUnsupportedValues(t *testing.T) {
 		if encoded, ok := MarshalJSONValueString(value); ok {
 			t.Fatalf("unsupported %T unexpectedly encoded as %q", value, encoded)
 		}
+		if encoded, ok := MarshalJSONValue(value); ok {
+			t.Fatalf("unsupported %T unexpectedly encoded as %q", value, encoded)
+		}
 	}
 
 	cyclic := map[string]any{}
 	cyclic["self"] = cyclic
 	if encoded, ok := MarshalJSONValueString(cyclic); ok {
+		t.Fatalf("cyclic value unexpectedly encoded as %q", encoded)
+	}
+	if encoded, ok := MarshalJSONValue(cyclic); ok {
 		t.Fatalf("cyclic value unexpectedly encoded as %q", encoded)
 	}
 
@@ -375,6 +385,9 @@ func TestMarshalJSONValueStringFallsBackForUnsupportedValues(t *testing.T) {
 		deep = []any{deep}
 	}
 	if encoded, ok := MarshalJSONValueString(deep); ok {
+		t.Fatalf("overly deep value unexpectedly encoded as %q", encoded)
+	}
+	if encoded, ok := MarshalJSONValue(deep); ok {
 		t.Fatalf("overly deep value unexpectedly encoded as %q", encoded)
 	}
 }

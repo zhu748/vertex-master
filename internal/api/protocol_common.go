@@ -21,8 +21,13 @@ type protocolToolCall struct {
 	Arguments string
 
 	// argumentsValue keeps a locally decoded argument object for protocol
-	// adapters whose wire format accepts JSON directly.
+	// adapters whose wire format accepts JSON directly when the value cannot use
+	// the standard decoded-JSON fast path.
 	argumentsValue any
+
+	// argumentsRaw contains locally encoded JSON for adapters that can embed it
+	// directly without reflecting over the decoded argument object again.
+	argumentsRaw json.RawMessage
 
 	// argumentsCanonical is true only when Arguments was serialized locally by
 	// jsonx. Anthropic responses can then embed it directly without parsing the
@@ -502,7 +507,12 @@ func outputFromCanonicalResponse(
 			if materializeArguments {
 				protocolCall.Arguments, protocolCall.argumentsCanonical = jsonStringWithCanonical(toolCall.Arguments)
 			} else {
-				protocolCall.argumentsValue = normalizedIntermediateJSONValue(toolCall.Arguments)
+				arguments := normalizedIntermediateJSONValue(toolCall.Arguments)
+				if encoded, ok := jsonx.MarshalJSONValue(arguments); ok {
+					protocolCall.argumentsRaw = encoded
+				} else {
+					protocolCall.argumentsValue = arguments
+				}
 			}
 			out.ToolCalls[index] = protocolCall
 		}

@@ -132,10 +132,22 @@ func MarshalString(v any) (string, error) {
 	return encoded, nil
 }
 
-// MarshalJSONValueString serializes the finite value set produced by decoding
+// MarshalJSONValue serializes the finite value set produced by decoding
 // arbitrary JSON into any: nil, bool, string, float64, []any and map[string]any.
 // It avoids reflection and returns ok=false for custom types, non-finite numbers,
-// cycles and unusually deep values so callers can fall back to MarshalString.
+// cycles and unusually deep values so callers can fall back to Marshal.
+func MarshalJSONValue(value any) (encoded []byte, ok bool) {
+	buffer := make([]byte, 0, 64)
+	buffer, ok = appendJSONValue(buffer, value, 0)
+	if !ok {
+		return nil, false
+	}
+	return buffer, true
+}
+
+// MarshalJSONValueString is the string-returning form of MarshalJSONValue. It
+// sizes the result first so arbitrary decoded JSON values still need only one
+// allocation.
 func MarshalJSONValueString(value any) (encoded string, ok bool) {
 	size, ok := jsonValueEncodedSize(value, 0)
 	if !ok {
