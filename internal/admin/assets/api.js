@@ -18,8 +18,9 @@ const API = {
     put(v) { return API.raw('/api/admin/settings', { method: 'PUT', body: JSON.stringify({ settings: v }) }); },
   },
   claudePrompt: {
-    latest() { return API.raw('/api/admin/claude-prompt/latest'); },
-    clear() { return API.raw('/api/admin/claude-prompt/latest', { method: 'DELETE' }); },
+    latest(endpoint) { return API.raw('/api/admin/claude-prompt/latest?endpoint=' + encodeURIComponent(endpoint || 'messages')); },
+    clear(endpoint) { return API.raw('/api/admin/claude-prompt/latest?endpoint=' + encodeURIComponent(endpoint || 'messages'), { method: 'DELETE' }); },
+    preview(value) { return API.raw('/api/admin/claude-prompt/preview', { method: 'POST', body: JSON.stringify(value) }); },
   },
   stats: {
     get() { return API.raw('/api/admin/stats'); },

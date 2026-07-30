@@ -92,6 +92,26 @@ func TestAdminPutSettingsRejectsInvalidProxySettings(t *testing.T) {
 			wantMessage: "查找内容重复",
 		},
 		{
+			name:        "Claude replacement models wrong type",
+			body:        `{"settings":{"claude_prompt_replacements":[{"from":"same","to":"one","models":"fake-model"}]}}`,
+			wantMessage: "models 必须是字符串数组",
+		},
+		{
+			name:        "Claude replacement disabled wrong type",
+			body:        `{"settings":{"claude_prompt_replacements":[{"from":"same","to":"one","disabled":"false"}]}}`,
+			wantMessage: "disabled 必须是布尔值",
+		},
+		{
+			name:        "Claude replacement duplicate model",
+			body:        `{"settings":{"claude_prompt_replacements":[{"from":"same","to":"one","models":["Fake-Model","fake-model"]}]}}`,
+			wantMessage: "包含重复模型",
+		},
+		{
+			name:        "Claude replacement all disabled",
+			body:        `{"settings":{"claude_prompt_replacement_enabled":true,"claude_prompt_replacements":[{"from":"same","to":"one","disabled":true}]}}`,
+			wantMessage: "该规则已启用",
+		},
+		{
 			name:        "Claude injection missing prompt",
 			body:        `{"settings":{"claude_prompt_injection_enabled":true,"claude_prompt_injection_text":"  "}}`,
 			wantMessage: "注入内容不能为空",
@@ -158,8 +178,8 @@ func TestAdminPutSettingsAcceptsValidProxySettings(t *testing.T) {
 		"claude_prompt_injection_text":"injected policy",
 		"claude_prompt_replacement_enabled":true,
 		"claude_prompt_replacements":[
-			{"from":"old policy","to":"new policy"},
-			{"from":"second section","to":"updated section"}
+			{"from":"old policy","to":"new policy","models":["fake-gemini-3.6-flash"]},
+			{"from":"second section","to":"updated section","disabled":true}
 		]
 	}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/admin/settings", bytes.NewBufferString(body))
@@ -196,6 +216,8 @@ func TestAdminPutSettingsAcceptsValidProxySettings(t *testing.T) {
 		"claude_prompt_injection_position":    "prepend",
 		"claude_prompt_injection_text":        "injected policy",
 		"claude_prompt_replacement_enabled":   true,
+		"claude_prompt_replace_from":          "",
+		"claude_prompt_replace_to":            "",
 	}
 	for key, want := range expected {
 		if got := raw[key]; got != want {
@@ -209,8 +231,137 @@ func TestAdminPutSettingsAcceptsValidProxySettings(t *testing.T) {
 	firstRule, _ := rawRules[0].(map[string]any)
 	secondRule, _ := rawRules[1].(map[string]any)
 	if firstRule["from"] != "old policy" || firstRule["to"] != "new policy" ||
-		secondRule["from"] != "second section" || secondRule["to"] != "updated section" {
+		secondRule["from"] != "second section" || secondRule["to"] != "updated section" ||
+		secondRule["disabled"] != true {
 		t.Fatalf("persisted Claude replacement rules are invalid: %#v", rawRules)
+	}
+	firstModels, _ := firstRule["models"].([]any)
+	if len(firstModels) != 1 || firstModels[0] != "fake-gemini-3.6-flash" {
+		t.Fatalf("persisted Claude replacement model scope is invalid: %#v", firstRule)
+	}
+}
+
+func TestAdminPutSettingsClearsStaleLegacyClaudePromptRule(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("VPROXY_CONFIG", path)
+	config.InvalidateCache()
+	t.Cleanup(config.InvalidateCache)
+	if err := os.WriteFile(path, []byte(`{
+		"claude_prompt_replace_from":"stale source",
+		"claude_prompt_replace_to":"stale target"
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adm := newAdminSettingsTestHandler()
+	recorder := httptest.NewRecorder()
+	adm.adminPutSettings(
+		recorder,
+		httptest.NewRequest(
+			http.MethodPut,
+			"/api/admin/settings",
+			bytes.NewBufferString(`{"settings":{"claude_prompt_replacements":[]}}`),
+		),
+	)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("clear rules status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var raw map[string]any
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if raw["claude_prompt_replace_from"] != "" || raw["claude_prompt_replace_to"] != "" {
+		t.Fatalf("stale legacy fields were not cleared: %#v", raw)
+	}
+}
+
+func TestAdminPutSettingsSynchronizesLegacyClaudePromptRule(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("VPROXY_CONFIG", path)
+	config.InvalidateCache()
+	t.Cleanup(config.InvalidateCache)
+	if err := os.WriteFile(path, []byte(`{
+		"claude_prompt_replace_from":"stale source",
+		"claude_prompt_replace_to":"stale target"
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adm := newAdminSettingsTestHandler()
+	recorder := httptest.NewRecorder()
+	adm.adminPutSettings(
+		recorder,
+		httptest.NewRequest(
+			http.MethodPut,
+			"/api/admin/settings",
+			bytes.NewBufferString(`{"settings":{"claude_prompt_replacements":[{"from":"current source","to":"current target"}]}}`),
+		),
+	)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("save rules status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var raw map[string]any
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if raw["claude_prompt_replace_from"] != "current source" ||
+		raw["claude_prompt_replace_to"] != "current target" {
+		t.Fatalf("legacy fields were not synchronized: %#v", raw)
+	}
+}
+
+func TestAdminPutSettingsClearsRecentPromptsOnlyWhenPolicyChanges(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		to          string
+		wantCleared bool
+	}{
+		{name: "unchanged", to: "current target", wantCleared: false},
+		{name: "changed", to: "new target", wantCleared: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			t.Setenv("VPROXY_CONFIG", path)
+			config.InvalidateCache()
+			t.Cleanup(config.InvalidateCache)
+			cfg := config.DefaultConfig()
+			cfg.ClaudePromptReplacements = []config.ClaudePromptReplacementRule{{
+				From: "current source",
+				To:   "current target",
+			}}
+			store := &claudePromptStore{}
+			store.Record("model", "messages", claudePromptPolicyResult{OriginalPrompt: "generate"})
+			store.Record("model", "count_tokens", claudePromptPolicyResult{OriginalPrompt: "count"})
+			adm := &AdminHandler{
+				handler:       handler{cfg: config.StaticProvider(cfg)},
+				claudePrompts: store,
+			} //nolint:exhaustruct
+			body := fmt.Sprintf(
+				`{"settings":{"claude_prompt_replacements":[{"from":"current source","to":%q}]}}`,
+				test.to,
+			)
+			recorder := httptest.NewRecorder()
+			adm.adminPutSettings(
+				recorder,
+				httptest.NewRequest(http.MethodPut, "/api/admin/settings", bytes.NewBufferString(body)),
+			)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("save status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+			_, messagesAvailable := store.Latest("messages")
+			_, countAvailable := store.Latest("count_tokens")
+			wantAvailable := !test.wantCleared
+			if messagesAvailable != wantAvailable || countAvailable != wantAvailable {
+				t.Fatalf("unexpected records after save: messages=%v count=%v wantCleared=%v",
+					messagesAvailable, countAvailable, test.wantCleared)
+			}
+		})
 	}
 }
 
@@ -252,7 +403,7 @@ func TestAdminPutSettingsLegacyEditPreservesAdditionalClaudeRules(t *testing.T) 
 	cfg := config.DefaultConfig()
 	cfg.ClaudePromptReplacementEnabled = true
 	cfg.ClaudePromptReplacements = []config.ClaudePromptReplacementRule{
-		{From: "first", To: "old"},
+		{From: "first", To: "old", Disabled: true, Models: []string{"fake-model"}},
 		{From: "second", To: "keep"},
 	}
 	adm := &AdminHandler{handler: handler{cfg: config.StaticProvider(cfg)}} //nolint:exhaustruct
@@ -282,7 +433,9 @@ func TestAdminPutSettingsLegacyEditPreservesAdditionalClaudeRules(t *testing.T) 
 	if err := json.Unmarshal(raw["claude_prompt_replacements"], &rules); err != nil {
 		t.Fatal(err)
 	}
-	if len(rules) != 2 || rules[0].To != "updated" || rules[1].From != "second" {
+	if len(rules) != 2 || rules[0].To != "updated" || !rules[0].Disabled ||
+		len(rules[0].Models) != 1 || rules[0].Models[0] != "fake-model" ||
+		rules[1].From != "second" {
 		t.Fatalf("legacy edit discarded multi-rule config: %#v", rules)
 	}
 }

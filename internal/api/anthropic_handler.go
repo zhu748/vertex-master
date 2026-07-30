@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"slices"
 	"strings"
@@ -48,7 +50,7 @@ func (h *AnthropicHandler) handleMessages(w http.ResponseWriter, r *http.Request
 
 	model, payload, err := h.convertAnthropicRequest(body, rawModel, actualModel, "messages")
 	if err != nil {
-		h.anthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		h.writeAnthropicConversionError(w, err)
 		return
 	}
 
@@ -93,7 +95,7 @@ func (h *AnthropicHandler) handleCountTokens(w http.ResponseWriter, r *http.Requ
 		"count_tokens",
 	)
 	if err != nil {
-		h.anthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		h.writeAnthropicConversionError(w, err)
 		return
 	}
 	total, countErr := h.vc.CountTokensExact(r.Context(), model, protocolInputContents(payload))
@@ -114,7 +116,7 @@ func (h *AnthropicHandler) convertAnthropicRequest(
 	if err != nil {
 		return "", nil, err
 	}
-	promptResult, err := applyClaudePromptPolicy(chatBody, h.cfg)
+	promptResult, err := applyClaudePromptPolicy(chatBody, h.cfg, rawModel, actualModel)
 	if err != nil {
 		return "", nil, err
 	}
@@ -126,6 +128,18 @@ func (h *AnthropicHandler) convertAnthropicRequest(
 	transform.ApplyImageConfig(payload, chatBody)
 	h.claudePrompts.Record(rawModel, endpoint, promptResult)
 	return model, payload, nil
+}
+
+func (h *AnthropicHandler) writeAnthropicConversionError(w http.ResponseWriter, err error) {
+	var policyErr *claudePromptPolicyError
+	if !errors.As(err, &policyErr) {
+		h.anthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	if policyErr.status >= http.StatusInternalServerError {
+		log.Printf("[ClaudePrompt] invalid prompt policy: %v", policyErr)
+	}
+	h.anthropicError(w, policyErr.status, policyErr.typ, policyErr.message)
 }
 
 func (h *AnthropicHandler) readAnthropicBody(w http.ResponseWriter, r *http.Request) (map[string]any, bool) {

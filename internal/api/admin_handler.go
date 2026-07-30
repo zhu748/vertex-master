@@ -275,6 +275,8 @@ func (adm *AdminHandler) handleAdminAPI(w http.ResponseWriter, r *http.Request) 
 		}
 	case "/claude-prompt/latest":
 		adm.adminClaudePromptLatest(w, r)
+	case "/claude-prompt/preview":
+		adm.adminClaudePromptPreview(w, r)
 	case "/stats":
 		if !requireMethod(http.MethodGet) {
 			return

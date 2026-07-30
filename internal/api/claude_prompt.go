@@ -15,6 +15,9 @@ const (
 	maxClaudePromptSettingBytes     = 1 << 20
 	maxClaudePromptRecordBytes      = 1 << 20
 	maxClaudePromptReplacementRules = 32
+	maxClaudePromptRuleModels       = 16
+	maxClaudeProcessedPromptBytes   = 8 << 20
+	maxClaudeReplacementWorkBytes   = 64 << 20
 )
 
 type claudePromptPolicyResult struct {
@@ -23,9 +26,38 @@ type claudePromptPolicyResult struct {
 	HadSystem        bool
 	ReplacementCount int
 	ReplacementRules int
+	ApplicableRules  int
 	MatchedRules     int
 	RuleMatchCounts  []int
+	RuleApplicable   []bool
 	InjectionApplied bool
+}
+
+type claudePromptPolicyError struct {
+	status  int
+	typ     string
+	message string
+	detail  string
+}
+
+func (e *claudePromptPolicyError) Error() string { return e.detail }
+
+func claudePromptConfigError(err error) error {
+	return &claudePromptPolicyError{
+		status:  http.StatusInternalServerError,
+		typ:     "api_error",
+		message: "Claude prompt policy configuration is invalid",
+		detail:  err.Error(),
+	}
+}
+
+func claudePromptLimitError(detail string) error {
+	return &claudePromptPolicyError{
+		status:  http.StatusRequestEntityTooLarge,
+		typ:     "invalid_request_error",
+		message: "Claude system prompt exceeds the configured processing limit",
+		detail:  detail,
+	}
 }
 
 // applyClaudePromptPolicy operates on the normalized Chat request produced
@@ -35,7 +67,16 @@ type claudePromptPolicyResult struct {
 func applyClaudePromptPolicy(
 	chatBody map[string]any,
 	cfg config.ConfigProvider,
+	models ...string,
 ) (claudePromptPolicyResult, error) {
+	requestedModel := ""
+	actualModel := ""
+	if len(models) > 0 {
+		requestedModel = models[0]
+	}
+	if len(models) > 1 {
+		actualModel = models[1]
+	}
 	messages, _ := chatBody["messages"].([]any)
 	systemTexts := make([]string, 0, 2)
 	nonSystemMessages := make([]any, 0, len(messages))
@@ -62,65 +103,84 @@ func applyClaudePromptPolicy(
 	if cfg == nil {
 		return result, nil
 	}
+	policy := cfg.ClaudePromptPolicy()
+	if err := validateClaudePromptPolicyConfig(policy); err != nil {
+		return result, claudePromptConfigError(err)
+	}
+	limit := maxClaudePromptBytesForPolicy(policy)
+	if (policy.ReplacementEnabled || policy.InjectionEnabled) && len(original) > limit {
+		return result, claudePromptLimitError(fmt.Sprintf(
+			"claude system prompt exceeds %d bytes before processing",
+			limit,
+		))
+	}
 
 	effective := original
-	if cfg.ClaudePromptReplacementEnabled() {
-		rules := cfg.ClaudePromptReplacementRules()
-		if err := validateClaudePromptReplacementRules(rules); err != nil {
-			return result, err
-		}
+	if policy.ReplacementEnabled {
+		rules := policy.ReplacementRules
 		result.ReplacementRules = len(rules)
 		result.RuleMatchCounts = make([]int, len(rules))
-		limit := maxClaudeProcessedPromptBytes(cfg)
+		result.RuleApplicable = make([]bool, len(rules))
+		workBytes := 0
 		for index, rule := range rules {
-			if rule.From == "" {
+			if rule.Disabled || !claudePromptRuleAppliesToModel(rule, requestedModel, actualModel) {
 				continue
 			}
-			matches := strings.Count(effective, rule.From)
-			result.RuleMatchCounts[index] = matches
-			if matches == 0 {
-				continue
+			result.ApplicableRules++
+			result.RuleApplicable[index] = true
+			nextWorkBytes, withinWorkLimit := addClaudeReplacementWork(workBytes, len(effective))
+			if !withinWorkLimit {
+				return result, claudePromptLimitError(fmt.Sprintf(
+					"claude prompt replacement work exceeds %d bytes at rule %d",
+					maxClaudeReplacementWorkBytes,
+					index+1,
+				))
 			}
-			if !claudeReplacementSizeAllowed(
-				len(effective),
-				len(rule.From),
-				len(rule.To),
-				matches,
+			workBytes = nextWorkBytes
+			replaced, matches, err := replaceAllClaudeLiteralWithinLimit(
+				effective,
+				rule.From,
+				rule.To,
 				limit,
-			) {
-				return result, fmt.Errorf(
+			)
+			result.RuleMatchCounts[index] = matches
+			if err != nil {
+				return result, claudePromptLimitError(fmt.Sprintf(
 					"claude system prompt exceeds %d bytes after replacement rule %d",
 					limit,
 					index+1,
-				)
+				))
+			}
+			if matches == 0 {
+				continue
 			}
 			result.ReplacementCount += matches
 			result.MatchedRules++
-			effective = strings.ReplaceAll(effective, rule.From, rule.To)
+			effective = replaced
 		}
 	}
 
-	if cfg.ClaudePromptInjectionEnabled() {
-		injection := cfg.ClaudePromptInjectionText()
+	if policy.InjectionEnabled {
+		injection := policy.InjectionText
 		if injection != "" {
 			result.InjectionApplied = true
 			var combined string
 			var err error
-			if cfg.ClaudePromptInjectionPosition() == "prepend" {
+			if policy.InjectionPosition == "prepend" {
 				combined, err = joinClaudeSystemPromptsWithinLimit(
 					injection,
 					effective,
-					maxClaudeProcessedPromptBytes(cfg),
+					limit,
 				)
 			} else {
 				combined, err = joinClaudeSystemPromptsWithinLimit(
 					effective,
 					injection,
-					maxClaudeProcessedPromptBytes(cfg),
+					limit,
 				)
 			}
 			if err != nil {
-				return result, err
+				return result, claudePromptLimitError(err.Error())
 			}
 			effective = combined
 		}
@@ -139,6 +199,32 @@ func applyClaudePromptPolicy(
 	rewritten = append(rewritten, nonSystemMessages...)
 	chatBody["messages"] = rewritten
 	return result, nil
+}
+
+func validateClaudePromptPolicyConfig(policy config.ClaudePromptPolicyConfig) error {
+	if policy.ReplacementEnabled {
+		if err := validateClaudePromptReplacementRules(policy.ReplacementRules); err != nil {
+			return err
+		}
+		activeRules := 0
+		for _, rule := range policy.ReplacementRules {
+			if !rule.Disabled {
+				activeRules++
+			}
+		}
+		if activeRules == 0 {
+			return fmt.Errorf("claude prompt replacement is enabled without an active rule")
+		}
+	}
+	if policy.InjectionEnabled {
+		if strings.TrimSpace(policy.InjectionText) == "" {
+			return fmt.Errorf("claude prompt injection is enabled without content")
+		}
+		if len(policy.InjectionText) > maxClaudePromptSettingBytes {
+			return fmt.Errorf("configured Claude prompt injection exceeds 1 MiB")
+		}
+	}
+	return nil
 }
 
 func validateClaudePromptReplacementRules(
@@ -161,11 +247,97 @@ func validateClaudePromptReplacementRules(
 		}
 		seen[rule.From] = struct{}{}
 		totalBytes += len(rule.From) + len(rule.To)
+		if len(rule.Models) > maxClaudePromptRuleModels {
+			return fmt.Errorf(
+				"claude prompt replacement rule %d has more than %d models",
+				index+1,
+				maxClaudePromptRuleModels,
+			)
+		}
+		seenModels := make(map[string]struct{}, len(rule.Models))
+		for _, model := range rule.Models {
+			model = strings.TrimSpace(model)
+			if model == "" {
+				return fmt.Errorf("claude prompt replacement rule %d has an empty model", index+1)
+			}
+			normalized := strings.ToLower(model)
+			if _, duplicate := seenModels[normalized]; duplicate {
+				return fmt.Errorf("claude prompt replacement rule %d has a duplicate model", index+1)
+			}
+			seenModels[normalized] = struct{}{}
+			totalBytes += len(model)
+		}
 		if totalBytes > maxClaudePromptSettingBytes {
 			return fmt.Errorf("configured Claude prompt replacement rules exceed 1 MiB")
 		}
 	}
 	return nil
+}
+
+func claudePromptRuleAppliesToModel(
+	rule config.ClaudePromptReplacementRule,
+	requestedModel string,
+	actualModel string,
+) bool {
+	if len(rule.Models) == 0 {
+		return true
+	}
+	for _, configuredModel := range rule.Models {
+		configuredModel = strings.TrimSpace(configuredModel)
+		if strings.EqualFold(configuredModel, requestedModel) ||
+			strings.EqualFold(configuredModel, actualModel) {
+			return true
+		}
+	}
+	return false
+}
+
+func replaceAllClaudeLiteralWithinLimit(
+	value string,
+	from string,
+	to string,
+	limit int,
+) (string, int, error) {
+	firstMatch := strings.Index(value, from)
+	if firstMatch < 0 {
+		return value, 0, nil
+	}
+
+	var builder strings.Builder
+	builder.Grow(min(len(value), limit))
+	start := 0
+	match := firstMatch
+	matches := 0
+	for match >= 0 {
+		if len(value[start:match]) > limit-builder.Len() {
+			return "", matches, fmt.Errorf("replacement exceeds limit")
+		}
+		builder.WriteString(value[start:match])
+		if len(to) > limit-builder.Len() {
+			return "", matches, fmt.Errorf("replacement exceeds limit")
+		}
+		builder.WriteString(to)
+		matches++
+		start = match + len(from)
+		next := strings.Index(value[start:], from)
+		if next < 0 {
+			break
+		}
+		match = start + next
+	}
+	if len(value[start:]) > limit-builder.Len() {
+		return "", matches, fmt.Errorf("replacement exceeds limit")
+	}
+	builder.WriteString(value[start:])
+	return builder.String(), matches, nil
+}
+
+func addClaudeReplacementWork(current int, next int) (int, bool) {
+	if current < 0 || next < 0 || current > maxClaudeReplacementWorkBytes ||
+		next > maxClaudeReplacementWorkBytes-current {
+		return current, false
+	}
+	return current + next, true
 }
 
 func joinClaudeSystemPrompts(first, second string) string {
@@ -190,22 +362,12 @@ func joinClaudeSystemPromptsWithinLimit(first, second string, limit int) (string
 	return joinClaudeSystemPrompts(first, second), nil
 }
 
-func maxClaudeProcessedPromptBytes(cfg config.ConfigProvider) int {
-	const fallback = 64 << 20
-	if cfg == nil || cfg.MaxRequestMB() < 1 {
-		return fallback
+func maxClaudePromptBytesForPolicy(policy config.ClaudePromptPolicyConfig) int {
+	requestLimit := policy.MaxRequestMB << 20
+	if requestLimit < 1 {
+		requestLimit = maxClaudeProcessedPromptBytes
 	}
-	return cfg.MaxRequestMB() << 20
-}
-
-func claudeReplacementSizeAllowed(current, from, to, matches, limit int) bool {
-	if current > limit {
-		return false
-	}
-	if matches == 0 || to <= from {
-		return true
-	}
-	return matches <= (limit-current)/(to-from)
+	return min(requestLimit, maxClaudeProcessedPromptBytes)
 }
 
 type claudePromptRecord struct {
@@ -217,8 +379,10 @@ type claudePromptRecord struct {
 	HadSystem          bool
 	ReplacementCount   int
 	ReplacementRules   int
+	ApplicableRules    int
 	MatchedRules       int
 	RuleMatchCounts    []int
+	RuleApplicable     []bool
 	InjectionApplied   bool
 	OriginalBytes      int
 	EffectiveBytes     int
@@ -227,7 +391,8 @@ type claudePromptRecord struct {
 }
 
 type claudePromptStore struct {
-	latest atomic.Pointer[claudePromptRecord]
+	latestMessages    atomic.Pointer[claudePromptRecord]
+	latestCountTokens atomic.Pointer[claudePromptRecord]
 }
 
 func (s *claudePromptStore) Record(
@@ -241,7 +406,8 @@ func (s *claudePromptStore) Record(
 	original, originalTruncated := truncateClaudePromptRecord(result.OriginalPrompt)
 	effective, effectiveTruncated := truncateClaudePromptRecord(result.EffectivePrompt)
 	ruleMatchCounts := append([]int(nil), result.RuleMatchCounts...)
-	s.latest.Store(&claudePromptRecord{
+	ruleApplicable := append([]bool(nil), result.RuleApplicable...)
+	s.slot(endpoint).Store(&claudePromptRecord{
 		OriginalPrompt:     original,
 		EffectivePrompt:    effective,
 		Model:              model,
@@ -250,8 +416,10 @@ func (s *claudePromptStore) Record(
 		HadSystem:          result.HadSystem,
 		ReplacementCount:   result.ReplacementCount,
 		ReplacementRules:   result.ReplacementRules,
+		ApplicableRules:    result.ApplicableRules,
 		MatchedRules:       result.MatchedRules,
 		RuleMatchCounts:    ruleMatchCounts,
+		RuleApplicable:     ruleApplicable,
 		InjectionApplied:   result.InjectionApplied,
 		OriginalBytes:      len(result.OriginalPrompt),
 		EffectiveBytes:     len(result.EffectivePrompt),
@@ -260,23 +428,44 @@ func (s *claudePromptStore) Record(
 	})
 }
 
-func (s *claudePromptStore) Latest() (claudePromptRecord, bool) {
+func (s *claudePromptStore) Latest(endpoints ...string) (claudePromptRecord, bool) {
 	if s == nil {
 		return claudePromptRecord{}, false
 	}
-	record := s.latest.Load()
+	endpoint := "messages"
+	if len(endpoints) > 0 {
+		endpoint = endpoints[0]
+	}
+	record := s.slot(endpoint).Load()
 	if record == nil {
 		return claudePromptRecord{}, false
 	}
 	copyOfRecord := *record
 	copyOfRecord.RuleMatchCounts = append([]int(nil), record.RuleMatchCounts...)
+	copyOfRecord.RuleApplicable = append([]bool(nil), record.RuleApplicable...)
 	return copyOfRecord, true
 }
 
-func (s *claudePromptStore) Clear() {
+func (s *claudePromptStore) Clear(endpoints ...string) {
 	if s != nil {
-		s.latest.Store(nil)
+		endpoint := "messages"
+		if len(endpoints) > 0 {
+			endpoint = endpoints[0]
+		}
+		if endpoint == "all" {
+			s.latestMessages.Store(nil)
+			s.latestCountTokens.Store(nil)
+			return
+		}
+		s.slot(endpoint).Store(nil)
 	}
+}
+
+func (s *claudePromptStore) slot(endpoint string) *atomic.Pointer[claudePromptRecord] {
+	if endpoint == "count_tokens" {
+		return &s.latestCountTokens
+	}
+	return &s.latestMessages
 }
 
 func truncateClaudePromptRecord(value string) (string, bool) {
@@ -290,11 +479,105 @@ func truncateClaudePromptRecord(value string) (string, bool) {
 	return value[:end], true
 }
 
+type claudePromptPreviewRequest struct {
+	OriginalPrompt     string                               `json:"original_prompt"`
+	Model              string                               `json:"model"`
+	ReplacementEnabled bool                                 `json:"replacement_enabled"`
+	Replacements       []config.ClaudePromptReplacementRule `json:"replacements"`
+	InjectionEnabled   bool                                 `json:"injection_enabled"`
+	InjectionPosition  string                               `json:"injection_position"`
+	InjectionText      string                               `json:"injection_text"`
+}
+
+func (adm *AdminHandler) adminClaudePromptPreview(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		adm.adminMethodNotAllowed(w)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	var body claudePromptPreviewRequest
+	if !adm.decodeAdminBody(w, r, &body) {
+		return
+	}
+	if err := validateAdminClaudePromptReplacementRules(body.Replacements); err != nil {
+		writeJSON(w, http.StatusBadRequest, adminErr(err.Error()))
+		return
+	}
+	if body.InjectionPosition != "prepend" && body.InjectionPosition != "append" {
+		writeJSON(w, http.StatusBadRequest, adminErr("injection_position 必须是 prepend 或 append"))
+		return
+	}
+	if body.InjectionEnabled && strings.TrimSpace(body.InjectionText) == "" {
+		writeJSON(w, http.StatusBadRequest, adminErr("启用提示词注入时，注入内容不能为空"))
+		return
+	}
+	if len(body.InjectionText) > maxClaudePromptSettingBytes {
+		writeJSON(w, http.StatusBadRequest, adminErr("注入内容不能超过 1 MiB"))
+		return
+	}
+
+	previewConfig := config.DefaultConfig()
+	if adm.cfg != nil {
+		previewConfig.MaxRequestMB = adm.cfg.MaxRequestMB()
+	}
+	previewConfig.ClaudePromptReplacementEnabled = body.ReplacementEnabled
+	previewConfig.ClaudePromptReplacements = body.Replacements
+	previewConfig.ClaudePromptInjectionEnabled = body.InjectionEnabled
+	previewConfig.ClaudePromptInjectionPosition = body.InjectionPosition
+	previewConfig.ClaudePromptInjectionText = body.InjectionText
+	requestedModel := strings.TrimSpace(body.Model)
+	actualModel := requestedModel
+	if adm.cfg != nil && requestedModel != "" {
+		actualModel, _ = resolveRequestedModel(requestedModel, adm.cfg)
+	}
+	chatBody := map[string]any{"messages": []any{
+		map[string]any{"role": "system", "content": body.OriginalPrompt},
+		map[string]any{"role": "user", "content": "preview"},
+	}}
+	result, err := applyClaudePromptPolicy(
+		chatBody,
+		config.StaticProvider(previewConfig),
+		requestedModel,
+		actualModel,
+	)
+	if err != nil {
+		var policyErr *claudePromptPolicyError
+		if promptError, ok := err.(*claudePromptPolicyError); ok {
+			policyErr = promptError
+		}
+		if policyErr != nil && policyErr.status == http.StatusRequestEntityTooLarge {
+			writeJSON(w, policyErr.status, adminErr(policyErr.message))
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, adminErr(err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"effective_prompt":  result.EffectivePrompt,
+		"replacement_count": result.ReplacementCount,
+		"replacement_rules": result.ReplacementRules,
+		"applicable_rules":  result.ApplicableRules,
+		"matched_rules":     result.MatchedRules,
+		"rule_match_counts": result.RuleMatchCounts,
+		"rule_applicable":   result.RuleApplicable,
+		"injection_applied": result.InjectionApplied,
+		"effective_bytes":   len(result.EffectivePrompt),
+	})
+}
+
 func (adm *AdminHandler) adminClaudePromptLatest(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
+	endpoint := r.URL.Query().Get("endpoint")
+	if endpoint == "" {
+		endpoint = "messages"
+	}
+	if endpoint != "messages" && endpoint != "count_tokens" {
+		writeJSON(w, http.StatusBadRequest, adminErr("endpoint 必须是 messages 或 count_tokens"))
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
-		record, ok := adm.claudePrompts.Latest()
+		record, ok := adm.claudePrompts.Latest(endpoint)
 		if !ok {
 			writeJSON(w, http.StatusOK, map[string]any{"available": false})
 			return
@@ -309,8 +592,10 @@ func (adm *AdminHandler) adminClaudePromptLatest(w http.ResponseWriter, r *http.
 			"had_system":          record.HadSystem,
 			"replacement_count":   record.ReplacementCount,
 			"replacement_rules":   record.ReplacementRules,
+			"applicable_rules":    record.ApplicableRules,
 			"matched_rules":       record.MatchedRules,
 			"rule_match_counts":   record.RuleMatchCounts,
+			"rule_applicable":     record.RuleApplicable,
 			"injection_applied":   record.InjectionApplied,
 			"original_bytes":      record.OriginalBytes,
 			"effective_bytes":     record.EffectiveBytes,
@@ -318,7 +603,7 @@ func (adm *AdminHandler) adminClaudePromptLatest(w http.ResponseWriter, r *http.
 			"effective_truncated": record.EffectiveTruncated,
 		})
 	case http.MethodDelete:
-		adm.claudePrompts.Clear()
+		adm.claudePrompts.Clear(endpoint)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	default:
 		adm.adminMethodNotAllowed(w)

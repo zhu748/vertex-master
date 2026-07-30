@@ -20,8 +20,8 @@ func TestClaudePromptConfigDefaultsAndProvider(t *testing.T) {
 	cfg.ClaudePromptInjectionText = "inject"
 	cfg.ClaudePromptReplacementEnabled = true
 	cfg.ClaudePromptReplacements = []ClaudePromptReplacementRule{
-		{From: "from one", To: "to one"},
-		{From: "from two", To: "to two"},
+		{From: "from one", To: "to one", Models: []string{"fake-model"}},
+		{From: "from two", To: "to two", Disabled: true},
 	}
 	provider := StaticProvider(cfg)
 	rules := provider.ClaudePromptReplacementRules()
@@ -33,8 +33,20 @@ func TestClaudePromptConfigDefaultsAndProvider(t *testing.T) {
 		t.Fatalf("static provider lost Claude prompt settings")
 	}
 	rules[0].From = "mutated"
-	if provider.ClaudePromptReplacementRules()[0].From != "from one" {
+	rules[0].Models[0] = "mutated-model"
+	if current := provider.ClaudePromptReplacementRules(); current[0].From != "from one" ||
+		current[0].Models[0] != "fake-model" {
 		t.Fatal("provider exposed its replacement rule slice for mutation")
+	}
+	policy := provider.ClaudePromptPolicy()
+	if !policy.InjectionEnabled || !policy.ReplacementEnabled ||
+		policy.InjectionPosition != "prepend" || len(policy.ReplacementRules) != 2 ||
+		!policy.ReplacementRules[1].Disabled || policy.MaxRequestMB != cfg.MaxRequestMB {
+		t.Fatalf("static provider lost the Claude prompt policy snapshot: %#v", policy)
+	}
+	policy.ReplacementRules[0].Models[0] = "mutated-policy"
+	if provider.ClaudePromptPolicy().ReplacementRules[0].Models[0] != "fake-model" {
+		t.Fatal("policy snapshot exposed nested model filters for mutation")
 	}
 
 	cfg.ClaudePromptInjectionPosition = "invalid"

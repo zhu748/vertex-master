@@ -262,15 +262,18 @@ func TestClaudePromptStoreDoesNotExposeRuleMatchSlice(t *testing.T) {
 	store := &claudePromptStore{}
 	store.Record("model", "messages", claudePromptPolicyResult{
 		RuleMatchCounts: []int{2, 1},
+		RuleApplicable:  []bool{true, false},
 	})
 	record, ok := store.Latest()
 	if !ok {
 		t.Fatal("expected latest record")
 	}
 	record.RuleMatchCounts[0] = 99
+	record.RuleApplicable[0] = false
 	unchanged, _ := store.Latest()
-	if unchanged.RuleMatchCounts[0] != 2 {
-		t.Fatalf("stored match counts were mutated: %#v", unchanged.RuleMatchCounts)
+	if unchanged.RuleMatchCounts[0] != 2 || !unchanged.RuleApplicable[0] {
+		t.Fatalf("stored rule metadata was mutated: counts=%#v applicable=%#v",
+			unchanged.RuleMatchCounts, unchanged.RuleApplicable)
 	}
 }
 
@@ -318,6 +321,19 @@ func TestAdminClaudePromptLatestLifecycle(t *testing.T) {
 	if len(matchCounts) != 1 || matchCounts[0] != float64(1) {
 		t.Fatalf("latest response lost per-rule match counts: %#v", response)
 	}
+	store.Record("count-model", "count_tokens", claudePromptPolicyResult{OriginalPrompt: "count prompt"})
+	countGet := httptest.NewRecorder()
+	adm.adminClaudePromptLatest(
+		countGet,
+		httptest.NewRequest(
+			http.MethodGet,
+			"/api/admin/claude-prompt/latest?endpoint=count_tokens",
+			nil,
+		),
+	)
+	if !strings.Contains(countGet.Body.String(), `"original_prompt":"count prompt"`) {
+		t.Fatalf("count_tokens latest response=%s", countGet.Body.String())
+	}
 
 	cleared := httptest.NewRecorder()
 	adm.adminClaudePromptLatest(
@@ -326,6 +342,9 @@ func TestAdminClaudePromptLatestLifecycle(t *testing.T) {
 	)
 	if _, ok := store.Latest(); ok {
 		t.Fatal("DELETE did not clear the recent Claude prompt")
+	}
+	if _, ok := store.Latest("count_tokens"); !ok {
+		t.Fatal("clearing messages unexpectedly cleared count_tokens")
 	}
 }
 
@@ -405,5 +424,186 @@ func TestClaudePromptLatestAdminRouteIntegration(t *testing.T) {
 		latest["model"] != "fake-gemini-3.6-flash" ||
 		latest["endpoint"] != "messages" {
 		t.Fatalf("unexpected integrated latest prompt response: %#v", latest)
+	}
+}
+
+func TestClaudePromptPolicyHonorsDisabledAndModelScopedRules(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ClaudePromptReplacementEnabled = true
+	cfg.ClaudePromptReplacements = []config.ClaudePromptReplacementRule{
+		{From: "skip", To: "wrong", Disabled: true},
+		{From: "target", To: "changed", Models: []string{"fake-gemini-3.6-flash"}},
+		{From: "other", To: "wrong", Models: []string{"another-model"}},
+	}
+	chatBody := map[string]any{"messages": []any{
+		map[string]any{"role": "system", "content": "skip target other"},
+		map[string]any{"role": "user", "content": "hello"},
+	}}
+
+	result, err := applyClaudePromptPolicy(
+		chatBody,
+		config.StaticProvider(cfg),
+		"fake-gemini-3.6-flash",
+		"gemini-3.6-flash",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.EffectivePrompt != "skip changed other" || result.ReplacementRules != 3 ||
+		result.ApplicableRules != 1 || result.MatchedRules != 1 ||
+		len(result.RuleApplicable) != 3 || result.RuleApplicable[0] ||
+		!result.RuleApplicable[1] || result.RuleApplicable[2] ||
+		result.RuleMatchCounts[1] != 1 {
+		t.Fatalf("unexpected scoped replacement result: %#v", result)
+	}
+
+	cfg.ClaudePromptReplacements = []config.ClaudePromptReplacementRule{{
+		From: "target", To: "actual", Models: []string{"gemini-3.6-flash"},
+	}}
+	chatBody = map[string]any{"messages": []any{
+		map[string]any{"role": "system", "content": "target"},
+	}}
+	result, err = applyClaudePromptPolicy(
+		chatBody,
+		config.StaticProvider(cfg),
+		"my-alias",
+		"gemini-3.6-flash",
+	)
+	if err != nil || result.EffectivePrompt != "actual" {
+		t.Fatalf("actual model scope was not honored: result=%#v err=%v", result, err)
+	}
+}
+
+func TestReplaceAllClaudeLiteralWithinLimit(t *testing.T) {
+	for _, test := range []struct {
+		value string
+		from  string
+		to    string
+		want  string
+		count int
+	}{
+		{value: "no match", from: "x", to: "y", want: "no match", count: 0},
+		{value: "aaaa", from: "aa", to: "b", want: "bb", count: 2},
+		{value: "a-b-a", from: "a", to: "long", want: "long-b-long", count: 2},
+		{value: "remove-me", from: "remove-", to: "", want: "me", count: 1},
+	} {
+		got, count, err := replaceAllClaudeLiteralWithinLimit(test.value, test.from, test.to, 1024)
+		if err != nil || got != test.want || count != test.count {
+			t.Fatalf("replace %q: got=%q count=%d err=%v", test.value, got, count, err)
+		}
+	}
+	if _, _, err := replaceAllClaudeLiteralWithinLimit("aaaa", "a", "long", 8); err == nil {
+		t.Fatal("expected output limit error")
+	}
+}
+
+func TestClaudeReplacementWorkBudget(t *testing.T) {
+	work, ok := addClaudeReplacementWork(maxClaudeReplacementWorkBytes-1, 1)
+	if !ok || work != maxClaudeReplacementWorkBytes {
+		t.Fatalf("exact work budget should be accepted: work=%d ok=%v", work, ok)
+	}
+	if _, ok := addClaudeReplacementWork(work, 1); ok {
+		t.Fatal("work above the replacement budget should be rejected")
+	}
+}
+
+func TestClaudePromptPolicyEnforcesIndependentSystemLimit(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.MaxRequestMB = 64
+	cfg.ClaudePromptReplacementEnabled = true
+	cfg.ClaudePromptReplacements = []config.ClaudePromptReplacementRule{{From: "missing", To: "value"}}
+	chatBody := map[string]any{"messages": []any{
+		map[string]any{"role": "system", "content": strings.Repeat("x", maxClaudeProcessedPromptBytes+1)},
+	}}
+
+	_, err := applyClaudePromptPolicy(chatBody, config.StaticProvider(cfg))
+	policyErr, ok := err.(*claudePromptPolicyError)
+	if !ok || policyErr.status != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected typed 413 prompt limit error, got %T %v", err, err)
+	}
+}
+
+func TestClaudePromptPolicyRejectsInvalidManualInjectionConfig(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ClaudePromptInjectionEnabled = true
+	cfg.ClaudePromptInjectionText = "   "
+	chatBody := map[string]any{"messages": []any{
+		map[string]any{"role": "system", "content": "system"},
+	}}
+
+	_, err := applyClaudePromptPolicy(chatBody, config.StaticProvider(cfg))
+	policyErr, ok := err.(*claudePromptPolicyError)
+	if !ok || policyErr.status != http.StatusInternalServerError ||
+		!strings.Contains(policyErr.Error(), "without content") {
+		t.Fatalf("expected typed invalid config error, got %T %v", err, err)
+	}
+}
+
+func TestClaudePromptStoreSeparatesMessagesAndCountTokens(t *testing.T) {
+	store := &claudePromptStore{}
+	store.Record("generate-model", "messages", claudePromptPolicyResult{OriginalPrompt: "generate"})
+	store.Record("count-model", "count_tokens", claudePromptPolicyResult{OriginalPrompt: "count"})
+
+	generate, generateOK := store.Latest("messages")
+	count, countOK := store.Latest("count_tokens")
+	if !generateOK || !countOK || generate.OriginalPrompt != "generate" || count.OriginalPrompt != "count" {
+		t.Fatalf("endpoint records were mixed: messages=%#v count=%#v", generate, count)
+	}
+	store.Clear("count_tokens")
+	if _, ok := store.Latest("count_tokens"); ok {
+		t.Fatal("count_tokens record was not cleared")
+	}
+	if _, ok := store.Latest("messages"); !ok {
+		t.Fatal("clearing count_tokens also cleared messages")
+	}
+}
+
+func TestAnthropicPromptPolicyErrorsUseTypedHTTPStatus(t *testing.T) {
+	handler := &AnthropicHandler{}
+	serverError := httptest.NewRecorder()
+	handler.writeAnthropicConversionError(serverError, claudePromptConfigError(fmt.Errorf("secret detail")))
+	if serverError.Code != http.StatusInternalServerError ||
+		strings.Contains(serverError.Body.String(), "secret detail") ||
+		!strings.Contains(serverError.Body.String(), "configuration is invalid") {
+		t.Fatalf("unexpected config error response: status=%d body=%s", serverError.Code, serverError.Body.String())
+	}
+
+	tooLarge := httptest.NewRecorder()
+	handler.writeAnthropicConversionError(tooLarge, claudePromptLimitError("internal limit detail"))
+	if tooLarge.Code != http.StatusRequestEntityTooLarge ||
+		!strings.Contains(tooLarge.Body.String(), "processing limit") {
+		t.Fatalf("unexpected limit response: status=%d body=%s", tooLarge.Code, tooLarge.Body.String())
+	}
+}
+
+func TestAdminClaudePromptPreviewUsesUnsavedPolicy(t *testing.T) {
+	adm := &AdminHandler{handler: handler{cfg: config.StaticProvider(config.DefaultConfig())}} //nolint:exhaustruct
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/api/admin/claude-prompt/preview",
+		strings.NewReader(`{
+			"original_prompt":"old policy",
+			"model":"fake-gemini-3.6-flash",
+			"replacement_enabled":true,
+			"replacements":[{"from":"old","to":"new","models":["fake-gemini-3.6-flash"]}],
+			"injection_enabled":true,
+			"injection_position":"append",
+			"injection_text":"injected"
+		}`),
+	)
+
+	adm.adminClaudePromptPreview(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("preview status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response["effective_prompt"] != "new policy\n\ninjected" ||
+		response["replacement_count"] != float64(1) ||
+		response["applicable_rules"] != float64(1) {
+		t.Fatalf("unexpected preview response: %#v", response)
 	}
 }

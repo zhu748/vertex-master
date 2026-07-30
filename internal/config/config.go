@@ -79,8 +79,33 @@ type AppConfig struct { //nolint:govet
 }
 
 type ClaudePromptReplacementRule struct {
-	From string `json:"from"`
-	To   string `json:"to"`
+	From     string   `json:"from"`
+	To       string   `json:"to"`
+	Disabled bool     `json:"disabled,omitempty"`
+	Models   []string `json:"models,omitempty"`
+}
+
+// ClaudePromptPolicyConfig is an immutable per-request snapshot. Keeping the
+// related values together prevents a live config reload from mixing fields
+// from different revisions while a request is being converted.
+type ClaudePromptPolicyConfig struct {
+	InjectionEnabled   bool
+	InjectionPosition  string
+	InjectionText      string
+	ReplacementEnabled bool
+	ReplacementRules   []ClaudePromptReplacementRule
+	MaxRequestMB       int
+}
+
+func (c AppConfig) ClaudePromptPolicy() ClaudePromptPolicyConfig {
+	return ClaudePromptPolicyConfig{
+		InjectionEnabled:   c.ClaudePromptInjectionEnabled,
+		InjectionPosition:  normalizeClaudePromptInjectionPosition(c.ClaudePromptInjectionPosition),
+		InjectionText:      c.ClaudePromptInjectionText,
+		ReplacementEnabled: c.ClaudePromptReplacementEnabled,
+		ReplacementRules:   c.EffectiveClaudePromptReplacementRules(),
+		MaxRequestMB:       c.MaxRequestMB,
+	}
 }
 
 // EffectiveClaudePromptReplacementRules returns a detached replacement rule
@@ -103,7 +128,10 @@ func cloneClaudePromptReplacementRules(
 	rules []ClaudePromptReplacementRule,
 ) []ClaudePromptReplacementRule {
 	cloned := make([]ClaudePromptReplacementRule, len(rules))
-	copy(cloned, rules)
+	for index := range rules {
+		cloned[index] = rules[index]
+		cloned[index].Models = append([]string(nil), rules[index].Models...)
+	}
 	return cloned
 }
 

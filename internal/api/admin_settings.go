@@ -5,6 +5,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"reflect"
 	"strings"
 
 	"github.com/bsfdsagfadg/vertex/internal/config"
@@ -228,11 +229,16 @@ func (adm *AdminHandler) adminPutSettings(w http.ResponseWriter, r *http.Request
 		}
 		updates[k] = v
 	}
-	claudeReplacementEnabled := adm.cfg.ClaudePromptReplacementEnabled()
+	currentClaudePolicy := adm.cfg.ClaudePromptPolicy()
+	claudeReplacementEnabled := currentClaudePolicy.ReplacementEnabled
 	if value, ok := updates["claude_prompt_replacement_enabled"].(bool); ok {
 		claudeReplacementEnabled = value
 	}
-	claudeReplacementRules := adm.cfg.ClaudePromptReplacementRules()
+	currentClaudeReplacementRules := currentClaudePolicy.ReplacementRules
+	claudeReplacementRules := append(
+		[]config.ClaudePromptReplacementRule(nil),
+		currentClaudeReplacementRules...,
+	)
 	claudeReplacementRulesUpdated := false
 	if value, ok := updates["claude_prompt_replacements"].([]config.ClaudePromptReplacementRule); ok {
 		claudeReplacementRules = value
@@ -252,10 +258,10 @@ func (adm *AdminHandler) adminPutSettings(w http.ResponseWriter, r *http.Request
 				if legacyFrom == "" {
 					claudeReplacementRules = claudeReplacementRules[1:]
 				} else {
-					claudeReplacementRules[0] = config.ClaudePromptReplacementRule{
-						From: legacyFrom,
-						To:   legacyTo,
-					}
+					updatedRule := claudeReplacementRules[0]
+					updatedRule.From = legacyFrom
+					updatedRule.To = legacyTo
+					claudeReplacementRules[0] = updatedRule
 				}
 			} else if legacyFrom == "" {
 				claudeReplacementRules = []config.ClaudePromptReplacementRule{}
@@ -273,20 +279,35 @@ func (adm *AdminHandler) adminPutSettings(w http.ResponseWriter, r *http.Request
 			writeJSON(w, http.StatusBadRequest, adminErr(err.Error()))
 			return
 		}
+		updates["claude_prompt_replacements"] = claudeReplacementRules
+		if len(claudeReplacementRules) == 0 || claudeReplacementRules[0].Disabled ||
+			len(claudeReplacementRules[0].Models) > 0 {
+			updates["claude_prompt_replace_from"] = ""
+			updates["claude_prompt_replace_to"] = ""
+		} else {
+			updates["claude_prompt_replace_from"] = claudeReplacementRules[0].From
+			updates["claude_prompt_replace_to"] = claudeReplacementRules[0].To
+		}
 	}
-	if claudeReplacementEnabled && len(claudeReplacementRules) == 0 {
+	activeClaudeReplacementRules := 0
+	for _, rule := range claudeReplacementRules {
+		if !rule.Disabled {
+			activeClaudeReplacementRules++
+		}
+	}
+	if claudeReplacementEnabled && activeClaudeReplacementRules == 0 {
 		writeJSON(
 			w,
 			http.StatusBadRequest,
-			adminErr("启用 Claude 提示词替换时，至少需要一条规则"),
+			adminErr("启用 Claude 提示词替换时，至少需要一条规则且该规则已启用"),
 		)
 		return
 	}
-	claudeInjectionEnabled := adm.cfg.ClaudePromptInjectionEnabled()
+	claudeInjectionEnabled := currentClaudePolicy.InjectionEnabled
 	if value, ok := updates["claude_prompt_injection_enabled"].(bool); ok {
 		claudeInjectionEnabled = value
 	}
-	claudeInjectionText := adm.cfg.ClaudePromptInjectionText()
+	claudeInjectionText := currentClaudePolicy.InjectionText
 	if value, ok := updates["claude_prompt_injection_text"].(string); ok {
 		claudeInjectionText = value
 	}
@@ -346,12 +367,28 @@ func (adm *AdminHandler) adminPutSettings(w http.ResponseWriter, r *http.Request
 		)
 		return
 	}
+	promptPolicyChanged := !reflect.DeepEqual(currentClaudeReplacementRules, claudeReplacementRules)
+	if value, ok := updates["claude_prompt_replacement_enabled"].(bool); ok {
+		promptPolicyChanged = promptPolicyChanged || value != currentClaudePolicy.ReplacementEnabled
+	}
+	if value, ok := updates["claude_prompt_injection_enabled"].(bool); ok {
+		promptPolicyChanged = promptPolicyChanged || value != currentClaudePolicy.InjectionEnabled
+	}
+	if value, ok := updates["claude_prompt_injection_position"].(string); ok {
+		promptPolicyChanged = promptPolicyChanged || value != currentClaudePolicy.InjectionPosition
+	}
+	if value, ok := updates["claude_prompt_injection_text"].(string); ok {
+		promptPolicyChanged = promptPolicyChanged || value != currentClaudePolicy.InjectionText
+	}
 	if err := config.WriteSettings(updates); err != nil {
 		writeJSON(w, http.StatusInternalServerError, adminErr("写入配置失败 (failed to write config)"))
 		return
 	}
 	if maxSpillMB, ok := updates["max_spill_mb"].(int); ok {
 		spool.SetMaxSpillBytes(int64(maxSpillMB) << 20)
+	}
+	if promptPolicyChanged {
+		adm.claudePrompts.Clear("all")
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -374,7 +411,34 @@ func parseAdminClaudePromptReplacementRules(
 		if !fromOK || !toOK {
 			return nil, fmt.Errorf("第 %d 条 Claude 提示词替换规则的 from/to 必须是字符串", index+1)
 		}
-		rules = append(rules, config.ClaudePromptReplacementRule{From: from, To: to})
+		disabled := false
+		if rawDisabled, present := rule["disabled"]; present {
+			var disabledOK bool
+			disabled, disabledOK = rawDisabled.(bool)
+			if !disabledOK {
+				return nil, fmt.Errorf("第 %d 条 Claude 提示词替换规则的 disabled 必须是布尔值", index+1)
+			}
+		}
+		models := []string(nil)
+		if rawModels, present := rule["models"]; present {
+			items, modelsOK := rawModels.([]any)
+			if !modelsOK {
+				return nil, fmt.Errorf("第 %d 条 Claude 提示词替换规则的 models 必须是字符串数组", index+1)
+			}
+			if len(items) > 0 {
+				models = make([]string, 0, len(items))
+			}
+			for _, item := range items {
+				model, modelOK := item.(string)
+				if !modelOK {
+					return nil, fmt.Errorf("第 %d 条 Claude 提示词替换规则的 models 必须是字符串数组", index+1)
+				}
+				models = append(models, strings.TrimSpace(model))
+			}
+		}
+		rules = append(rules, config.ClaudePromptReplacementRule{
+			From: from, To: to, Disabled: disabled, Models: models,
+		})
 	}
 	return rules, validateAdminClaudePromptReplacementRules(rules)
 }
@@ -399,6 +463,22 @@ func validateAdminClaudePromptReplacementRules(
 		}
 		seen[rule.From] = struct{}{}
 		totalBytes += len(rule.From) + len(rule.To)
+		if len(rule.Models) > maxClaudePromptRuleModels {
+			return fmt.Errorf("第 %d 条 Claude 提示词替换规则的模型不能超过 %d 个", index+1, maxClaudePromptRuleModels)
+		}
+		seenModels := make(map[string]struct{}, len(rule.Models))
+		for _, model := range rule.Models {
+			trimmedModel := strings.TrimSpace(model)
+			if trimmedModel == "" {
+				return fmt.Errorf("第 %d 条 Claude 提示词替换规则包含空模型名", index+1)
+			}
+			normalized := strings.ToLower(trimmedModel)
+			if _, duplicate := seenModels[normalized]; duplicate {
+				return fmt.Errorf("第 %d 条 Claude 提示词替换规则包含重复模型", index+1)
+			}
+			seenModels[normalized] = struct{}{}
+			totalBytes += len(trimmedModel)
+		}
 		if totalBytes > maxClaudePromptSettingBytes {
 			return fmt.Errorf("提示词替换规则文本总计不能超过 1 MiB")
 		}

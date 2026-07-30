@@ -115,6 +115,7 @@ func TestClaudePromptSettingsUIIsEmbedded(t *testing.T) {
 		"set_claude_prompt_replacement_enabled",
 		"set_claude_prompt_rule_from_",
 		"set_claude_prompt_rule_to_",
+		"set_claude_prompt_rule_models_",
 		"addClaudeReplacementRule",
 		"moveClaudeReplacementRule",
 		"removeClaudeReplacementRule",
@@ -123,6 +124,8 @@ func TestClaudePromptSettingsUIIsEmbedded(t *testing.T) {
 		"set_claude_prompt_injection_position",
 		"set_claude_prompt_injection_text",
 		"useLatestClaudePromptAsFind",
+		"previewClaudePrompt",
+		"claudePromptLatestEndpoint",
 		"loadLatestClaudePrompt",
 	} {
 		if !strings.Contains(script, token) {
@@ -136,6 +139,7 @@ func TestClaudePromptSettingsUIIsEmbedded(t *testing.T) {
 	}
 	for _, token := range []string{
 		"/api/admin/claude-prompt/latest",
+		"/api/admin/claude-prompt/preview",
 		"claudePrompt",
 	} {
 		if !strings.Contains(string(apiScript), token) {

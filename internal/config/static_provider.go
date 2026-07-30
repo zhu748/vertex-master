@@ -34,6 +34,9 @@ func (s staticConfig) ClaudePromptReplacementEnabled() bool {
 func (s staticConfig) ClaudePromptReplacementRules() []ClaudePromptReplacementRule {
 	return s.c.EffectiveClaudePromptReplacementRules()
 }
+func (s staticConfig) ClaudePromptPolicy() ClaudePromptPolicyConfig {
+	return s.c.ClaudePromptPolicy()
+}
 func (s staticConfig) VertexAPIKey() string              { return s.c.VertexAPIKey }
 func (s staticConfig) CountTokensQuerySignature() string { return s.c.CountTokensQuerySignature }
 func (s staticConfig) SafetySettings() map[string]string { return s.c.SafetySettings }
