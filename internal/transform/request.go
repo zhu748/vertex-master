@@ -35,6 +35,14 @@ var supportedVarFields = []struct { //nolint:gochecknoglobals
 
 // ConvertChatRequest 将 OpenAI ChatCompletion 请求体转为 (model, geminiPayload)。
 func ConvertChatRequest(body map[string]any, cfg config.ConfigProvider) (string, map[string]any, error) {
+	return convertChatRequest(body, cfg, false)
+}
+
+func convertChatRequest(
+	body map[string]any,
+	cfg config.ConfigProvider,
+	compactTextHistory bool,
+) (string, map[string]any, error) {
 	model, _ := body["model"].(string)
 
 	if cfg.DebugMode() {
@@ -47,12 +55,26 @@ func ConvertChatRequest(body map[string]any, cfg config.ConfigProvider) (string,
 		return "", nil, fmt.Errorf("messages 不能为空 (messages must be a non-empty array)")
 	}
 
-	contents := make([]any, 0, len(messagesRaw))
+	resolvedModel := ""
+	var contents []any
 	var systemParts []any
+	compactContents := false
+	if compactTextHistory {
+		resolvedModel = cfg.ResolveModelName(model)
+		if !isGemini36Model(resolvedModel) {
+			contents, systemParts, compactContents = compactSingleTextContents(messagesRaw)
+		}
+	}
+	if !compactContents {
+		contents = make([]any, 0, len(messagesRaw))
+	}
 	var toolIDToName map[string]string
 
-	hasValidContents := false
+	hasValidContents := compactContents
 	for messageIndex, msgRaw := range messagesRaw {
+		if compactContents {
+			break
+		}
 		msg, ok := msgRaw.(map[string]any)
 		if !ok {
 			return "", nil, fmt.Errorf("messages[%d] must be an object", messageIndex)
@@ -197,9 +219,12 @@ func ConvertChatRequest(body map[string]any, cfg config.ConfigProvider) (string,
 	if len(systemParts) == 0 && !hasValidContents {
 		return "", nil, fmt.Errorf("messages must contain system instructions or valid content")
 	}
+	if !compactTextHistory {
+		resolvedModel = cfg.ResolveModelName(model)
+	}
 
 	assistantPrefill := ""
-	if isGemini36Model(cfg.ResolveModelName(model)) {
+	if isGemini36Model(resolvedModel) {
 		contents, assistantPrefill = convertTrailingAssistantPrefill(contents)
 	}
 

@@ -66,7 +66,7 @@ type StreamingResponseConverter interface {
 type defaultRequestConverter struct{}
 
 func (defaultRequestConverter) Convert(body map[string]any, cfg config.ConfigProvider) (string, map[string]any, error) {
-	return ConvertChatRequest(body, cfg)
+	return convertChatRequest(body, cfg, true)
 }
 
 func DefaultRequestConverter() RequestConverter { return defaultRequestConverter{} }

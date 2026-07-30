@@ -4,6 +4,10 @@ package vertex
 // 超限时按“不适合并行复制/缓存”处理，比继续递归更安全。
 const valueBudgetMaxDepth = 256
 
+type canonicalTextContent interface {
+	CanonicalTextContent() (role, text string, ok bool)
+}
+
 func valueFitsBudget(value any, remaining *int) bool {
 	return valueFitsBudgetDepth(value, remaining, 0)
 }
@@ -23,6 +27,11 @@ func valueFitsBudgetDepth(value any, remaining *int, depth int) bool {
 		*remaining -= len(typed)
 	case []byte:
 		*remaining -= len(typed)
+	case canonicalTextContent:
+		role, text, ok := typed.CanonicalTextContent()
+		if !ok || !consumeCanonicalTextContentBudget(remaining, role, text) {
+			return false
+		}
 	case []any:
 		for _, item := range typed {
 			if !valueFitsBudgetDepth(item, remaining, depth+1) {
@@ -37,5 +46,21 @@ func valueFitsBudgetDepth(value any, remaining *int, depth int) bool {
 			}
 		}
 	}
+	return *remaining >= 0
+}
+
+func consumeCanonicalTextContentBudget(remaining *int, role, text string) bool {
+	// Additional cost after the outer value node: top-level "parts"/"role"
+	// keys, one-element parts array, nested text object/key, and both scalar
+	// nodes. This exactly matches the dynamic map representation.
+	*remaining -= 17
+	if *remaining < 0 {
+		return false
+	}
+	*remaining -= len(role)
+	if *remaining < 0 {
+		return false
+	}
+	*remaining -= len(text)
 	return *remaining >= 0
 }

@@ -10,6 +10,100 @@ import (
 	"github.com/bsfdsagfadg/vertex/internal/config"
 )
 
+func TestDefaultRequestConverterCompactsPlainTextWithoutChangingWireJSON(t *testing.T) {
+	cfg := config.StaticProvider(config.DefaultConfig())
+	body := map[string]any{
+		"model": "gemini-3.1-flash",
+		"messages": []any{
+			map[string]any{"role": "system", "content": "system prompt"},
+			map[string]any{"role": "user", "content": "question"},
+			map[string]any{"role": "assistant", "content": []any{
+				map[string]any{"type": "output_text", "text": "answer"},
+			}},
+			map[string]any{"role": "user", "content": "follow-up"},
+		},
+		"temperature": float64(0.5),
+	}
+	model, compatibilityPayload, err := ConvertChatRequest(body, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compactModel, compactPayload, err := DefaultRequestConverter().Convert(body, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compactModel != model {
+		t.Fatalf("model=%q, want %q", compactModel, model)
+	}
+	contents, ok := compactPayload["contents"].([]any)
+	if !ok || len(contents) != 3 {
+		t.Fatalf("compact contents=%#v", compactPayload["contents"])
+	}
+	for index, content := range contents {
+		if _, ok := content.(*canonicalSingleTextContent); !ok {
+			t.Fatalf("content[%d] type=%T, want compact text content", index, content)
+		}
+	}
+	systemInstruction, ok := compactPayload["systemInstruction"].(map[string]any)
+	if !ok {
+		t.Fatalf("compact system instruction=%#v", compactPayload["systemInstruction"])
+	}
+	systemParts, ok := systemInstruction["parts"].([]any)
+	if !ok || len(systemParts) != 1 ||
+		systemParts[0].(map[string]any)["text"] != "system prompt" {
+		t.Fatalf("compact system parts=%#v", systemInstruction["parts"])
+	}
+	compatibilityJSON, err := json.Marshal(compatibilityPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compactJSON, err := json.Marshal(compactPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(compactJSON) != string(compatibilityJSON) {
+		t.Fatalf("compact payload changed JSON:\ncompact=%s\ncompat=%s", compactJSON, compatibilityJSON)
+	}
+
+	compatibilityVariables := BuildVertexVariables(model, compatibilityPayload, cfg)
+	compactVariables := BuildVertexVariables(compactModel, compactPayload, cfg)
+	compatibilityJSON, err = json.Marshal(compatibilityVariables)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compactJSON, err = json.Marshal(compactVariables)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(compactJSON) != string(compatibilityJSON) {
+		t.Fatalf("compact variables changed JSON:\ncompact=%s\ncompat=%s", compactJSON, compatibilityJSON)
+	}
+}
+
+func TestDefaultRequestConverterKeepsGemini36PrefillMapShape(t *testing.T) {
+	body := map[string]any{
+		"model": "gemini-3.6-flash",
+		"messages": []any{
+			map[string]any{"role": "user", "content": "question"},
+			map[string]any{"role": "assistant", "content": "prefix"},
+		},
+	}
+	_, payload, err := DefaultRequestConverter().Convert(
+		body,
+		config.StaticProvider(config.DefaultConfig()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := payload["contents"].([]any)
+	if _, ok := contents[0].(map[string]any); !ok {
+		t.Fatalf("Gemini 3.6 history should keep map shape, got %T", contents[0])
+	}
+	if got := AssistantPrefillFromPayload(payload); got != "prefix" {
+		t.Fatalf("prefill=%q, want prefix", got)
+	}
+}
+
 func TestConvertChatRequestRejectsSilentlyDroppedMessages(t *testing.T) {
 	validToolCall := []any{map[string]any{
 		"id": "call_1",

@@ -177,6 +177,121 @@ func inlineDataPart(mime, b64 string) map[string]any {
 	}}
 }
 
+type canonicalSingleTextPart struct {
+	Text string `json:"text"`
+}
+
+// canonicalSingleTextContent is used only by DefaultRequestConverter for a
+// fully validated plain-text history. Field order matches encoding/json's
+// lexical map order so the optimized representation preserves wire bytes.
+type canonicalSingleTextContent struct {
+	Parts [1]canonicalSingleTextPart `json:"parts"`
+	Role  string                     `json:"role"`
+}
+
+// CanonicalTextContent exposes the validated scalar fields to downstream
+// budget and cache-key walkers without exporting the compact wire type.
+func (content *canonicalSingleTextContent) CanonicalTextContent() (role, text string, ok bool) {
+	if content == nil ||
+		(content.Role != "user" && content.Role != "model") ||
+		content.Parts[0].Text == "" {
+		return "", "", false
+	}
+	return content.Role, content.Parts[0].Text, true
+}
+
+func compactSingleTextContents(messages []any) (contents, systemParts []any, ok bool) {
+	contentCount := 0
+	systemCount := 0
+	for _, rawMessage := range messages {
+		role, _, messageOK := compactSingleTextMessage(rawMessage)
+		if !messageOK {
+			return nil, nil, false
+		}
+		if role == "system" || role == "developer" {
+			systemCount++
+		} else {
+			contentCount++
+		}
+	}
+
+	storage := make([]canonicalSingleTextContent, contentCount)
+	contents = make([]any, 0, contentCount)
+	systemParts = make([]any, 0, systemCount)
+	contentIndex := 0
+	for _, rawMessage := range messages {
+		role, text, _ := compactSingleTextMessage(rawMessage)
+		if role == "system" || role == "developer" {
+			systemParts = append(systemParts, map[string]any{"text": text})
+			continue
+		}
+		if role == "assistant" {
+			role = "model"
+		}
+		storage[contentIndex] = canonicalSingleTextContent{
+			Parts: [1]canonicalSingleTextPart{{Text: text}},
+			Role:  role,
+		}
+		contents = append(contents, &storage[contentIndex])
+		contentIndex++
+	}
+	return contents, systemParts, true
+}
+
+func compactSingleTextMessage(rawMessage any) (role, text string, ok bool) {
+	message, ok := rawMessage.(map[string]any)
+	if !ok {
+		return "", "", false
+	}
+	role, _ = message["role"].(string)
+	if role != "system" && role != "developer" && role != "user" && role != "assistant" {
+		return "", "", false
+	}
+	content := message["content"]
+	text, ok = compactSingleTextValue(content, role == "system" || role == "developer")
+	if !ok {
+		return "", "", false
+	}
+	if role != "assistant" {
+		return role, text, true
+	}
+	if _, isString := content.(string); isString &&
+		strings.Contains(text, "data:") && strings.Contains(text, "![") {
+		return "", "", false
+	}
+	if rawToolCalls, exists := message["tool_calls"]; exists && rawToolCalls != nil {
+		toolCalls, ok := rawToolCalls.([]any)
+		if !ok || len(toolCalls) > 0 {
+			return "", "", false
+		}
+	}
+	return role, text, true
+}
+
+func compactSingleTextValue(content any, system bool) (string, bool) {
+	if text, ok := content.(string); ok {
+		return text, text != ""
+	}
+	parts, ok := content.([]any)
+	if !ok || len(parts) != 1 {
+		return "", false
+	}
+	if text, ok := parts[0].(string); ok {
+		return text, text != ""
+	}
+	part, ok := parts[0].(map[string]any)
+	if !ok {
+		return "", false
+	}
+	partType, _ := part["type"].(string)
+	if partType != "text" && partType != "input_text" &&
+		(system || partType != "output_text") {
+		return "", false
+	}
+	text, ok := part["text"].(string)
+	return text, ok && text != ""
+}
+
 // imageURLString 从 image_url 字段取出 url 字符串（兼容 {url} 与字符串两种形态）。
 func imageURLString(v any) string {
 	if m, ok := v.(map[string]any); ok {
@@ -305,27 +420,35 @@ func canonicalTextContentsCanPassThrough(contents any) bool {
 		return false
 	}
 	for _, rawContent := range list {
-		content, ok := rawContent.(map[string]any)
-		if !ok || len(content) != 2 {
-			return false
-		}
-		role, _ := content["role"].(string)
-		if role != "user" && role != "model" {
-			return false
-		}
-		parts, ok := content["parts"].([]any)
-		if !ok || len(parts) == 0 {
-			return false
-		}
-		for _, rawPart := range parts {
-			part, ok := rawPart.(map[string]any)
-			if !ok || len(part) != 1 {
+		switch content := rawContent.(type) {
+		case *canonicalSingleTextContent:
+			if _, _, ok := content.CanonicalTextContent(); !ok {
 				return false
 			}
-			text, ok := part["text"].(string)
-			if !ok || text == "" {
+		case map[string]any:
+			if len(content) != 2 {
 				return false
 			}
+			role, _ := content["role"].(string)
+			if role != "user" && role != "model" {
+				return false
+			}
+			parts, ok := content["parts"].([]any)
+			if !ok || len(parts) == 0 {
+				return false
+			}
+			for _, rawPart := range parts {
+				part, ok := rawPart.(map[string]any)
+				if !ok || len(part) != 1 {
+					return false
+				}
+				text, ok := part["text"].(string)
+				if !ok || text == "" {
+					return false
+				}
+			}
+		default:
+			return false
 		}
 	}
 	return true
@@ -373,7 +496,12 @@ func handleSystemInstruction(vars map[string]any) {
 	}
 	contents, _ := vars["contents"].([]any)
 	for _, c := range contents {
-		if cm, ok := c.(map[string]any); ok {
+		if compact, ok := c.(*canonicalSingleTextContent); ok {
+			role, _, valid := compact.CanonicalTextContent()
+			if valid && role == "user" {
+				return
+			}
+		} else if cm, ok := c.(map[string]any); ok {
 			if r, _ := cm["role"].(string); r == "user" {
 				return
 			}

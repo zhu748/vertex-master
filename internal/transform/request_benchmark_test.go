@@ -71,6 +71,74 @@ func BenchmarkConvertChatRequest(b *testing.B) {
 	}
 }
 
+func BenchmarkTextHistoryRequestPipeline(b *testing.B) {
+	messages := make([]any, 16)
+	for index := range messages {
+		role := "user"
+		if index%2 != 0 {
+			role = "assistant"
+		}
+		messages[index] = map[string]any{
+			"role": role, "content": strings.Repeat("x", 128),
+		}
+	}
+	benchmarkTextHistoryPipeline(b, messages)
+}
+
+func BenchmarkProtocolTextHistoryRequestPipeline(b *testing.B) {
+	messages := make([]any, 0, 17)
+	messages = append(messages, map[string]any{"role": "system", "content": "system prompt"})
+	for index := range 16 {
+		role := "user"
+		partType := "input_text"
+		if index%2 != 0 {
+			role = "assistant"
+			partType = "output_text"
+		}
+		messages = append(messages, map[string]any{
+			"role": role,
+			"content": []any{map[string]any{
+				"type": partType, "text": strings.Repeat("x", 128),
+			}},
+		})
+	}
+	benchmarkTextHistoryPipeline(b, messages)
+}
+
+func benchmarkTextHistoryPipeline(b *testing.B, messages []any) {
+	cfg := config.StaticProvider(config.DefaultConfig())
+	body := map[string]any{"model": "gemini-3.1-flash", "messages": messages}
+	converter := DefaultRequestConverter()
+
+	for _, benchmark := range []struct {
+		name    string
+		convert func() (string, map[string]any, error)
+	}{
+		{name: "map_compatibility", convert: func() (string, map[string]any, error) {
+			return ConvertChatRequest(body, cfg)
+		}},
+		{name: "default_compact", convert: func() (string, map[string]any, error) {
+			return converter.Convert(body, cfg)
+		}},
+	} {
+		b.Run(benchmark.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for range b.N {
+				model, payload, err := benchmark.convert()
+				if err != nil {
+					b.Fatal(err)
+				}
+				vars := BuildVertexVariables(model, payload, cfg)
+				if err := jsonx.MarshalView(vars, func(encoded []byte) {
+					benchmarkEncodedPayloadSize = len(encoded)
+				}); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 func BenchmarkBuildVertexVariablesLargeToolSchema(b *testing.B) {
 	cfg := config.StaticProvider(config.DefaultConfig())
 	body := largeToolSchemaBenchmarkBody("question")

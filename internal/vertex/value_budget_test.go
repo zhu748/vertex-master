@@ -1,6 +1,12 @@
 package vertex
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+
+	"github.com/bsfdsagfadg/vertex/internal/config"
+	"github.com/bsfdsagfadg/vertex/internal/transform"
+)
 
 func TestValueFitsBudget(t *testing.T) {
 	remaining := 128
@@ -24,5 +30,72 @@ func TestValueFitsBudgetRejectsExcessiveDepth(t *testing.T) {
 	remaining := 1 << 20
 	if valueFitsBudget(value, &remaining) {
 		t.Fatal("excessively nested value should be rejected")
+	}
+}
+
+func TestCompactTextContentsMatchMapBudgetAndTokenCacheKey(t *testing.T) {
+	cfg := config.StaticProvider(config.DefaultConfig())
+	body := map[string]any{
+		"model": "gemini-3.1-flash",
+		"messages": []any{
+			map[string]any{"role": "user", "content": "question"},
+			map[string]any{"role": "assistant", "content": "answer"},
+		},
+	}
+	_, mapPayload, err := transform.ConvertChatRequest(body, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, compactPayload, err := transform.DefaultRequestConverter().Convert(body, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mapRemaining := 1 << 20
+	compactRemaining := mapRemaining
+	if !valueFitsBudget(mapPayload, &mapRemaining) ||
+		!valueFitsBudget(compactPayload, &compactRemaining) {
+		t.Fatal("equivalent compact and map payloads should fit the same budget")
+	}
+	if compactRemaining != mapRemaining {
+		t.Fatalf("remaining budget: compact=%d map=%d", compactRemaining, mapRemaining)
+	}
+
+	mapContents := mapPayload["contents"].([]any)
+	compactContents := compactPayload["contents"].([]any)
+	mapKey, mapOK := makeTokenCountCacheKey("gemini-3.1-flash", mapContents)
+	compactKey, compactOK := makeTokenCountCacheKey("gemini-3.1-flash", compactContents)
+	if !mapOK || !compactOK {
+		t.Fatalf("cache key availability: compact=%v map=%v", compactOK, mapOK)
+	}
+	if compactKey != mapKey {
+		t.Fatalf("compact and map token cache keys differ:\ncompact=%x\nmap=%x", compactKey, mapKey)
+	}
+
+	mapCountPayload := buildCountTokensPayload(
+		"gemini-3.1-flash",
+		mapContents,
+		"token",
+		cfg,
+	)
+	compactCountPayload := buildCountTokensPayload(
+		"gemini-3.1-flash",
+		compactContents,
+		"token",
+		cfg,
+	)
+	mapWire, err := json.Marshal(mapCountPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compactWire, err := json.Marshal(compactCountPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(compactWire) != string(mapWire) {
+		t.Fatalf("compact CountTokens payload changed wire JSON:\ncompact=%s\nmap=%s",
+			compactWire,
+			mapWire,
+		)
 	}
 }

@@ -159,6 +159,19 @@ func writeTokenCountHashValue(
 		writeTokenCountHashUint64(buffer, tokenCountHashUnsigned, uint64(typed))
 	case uint64:
 		writeTokenCountHashUint64(buffer, tokenCountHashUnsigned, typed)
+	case canonicalTextContent:
+		role, text, ok := typed.CanonicalTextContent()
+		if !ok || !consumeCanonicalTextContentBudget(remaining, role, text) {
+			return false
+		}
+		writeTokenCountHashHeader(buffer, tokenCountHashObject, 2)
+		writeTokenCountHashString(buffer, tokenCountHashString, "parts")
+		writeTokenCountHashHeader(buffer, tokenCountHashArray, 1)
+		writeTokenCountHashHeader(buffer, tokenCountHashObject, 1)
+		writeTokenCountHashString(buffer, tokenCountHashString, "text")
+		writeTokenCountHashString(buffer, tokenCountHashString, text)
+		writeTokenCountHashString(buffer, tokenCountHashString, "role")
+		writeTokenCountHashString(buffer, tokenCountHashString, role)
 	case []any:
 		if len(typed) > *remaining {
 			return false
