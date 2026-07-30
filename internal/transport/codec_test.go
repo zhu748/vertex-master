@@ -483,6 +483,29 @@ func TestParseURIStandardProxies(t *testing.T) {
 			if tt.wantUser != "" && out["username"] != tt.wantUser {
 				t.Fatalf("username=%#v, want %q", out["username"], tt.wantUser)
 			}
+			metadataType, metadataName, ok := ParseStandardProxyMetadata(tt.raw)
+			if !ok || metadataType != out["type"] || metadataName != out["name"] {
+				t.Fatalf(
+					"lightweight metadata differs from ParseURI: type=%q name=%q ok=%v out=%#v",
+					metadataType,
+					metadataName,
+					ok,
+					out,
+				)
+			}
 		})
+	}
+}
+
+func TestParseStandardProxyMetadataRejectsNonStandardOrInvalidURI(t *testing.T) {
+	for _, raw := range []string{
+		"vless://id@example.com:443",
+		"http://",
+		"socks5://example.com:70000",
+		"not-a-proxy",
+	} {
+		if proxyType, name, ok := ParseStandardProxyMetadata(raw); ok {
+			t.Fatalf("ParseStandardProxyMetadata(%q)=%q, %q, true", raw, proxyType, name)
+		}
 	}
 }

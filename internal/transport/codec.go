@@ -62,19 +62,28 @@ func ParseURI(uri string) (map[string]any, error) {
 	return nil, fmt.Errorf("unsupported or complex protocol: %s", safeURI)
 }
 
-func parseStandardProxyURI(raw string) (map[string]any, bool) {
+type standardProxyURI struct {
+	typ    string
+	name   string
+	server string
+	port   int
+	user   *url.Userinfo
+}
+
+func parseStandardProxyURIInfo(raw string) (standardProxyURI, bool) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
-		return nil, false
+		return standardProxyURI{}, false
 	}
 	scheme := strings.ToLower(u.Scheme)
 	switch scheme {
 	case "http", "https", "socks4", "socks4a", "socks5", "socks5h":
 	default:
-		return nil, false
+		return standardProxyURI{}, false
 	}
-	if u.Hostname() == "" {
-		return nil, false
+	server := u.Hostname()
+	if server == "" {
+		return standardProxyURI{}, false
 	}
 	port, _ := strconv.Atoi(u.Port())
 	if port == 0 {
@@ -88,7 +97,7 @@ func parseStandardProxyURI(raw string) (map[string]any, bool) {
 		}
 	}
 	if port < 1 || port > 65535 {
-		return nil, false
+		return standardProxyURI{}, false
 	}
 
 	name := strings.TrimSpace(u.Fragment)
@@ -96,17 +105,36 @@ func parseStandardProxyURI(raw string) (map[string]any, bool) {
 		name = decoded
 	}
 	if name == "" {
-		name = scheme + "-" + u.Hostname() + ":" + strconv.Itoa(port)
+		name = scheme + "-" + server + ":" + strconv.Itoa(port)
+	}
+	info := standardProxyURI{
+		typ: scheme, name: name, server: server, port: port, user: u.User,
+	}
+	return info, true
+}
+
+// ParseStandardProxyMetadata validates a standard HTTP/SOCKS proxy URI and
+// returns the metadata needed by import/index paths without constructing the
+// generic transport option map used by connection setup.
+func ParseStandardProxyMetadata(raw string) (proxyType, name string, ok bool) {
+	info, ok := parseStandardProxyURIInfo(raw)
+	if !ok {
+		return "", "", false
+	}
+	return info.typ, info.name, true
+}
+
+func parseStandardProxyURI(raw string) (map[string]any, bool) {
+	info, ok := parseStandardProxyURIInfo(raw)
+	if !ok {
+		return nil, false
 	}
 	out := map[string]any{
-		"name":   name,
-		"type":   scheme,
-		"server": u.Hostname(),
-		"port":   port,
+		"name": info.name, "type": info.typ, "server": info.server, "port": info.port,
 	}
-	if u.User != nil {
-		out["username"] = u.User.Username()
-		if password, ok := u.User.Password(); ok {
+	if info.user != nil {
+		out["username"] = info.user.Username()
+		if password, hasPassword := info.user.Password(); hasPassword {
 			out["password"] = password
 		}
 	}

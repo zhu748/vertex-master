@@ -28,6 +28,11 @@ func parseImportedNodes(text string) []nodes.Node {
 	}
 
 	normalized := text
+	if looksLikeNodeLineList(normalized) {
+		// URI lists cannot be base64 subscription envelopes. Avoid allocating a
+		// speculative decoded copy before parsing every line.
+		return parseImportedNodeLines(normalized)
+	}
 	// A JSON document cannot itself be a base64 subscription. Only attempt
 	// decoding for other shapes so large JSON node lists do not allocate and
 	// scan a speculative decoded copy before their real parse.
@@ -139,6 +144,12 @@ func parseImportedNodeLine(line string) (nodes.Node, bool) {
 	raw := strings.TrimSpace(line)
 	if raw == "" {
 		return nodes.Node{}, false
+	}
+
+	if nodeType, nodeName, ok := transport.ParseStandardProxyMetadata(raw); ok {
+		return nodes.Node{
+			Type: nodeType, Name: nodes.SafeNodeLabel(nodeName), RawURI: raw,
+		}, true
 	}
 
 	out, err := transport.ParseURI(raw)
