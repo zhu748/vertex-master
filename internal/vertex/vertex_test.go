@@ -238,7 +238,14 @@ func TestBuildRequestPayload(t *testing.T) {
 	if body.OperationName != "StreamGenerateContentAnonymous" {
 		t.Error("operationName 不匹配")
 	}
-	vars := body.Variables
+	encodedVariables, err := json.Marshal(body.Variables)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vars map[string]any
+	if err := json.Unmarshal(encodedVariables, &vars); err != nil {
+		t.Fatal(err)
+	}
 	if vars["region"] != "global" {
 		t.Errorf("region=%v, want global", vars["region"])
 	}
@@ -283,10 +290,39 @@ func TestBuildRequestPayloadFromVariablesDoesNotMutatePrepared(t *testing.T) {
 	if _, exists := prepared["recaptchaToken"]; exists {
 		t.Fatalf("prepared variables were mutated: %#v", prepared)
 	}
-	firstVariables := first.Variables
-	secondVariables := second.Variables
-	if firstVariables["recaptchaToken"] != "TOKEN-A" || secondVariables["recaptchaToken"] != "TOKEN-B" {
-		t.Fatalf("attempt tokens leaked: first=%v second=%v", firstVariables["recaptchaToken"], secondVariables["recaptchaToken"])
+	if first.Variables.RecaptchaToken != "TOKEN-A" || second.Variables.RecaptchaToken != "TOKEN-B" {
+		t.Fatalf(
+			"attempt tokens leaked: first=%v second=%v",
+			first.Variables.RecaptchaToken,
+			second.Variables.RecaptchaToken,
+		)
+	}
+}
+
+func TestBuildRequestVariablesWireShapeMatchesMap(t *testing.T) {
+	prepared := map[string]any{
+		"contents":          []any{map[string]any{"role": "user"}},
+		"generationConfig":  map[string]any{"temperature": 0.5},
+		"model":             "gemini-3.1-flash",
+		"region":            "global",
+		"safetySettings":    []any{},
+		"systemInstruction": map[string]any{"parts": []any{}},
+		"toolConfig":        map[string]any{},
+		"tools":             []any{},
+	}
+	body := buildRequestPayloadFromVariables(prepared, "TOKEN")
+	got, err := json.Marshal(body.Variables)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantVariables := shallowCopy(prepared)
+	wantVariables["recaptchaToken"] = "TOKEN"
+	want, err := json.Marshal(wantVariables)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("variables wire shape changed:\n got=%s\nwant=%s", got, want)
 	}
 }
 

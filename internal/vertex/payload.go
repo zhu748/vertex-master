@@ -119,10 +119,27 @@ func randomRequestIdentifiers() (sessionID, trackingID string) {
 }
 
 type batchGraphqlRequest struct {
-	OperationName  string              `json:"operationName"`
-	QuerySignature string              `json:"querySignature"`
-	RequestContext batchRequestContext `json:"requestContext"`
-	Variables      map[string]any      `json:"variables"`
+	OperationName  string                `json:"operationName"`
+	QuerySignature string                `json:"querySignature"`
+	RequestContext batchRequestContext   `json:"requestContext"`
+	Variables      batchRequestVariables `json:"variables"`
+}
+
+// batchRequestVariables mirrors the finite set produced by BuildVertexVariables.
+// Keeping the shared prepared map out of the wire value avoids cloning it for every
+// candidate merely to attach a candidate-specific recaptcha token.
+//
+// Fields stay in lexical order to preserve encoding/json's former map-key order.
+type batchRequestVariables struct {
+	Contents          any    `json:"contents,omitempty"`
+	GenerationConfig  any    `json:"generationConfig,omitempty"`
+	Model             any    `json:"model"`
+	RecaptchaToken    string `json:"recaptchaToken"`
+	Region            any    `json:"region"`
+	SafetySettings    any    `json:"safetySettings,omitempty"`
+	SystemInstruction any    `json:"systemInstruction,omitempty"`
+	ToolConfig        any    `json:"toolConfig,omitempty"`
+	Tools             any    `json:"tools,omitempty"`
 }
 
 // buildRequestPayload 构建发往上游的完整请求体（对齐 _build_request_payload）：
@@ -143,8 +160,6 @@ func buildRequestVariables(model string, geminiPayload map[string]any, cfg confi
 }
 
 func buildRequestPayloadFromVariables(preparedVariables map[string]any, recaptchaToken string) batchGraphqlRequest {
-	vars := shallowCopy(preparedVariables)
-	vars["recaptchaToken"] = recaptchaToken
 	sessionID, trackingID := randomRequestIdentifiers()
 	return batchGraphqlRequest{
 		OperationName:  operationName,
@@ -160,6 +175,16 @@ func buildRequestPayloadFromVariables(preparedVariables map[string]any, recaptch
 			PageViewID: randomPageViewID(),
 			TrackingID: trackingID,
 		},
-		Variables: vars,
+		Variables: batchRequestVariables{
+			Contents:          preparedVariables["contents"],
+			GenerationConfig:  preparedVariables["generationConfig"],
+			Model:             preparedVariables["model"],
+			RecaptchaToken:    recaptchaToken,
+			Region:            preparedVariables["region"],
+			SafetySettings:    preparedVariables["safetySettings"],
+			SystemInstruction: preparedVariables["systemInstruction"],
+			ToolConfig:        preparedVariables["toolConfig"],
+			Tools:             preparedVariables["tools"],
+		},
 	}
 }
