@@ -12,8 +12,31 @@ type oaiToolCall struct { //nolint:govet
 	args any
 }
 
+// CanonicalOAIToolCall 是协议适配器已经验证过的 OpenAI 工具调用值。
+// 它保持标准 JSON 形状，同时让内部适配器无需先构造两层动态 map 再解析。
+type CanonicalOAIToolCall struct {
+	ID       string                       `json:"id"`
+	Type     string                       `json:"type"`
+	Function CanonicalOAIFunctionCallData `json:"function"`
+}
+
+type CanonicalOAIFunctionCallData struct {
+	Name      string `json:"name"`
+	Arguments any    `json:"arguments"`
+}
+
 // extractOAIToolCall 健壮解析 OpenAI tool_call。
 func extractOAIToolCall(tc any) *oaiToolCall {
+	if canonical, ok := tc.(CanonicalOAIToolCall); ok {
+		if canonical.Function.Name == "" {
+			return nil
+		}
+		return &oaiToolCall{
+			id:   canonical.ID,
+			name: canonical.Function.Name,
+			args: coerceFunctionArgs(canonical.Function.Arguments),
+		}
+	}
 	m, ok := tc.(map[string]any)
 	if !ok {
 		return nil

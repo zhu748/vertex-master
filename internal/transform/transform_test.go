@@ -343,6 +343,30 @@ func TestMapFinishReason(t *testing.T) {
 	}
 }
 
+func TestExtractCanonicalOAIToolCall(t *testing.T) {
+	arguments := map[string]any{"query": "<tag>", "limit": float64(2)}
+	call := CanonicalOAIToolCall{
+		ID:   "call_1",
+		Type: "function",
+		Function: CanonicalOAIFunctionCallData{
+			Name: "lookup", Arguments: arguments,
+		},
+	}
+	parsed := extractOAIToolCall(call)
+	if parsed == nil || parsed.id != "call_1" || parsed.name != "lookup" ||
+		!reflect.DeepEqual(parsed.args, arguments) {
+		t.Fatalf("canonical tool call parsed incorrectly: %#v", parsed)
+	}
+	encoded, err := json.Marshal(call)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(encoded) !=
+		`{"id":"call_1","type":"function","function":{"name":"lookup","arguments":{"limit":2,"query":"\u003ctag\u003e"}}}` {
+		t.Fatalf("canonical tool call JSON shape changed: %s", encoded)
+	}
+}
+
 func TestMergeContentBlocks(t *testing.T) {
 	parts := []map[string]any{
 		{"text": "Hello "},

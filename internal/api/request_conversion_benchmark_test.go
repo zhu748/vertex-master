@@ -71,8 +71,46 @@ func BenchmarkAnthropicRequestConversion(b *testing.B) {
 }
 
 func BenchmarkResponsesRequestConversion(b *testing.B) {
+	benchmarkResponsesRequestConversion(b, false)
+}
+
+func BenchmarkResponsesStringToolRequestConversion(b *testing.B) {
+	benchmarkResponsesRequestConversion(b, true)
+}
+
+func BenchmarkResponsesTextHistoryRequestConversion(b *testing.B) {
+	input := make([]any, 32)
+	for index := range input {
+		role := "user"
+		if index%2 != 0 {
+			role = "assistant"
+		}
+		input[index] = map[string]any{
+			"type": "message", "role": role,
+			"content": []any{map[string]any{"type": "input_text", "text": "message"}},
+		}
+	}
+	body := map[string]any{"input": input}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		converted, err := responsesToChatRequest(body)
+		if err != nil || len(converted["messages"].([]any)) != len(input) {
+			b.Fatal("unexpected Responses text history conversion")
+		}
+		benchmarkRequestConversionResult = converted
+	}
+}
+
+func benchmarkResponsesRequestConversion(b *testing.B, stringToolValues bool) {
 	input := make([]any, 0, 32)
 	for index := range 8 {
+		arguments := any(map[string]any{"q": index})
+		output := any(map[string]any{"value": index})
+		if stringToolValues {
+			arguments = `{"q":1}`
+			output = `{"value":1}`
+		}
 		input = append(input,
 			map[string]any{
 				"type": "message", "role": "user",
@@ -80,12 +118,12 @@ func BenchmarkResponsesRequestConversion(b *testing.B) {
 			},
 			map[string]any{
 				"type": "function_call", "call_id": "call_" + string(rune('a'+index)),
-				"name": "lookup", "arguments": map[string]any{"q": index},
+				"name": "lookup", "arguments": arguments,
 			},
 			map[string]any{"type": "reasoning", "summary": []any{}},
 			map[string]any{
 				"type": "function_call_output", "call_id": "call_" + string(rune('a'+index)),
-				"output": map[string]any{"value": index},
+				"output": output,
 			},
 		)
 	}

@@ -163,15 +163,17 @@ func responsesToChatRequest(body map[string]any) (map[string]any, error) {
 		if len(value) == 0 {
 			return nil, fmt.Errorf("'input' must not be empty")
 		}
-		var pendingToolCalls []any
+		var allToolCalls []any
+		pendingToolCallStart := 0
 		flushToolCalls := func() {
-			if len(pendingToolCalls) == 0 {
+			if pendingToolCallStart == len(allToolCalls) {
 				return
 			}
+			pendingToolCalls := allToolCalls[pendingToolCallStart:len(allToolCalls):len(allToolCalls)]
 			messages = append(messages, map[string]any{
 				"role": "assistant", "content": "", "tool_calls": pendingToolCalls,
 			})
-			pendingToolCalls = nil
+			pendingToolCallStart = len(allToolCalls)
 		}
 		for itemIndex, raw := range value {
 			item, ok := raw.(map[string]any)
@@ -195,10 +197,17 @@ func responsesToChatRequest(body map[string]any) (map[string]any, error) {
 				if namespace := stringValue(item["namespace"]); namespace != "" {
 					name = flattenResponsesToolName(namespace, name)
 				}
-				pendingToolCalls = append(pendingToolCalls, map[string]any{
-					"id": id, "type": "function",
-					"function": map[string]any{
-						"name": name, "arguments": jsonString(item["arguments"]),
+				if allToolCalls == nil {
+					allToolCalls = make([]any, 0, min(len(value), 8))
+				}
+				allToolCalls = append(allToolCalls, transform.CanonicalOAIToolCall{
+					ID:   id,
+					Type: "function",
+					Function: transform.CanonicalOAIFunctionCallData{
+						Name: name,
+						Arguments: responsesIntermediateJSONValue(
+							item["arguments"],
+						),
 					},
 				})
 			case "function_call_output":
@@ -216,7 +225,9 @@ func responsesToChatRequest(body map[string]any) (map[string]any, error) {
 				}
 				flushToolCalls()
 				messages = append(messages, map[string]any{
-					"role": "tool", "tool_call_id": item["call_id"], "content": jsonString(item["output"]),
+					"role":         "tool",
+					"tool_call_id": item["call_id"],
+					"content":      responsesIntermediateJSONValue(item["output"]),
 				})
 			case "message", "":
 				flushToolCalls()
@@ -228,18 +239,18 @@ func responsesToChatRequest(body map[string]any) (map[string]any, error) {
 				if _, exists := item["content"]; !exists {
 					return nil, fmt.Errorf("input[%d] message is missing content", itemIndex)
 				}
+				if explicitRole == role && reusableResponsesMessage(item) {
+					// The decoded request is read-only for the remainder of the
+					// handler. Reuse canonical messages without first boxing an
+					// unchanged []any content value.
+					messages = append(messages, item)
+					continue
+				}
 				content, err := responseContentToChat(item["content"])
 				if err != nil {
 					return nil, fmt.Errorf("input[%d]: %w", itemIndex, err)
 				}
-				if explicitRole == role && reusableResponsesMessage(item, content) {
-					// The decoded request is read-only for the remainder of the
-					// handler. Reuse the canonical map instead of allocating an
-					// equivalent Chat message for every history item.
-					messages = append(messages, item)
-				} else {
-					messages = append(messages, map[string]any{"role": role, "content": content})
-				}
+				messages = append(messages, map[string]any{"role": role, "content": content})
 			case "reasoning":
 				// Codex 会把上一轮 reasoning item 放回 input。Gemini 不接受该
 				// Responses 专用项，但它不应打断相邻的并行 function_call 分组。
@@ -274,6 +285,18 @@ func responsesToChatRequest(body map[string]any) (map[string]any, error) {
 		}
 	}
 	return chat, nil
+}
+
+func responsesIntermediateJSONValue(value any) any {
+	switch typed := value.(type) {
+	case nil:
+		return map[string]any{}
+	case string:
+		if strings.TrimSpace(typed) == "" {
+			return map[string]any{}
+		}
+	}
+	return value
 }
 
 func convertResponsesTools(raw any) ([]any, map[string]responsesNamespacedTool, error) {
@@ -478,7 +501,7 @@ func responseContentToChat(v any) (any, error) {
 	return content, nil
 }
 
-func reusableResponsesMessage(item map[string]any, convertedContent any) bool {
+func reusableResponsesMessage(item map[string]any) bool {
 	if len(item) < 2 || len(item) > 3 {
 		return false
 	}
@@ -495,14 +518,9 @@ func reusableResponsesMessage(item map[string]any, convertedContent any) bool {
 	}
 	switch original := item["content"].(type) {
 	case string:
-		converted, ok := convertedContent.(string)
-		return ok && converted == original
+		return true
 	case []any:
-		converted, ok := convertedContent.([]any)
-		if !ok || len(converted) != len(original) {
-			return false
-		}
-		return len(original) == 0 || &converted[0] == &original[0]
+		return responsesTextContentCanPassThrough(original)
 	default:
 		return false
 	}

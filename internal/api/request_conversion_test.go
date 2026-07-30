@@ -8,19 +8,18 @@ import (
 func TestReusableResponsesMessageOnlyAcceptsCanonicalReadOnlyShape(t *testing.T) {
 	content := []any{map[string]any{"type": "input_text", "text": "hello"}}
 	canonical := map[string]any{"type": "message", "role": "user", "content": content}
-	converted, err := responseContentToChat(content)
-	if err != nil || !reusableResponsesMessage(canonical, converted) {
-		t.Fatalf("canonical message was not reusable: converted=%#v err=%v", converted, err)
+	if !reusableResponsesMessage(canonical) {
+		t.Fatalf("canonical message was not reusable: %#v", canonical)
 	}
 
 	withExtraField := map[string]any{
 		"type": "message", "role": "assistant", "content": "hello",
 		"tool_calls": []any{map[string]any{"name": "must-not-leak"}},
 	}
-	if reusableResponsesMessage(withExtraField, "hello") {
+	if reusableResponsesMessage(withExtraField) {
 		t.Fatal("message with extra Chat fields must be copied and sanitized")
 	}
-	if reusableResponsesMessage(map[string]any{"type": "message", "content": "hello"}, "hello") {
+	if reusableResponsesMessage(map[string]any{"type": "message", "content": "hello"}) {
 		t.Fatal("message requiring a default role must not be reused")
 	}
 }

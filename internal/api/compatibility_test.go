@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -87,6 +88,79 @@ func TestResponsesRequestConversionGroupsParallelFunctionCalls(t *testing.T) {
 	toolCalls, _ := assistant["tool_calls"].([]any)
 	if assistant["role"] != "assistant" || len(toolCalls) != 2 {
 		t.Fatalf("并行 function_call 未合并: %#v", assistant)
+	}
+}
+
+func TestResponsesStructuredToolValuesPassThroughWithoutMutation(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		arguments  any
+		output     any
+		wantArgs   map[string]any
+		wantOutput map[string]any
+	}{
+		{
+			name:       "decoded objects",
+			arguments:  map[string]any{"query": "<tag>", "limit": float64(2)},
+			output:     map[string]any{"items": []any{"<one>", "&two"}},
+			wantArgs:   map[string]any{"query": "<tag>", "limit": float64(2)},
+			wantOutput: map[string]any{"items": []any{"<one>", "&two"}},
+		},
+		{
+			name:       "blank values preserve empty object semantics",
+			arguments:  " ",
+			output:     "",
+			wantArgs:   map[string]any{},
+			wantOutput: map[string]any{},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			body := map[string]any{"input": []any{
+				map[string]any{
+					"type": "function_call", "call_id": "call_1",
+					"name": "lookup", "arguments": test.arguments,
+				},
+				map[string]any{
+					"type": "function_call_output", "call_id": "call_1",
+					"output": test.output,
+				},
+			}}
+			before, err := json.Marshal(body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			chat, err := responsesToChatRequest(body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			chat["model"] = "gemini-test"
+			model, payload, err := transform.ConvertChatRequest(
+				chat,
+				config.StaticProvider(config.DefaultConfig()),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			vars := transform.BuildVertexVariables(
+				model,
+				payload,
+				config.StaticProvider(config.DefaultConfig()),
+			)
+			contents := vars["contents"].([]any)
+			call := contents[0].(map[string]any)["parts"].([]any)[0].(map[string]any)["functionCall"].(map[string]any)
+			response := contents[1].(map[string]any)["parts"].([]any)[0].(map[string]any)["functionResponse"].(map[string]any)
+			if !reflect.DeepEqual(call["args"], test.wantArgs) ||
+				!reflect.DeepEqual(response["response"], test.wantOutput) {
+				t.Fatalf("tool values changed: call=%#v response=%#v", call, response)
+			}
+			after, err := json.Marshal(body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(after, before) {
+				t.Fatalf("conversion mutated input:\nbefore=%s\nafter=%s", before, after)
+			}
+		})
 	}
 }
 
