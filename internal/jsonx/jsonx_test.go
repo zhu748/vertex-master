@@ -259,6 +259,32 @@ func TestMarshalViewMatchesMarshalAndSkipsConsumerOnError(t *testing.T) {
 	}
 }
 
+func TestMarshalHTMLViewMatchesStandardMarshal(t *testing.T) {
+	tests := []any{
+		map[string]any{
+			"<key>":  "node <one> & two",
+			"nested": []any{json.RawMessage(`"\u003c"`), escapedHTMLMarshaler{}},
+		},
+		"plain",
+		nil,
+	}
+	for _, value := range tests {
+		want, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []byte
+		if err := MarshalHTMLView(value, func(view []byte) {
+			got = append(got, view...)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("MarshalHTMLView()=%q, json.Marshal()=%q", got, want)
+		}
+	}
+}
+
 func TestMarshalResultDoesNotAliasPooledBuffer(t *testing.T) {
 	first, err := Marshal(map[string]any{"value": "first"})
 	if err != nil {

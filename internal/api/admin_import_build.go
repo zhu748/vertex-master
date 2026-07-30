@@ -9,6 +9,7 @@ import (
 	"unsafe"
 
 	"github.com/bsfdsagfadg/vertex/internal/base64x"
+	"github.com/bsfdsagfadg/vertex/internal/jsonx"
 	"github.com/bsfdsagfadg/vertex/internal/nodes"
 	proxytransport "github.com/bsfdsagfadg/vertex/internal/transport"
 	"gopkg.in/yaml.v3"
@@ -124,18 +125,21 @@ func buildClashURI(proxy map[string]any) string {
 }
 
 func encodeClashProxyURI(proxy map[string]any) string {
-	body, err := json.Marshal(proxy)
+	const prefix = "clash://"
+	var uri string
+	err := jsonx.MarshalHTMLView(proxy, func(body []byte) {
+		encoded := make([]byte, len(prefix)+base64.StdEncoding.EncodedLen(len(body)))
+		copy(encoded, prefix)
+		base64.StdEncoding.Encode(encoded[len(prefix):], body)
+		// encoded is freshly allocated and never mutated after publication. Reusing
+		// its backing storage avoids a temporary Base64 string plus a second prefix
+		// concatenation allocation for every imported node.
+		uri = unsafe.String(unsafe.SliceData(encoded), len(encoded))
+	})
 	if err != nil {
 		return ""
 	}
-	const prefix = "clash://"
-	encoded := make([]byte, len(prefix)+base64.StdEncoding.EncodedLen(len(body)))
-	copy(encoded, prefix)
-	base64.StdEncoding.Encode(encoded[len(prefix):], body)
-	// encoded is freshly allocated and never mutated after publication. Reusing
-	// its backing storage avoids a temporary Base64 string plus a second prefix
-	// concatenation allocation for every imported node.
-	return unsafe.String(unsafe.SliceData(encoded), len(encoded))
+	return uri
 }
 
 func v2rayNConfigType(v any) int {

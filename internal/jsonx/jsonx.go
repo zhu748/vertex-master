@@ -22,8 +22,12 @@ var marshalBufferPool = sync.Pool{ //nolint:gochecknoglobals
 // Encode 将 JSON 写入 writer，不做 HTML 转义。与 json.Encoder.Encode 一样，
 // 成功时末尾包含一个换行符，适合直接嵌入流式协议缓冲。
 func Encode(writer io.Writer, value any) error {
+	return encode(writer, value, false)
+}
+
+func encode(writer io.Writer, value any, escapeHTML bool) error {
 	enc := json.NewEncoder(writer)
-	enc.SetEscapeHTML(false)
+	enc.SetEscapeHTML(escapeHTML)
 	if err := enc.Encode(value); err != nil {
 		return fmt.Errorf("序列化 JSON: %w", err)
 	}
@@ -98,7 +102,7 @@ func (w *trailingNewlineWriter) finish() error {
 
 // Marshal 序列化为 JSON，不做 HTML 转义、不转义非 ASCII。
 func Marshal(v any) ([]byte, error) {
-	buf, view, err := encodeToMarshalBuffer(v)
+	buf, view, err := encodeToMarshalBuffer(v, false)
 	if err != nil {
 		return nil, err
 	}
@@ -110,7 +114,7 @@ func Marshal(v any) ([]byte, error) {
 // MarshalString 序列化为 JSON 字符串。与 Marshal 后再转换 string 相比，
 // 它只复制一次编码结果，适合函数参数等最终必须是 JSON 字符串的协议字段。
 func MarshalString(v any) (string, error) {
-	buf, view, err := encodeToMarshalBuffer(v)
+	buf, view, err := encodeToMarshalBuffer(v, false)
 	if err != nil {
 		return "", err
 	}
@@ -125,7 +129,7 @@ func MarshalString(v any) (string, error) {
 // payload when the consumer can finish synchronously, such as an HTTP Write.
 // consume is called only after serialization succeeds.
 func MarshalView(v any, consume func([]byte)) error {
-	buf, view, err := encodeToMarshalBuffer(v)
+	buf, view, err := encodeToMarshalBuffer(v, false)
 	if err != nil {
 		return err
 	}
@@ -134,10 +138,23 @@ func MarshalView(v any, consume func([]byte)) error {
 	return nil
 }
 
-func encodeToMarshalBuffer(v any) (*bytes.Buffer, []byte, error) {
+// MarshalHTMLView is the zero-copy callback form of encoding/json.Marshal.
+// It retains standard HTML escaping for formats whose existing canonical bytes
+// depend on it. The view is valid only while consume is running.
+func MarshalHTMLView(v any, consume func([]byte)) error {
+	buf, view, err := encodeToMarshalBuffer(v, true)
+	if err != nil {
+		return err
+	}
+	defer releaseMarshalBuffer(buf)
+	consume(view)
+	return nil
+}
+
+func encodeToMarshalBuffer(v any, escapeHTML bool) (*bytes.Buffer, []byte, error) {
 	buf := marshalBufferPool.Get().(*bytes.Buffer)
 	buf.Reset()
-	if err := Encode(buf, v); err != nil {
+	if err := encode(buf, v, escapeHTML); err != nil {
 		releaseMarshalBuffer(buf)
 		return nil, nil, err
 	}
