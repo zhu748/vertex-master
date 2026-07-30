@@ -28,7 +28,15 @@ func ParseURI(uri string) (map[string]any, error) {
 		return parseShadowsocksURI(uri)
 	}
 	if strings.HasPrefix(uri, "hysteria2://") || strings.HasPrefix(uri, "hy2://") {
-		return parseSimple(uri, "hysteria2")
+		normalizedURI, authorityPorts := splitHysteria2AuthorityPorts(uri)
+		out, err := parseSimple(normalizedURI, "hysteria2")
+		if err != nil {
+			return nil, err
+		}
+		if authorityPorts != "" {
+			out["ports"] = authorityPorts
+		}
+		return out, nil
 	}
 	if strings.HasPrefix(uri, "tuic://") {
 		return parseSimple(uri, "tuic")
@@ -110,9 +118,15 @@ func parseSimple(uri, typ string) (map[string]any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("解析 %s 节点 URI: %w", typ, err)
 	}
-	port, _ := strconv.Atoi(u.Port())
-	if port == 0 {
-		port = 443
+	if u.Hostname() == "" {
+		return nil, fmt.Errorf("解析 %s 节点 URI: 缺少服务器地址", typ)
+	}
+	port := 443
+	if rawPort := u.Port(); rawPort != "" {
+		port, err = strconv.Atoi(rawPort)
+		if err != nil || port < 1 || port > 65535 {
+			return nil, fmt.Errorf("解析 %s 节点 URI: 端口无效", typ)
+		}
 	}
 	q := u.Query()
 	name := u.Fragment
@@ -124,13 +138,20 @@ func parseSimple(uri, typ string) (map[string]any, error) {
 	username := ""
 	password := ""
 	hasPassword := false
+	fullUserInfo := ""
 	if u.User != nil {
 		username = u.User.Username()
 		password, hasPassword = u.User.Password()
+		fullUserInfo, err = url.PathUnescape(u.User.String())
+		if err != nil {
+			return nil, fmt.Errorf("解析 %s 节点 URI: 认证信息无效", typ)
+		}
 	}
 	switch typ {
-	case "trojan", "hysteria2":
+	case "trojan":
 		out["password"] = username
+	case "hysteria2":
+		out["password"] = fullUserInfo
 	case "tuic":
 		out["udp"] = true
 		if hasPassword {
@@ -218,6 +239,21 @@ func parseSimple(uri, typ string) (map[string]any, error) {
 		if alpn := q.Get("alpn"); alpn != "" {
 			out["alpn"] = strings.Split(alpn, ",")
 		}
+		if up := q.Get("up"); up != "" {
+			out["up"] = up
+		}
+		if down := q.Get("down"); down != "" {
+			out["down"] = down
+		}
+		if hopInterval := firstNonEmpty(
+			q.Get("hop_interval"),
+			q.Get("hop-interval"),
+		); hopInterval != "" {
+			out["hop-interval"] = hopInterval
+		}
+		if fingerprint := firstNonEmpty(q.Get("pinSHA256"), q.Get("fp")); fingerprint != "" {
+			out["fingerprint"] = fingerprint
+		}
 	}
 	if typ == "tuic" {
 		if congestionController := firstNonEmpty(
@@ -240,6 +276,45 @@ func parseSimple(uri, typ string) (map[string]any, error) {
 		}
 	}
 	return out, nil
+}
+
+func splitHysteria2AuthorityPorts(uri string) (string, string) {
+	schemeEnd := strings.Index(uri, "://")
+	if schemeEnd < 0 {
+		return uri, ""
+	}
+	head := uri[:schemeEnd+3]
+	rest := uri[schemeEnd+3:]
+	authority := rest
+	tail := ""
+	if tailIndex := strings.IndexAny(rest, "/?#"); tailIndex >= 0 {
+		authority = rest[:tailIndex]
+		tail = rest[tailIndex:]
+	}
+	userInfo := ""
+	if at := strings.LastIndexByte(authority, '@'); at >= 0 {
+		userInfo = authority[:at+1]
+		authority = authority[at+1:]
+	}
+
+	portSeparator := strings.LastIndexByte(authority, ':')
+	if portSeparator < 0 {
+		return uri, ""
+	}
+	host := authority[:portSeparator]
+	ports := authority[portSeparator+1:]
+	if !strings.ContainsAny(ports, ",-") {
+		return uri, ""
+	}
+	firstPort := ports
+	if separator := strings.IndexAny(ports, ",-"); separator >= 0 {
+		firstPort = ports[:separator]
+	}
+	port, err := strconv.Atoi(firstPort)
+	if err != nil || port < 1 || port > 65535 {
+		return uri, ""
+	}
+	return head + userInfo + host + ":" + firstPort + tail, ports
 }
 
 func firstNonEmpty(values ...string) string {

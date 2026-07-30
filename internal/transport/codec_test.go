@@ -115,6 +115,46 @@ func TestParseURIHy2KeepsPortRange(t *testing.T) {
 	}
 }
 
+func TestParseURIHy2KeepsAuthorityPortHoppingAndFullAuth(t *testing.T) {
+	raw := "hysteria2://user:p%40ss@hy2.example.com:20000-55000" +
+		"?sni=edge.example.com&up=20%20mbps&down=100%20mbps" +
+		"&hop_interval=10&pinSHA256=certificate-pin#demo"
+
+	out, err := ParseURI(raw)
+	if err != nil {
+		t.Fatalf("ParseURI returned error: %v", err)
+	}
+	if out["password"] != "user:p@ss" || out["port"] != 20000 ||
+		out["ports"] != "20000-55000" {
+		t.Fatalf("Hysteria2 auth or port hopping not preserved: %#v", out)
+	}
+	if out["up"] != "20 mbps" || out["down"] != "100 mbps" ||
+		out["hop-interval"] != "10" || out["fingerprint"] != "certificate-pin" {
+		t.Fatalf("Hysteria2 transport options not preserved: %#v", out)
+	}
+
+	delete(out, "fingerprint")
+	proxy, err := adapter.ParseProxy(out)
+	if err != nil {
+		t.Fatalf("Mihomo rejected parsed Hysteria2 options: %v", err)
+	}
+	closeProxy(proxy)
+}
+
+func TestParseURISimpleRejectsInvalidEndpoint(t *testing.T) {
+	for _, raw := range []string{
+		"vless://uuid@:443",
+		"trojan://secret@example.com:0",
+		"tuic://token@example.com:65536",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			if out, err := ParseURI(raw); err == nil {
+				t.Fatalf("ParseURI(%q) returned success with %#v", raw, out)
+			}
+		})
+	}
+}
+
 func TestParseURITUICKeepsCredentialsAndTransportOptions(t *testing.T) {
 	raw := "tuic://12345678-1234-1234-1234-123456789012:p%40ss@tuic.example.com:443" +
 		"?sni=edge.example.com&allowInsecure=1&congestion_control=bbr" +
