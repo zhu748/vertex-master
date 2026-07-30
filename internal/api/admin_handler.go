@@ -37,8 +37,9 @@ var adminLogReadBlockPool = sync.Pool{ //nolint:gochecknoglobals
 
 type AdminHandler struct {
 	handler
-	backgroundUploadMu sync.Mutex
-	claudePrompts      *claudePromptStore
+	backgroundUploadMu       sync.Mutex
+	lastBackgroundUploadNano int64
+	claudePrompts            *claudePromptStore
 }
 
 func (adm *AdminHandler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
@@ -403,7 +404,12 @@ func (adm *AdminHandler) adminUploadBg(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	filename := fmt.Sprintf("background%d%s", time.Now().UnixNano(), extension)
+	uploadNano := time.Now().UnixNano()
+	if uploadNano <= adm.lastBackgroundUploadNano {
+		uploadNano = adm.lastBackgroundUploadNano + 1
+	}
+	adm.lastBackgroundUploadNano = uploadNano
+	filename := fmt.Sprintf("background%d%s", uploadNano, extension)
 	targetPath := filepath.Join(assetsDir, filename)
 
 	if err := writeBackgroundFileAtomically(targetPath, data); err != nil {
