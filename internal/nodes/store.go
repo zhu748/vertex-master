@@ -613,10 +613,6 @@ func updateSingleNodeHealthUnsafe(uri string, h *NodeHealth) {
 	enqueueHealthUpdate(healthUpdate{database: database, uri: uri, h: *h})
 }
 
-func updateSingleNodeDisabledUnsafe(uri string, disabled bool) {
-	_ = updateSingleNodeDisabledWithErrorUnsafe(uri, disabled)
-}
-
 func updateSingleNodeDisabledWithErrorUnsafe(uri string, disabled bool) error {
 	database := db.CurrentDB()
 	if database == nil {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -322,7 +323,16 @@ func clampIntSetting(raw map[string]any, key string, minimum, maximum int) {
 	var value int
 	switch v := raw[key].(type) {
 	case float64:
-		value = int(v)
+		switch {
+		case math.IsNaN(v), math.IsInf(v, 0):
+			return
+		case v <= float64(minimum):
+			value = minimum
+		case v >= float64(maximum):
+			value = maximum
+		default:
+			value = int(v)
+		}
 	case int:
 		value = v
 	default:

@@ -1,10 +1,6 @@
 package transform
 
-import (
-	"strings"
-
-	"github.com/bsfdsagfadg/vertex/internal/config"
-)
+import "strings"
 
 // ensureGenCfg 返回 geminiPayload["generationConfig"]（不存在则创建）。
 func ensureGenCfg(geminiPayload map[string]any) map[string]any {
@@ -211,11 +207,6 @@ var defaultVertexSafetySettings = func() []vertexSafetySetting { //nolint:gochec
 	}
 	return out
 }()
-
-// buildSafetySettings 构建默认安全设置。
-func buildSafetySettings(cfg config.ConfigProvider) []vertexSafetySetting {
-	return buildSafetySettingsFromMap(cfg.SafetySettings())
-}
 
 func buildSafetySettingsFromMap(configured map[string]string) []vertexSafetySetting {
 	if len(configured) == 0 {

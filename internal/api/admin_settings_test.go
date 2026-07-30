@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -160,6 +161,12 @@ func TestAdminPutSettingsRejectsInvalidProxySettings(t *testing.T) {
 				t.Fatalf("非法设置不应写配置文件，stat err=%v", err)
 			}
 		})
+	}
+}
+
+func TestAdminSettingIntRejectsPlatformOverflow(t *testing.T) {
+	if value, ok := adminSettingInt(float64(math.MaxInt) + 1); ok || value != 0 {
+		t.Fatalf("overflowing admin integer=(%d,%v), want (0,false)", value, ok)
 	}
 }
 

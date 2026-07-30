@@ -3,12 +3,33 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 )
+
+func TestClampIntSettingHandlesExtremeFloats(t *testing.T) {
+	values := map[string]any{
+		"positive": math.MaxFloat64,
+		"negative": -math.MaxFloat64,
+		"fraction": float64(5.9),
+		"nan":      math.NaN(),
+	}
+	clampIntSetting(values, "positive", 1, 20)
+	clampIntSetting(values, "negative", 1, 20)
+	clampIntSetting(values, "fraction", 1, 20)
+	clampIntSetting(values, "nan", 1, 20)
+
+	if values["positive"] != 20 || values["negative"] != 1 || values["fraction"] != 5 {
+		t.Fatalf("unexpected clamped values: %#v", values)
+	}
+	if value, ok := values["nan"].(float64); !ok || !math.IsNaN(value) {
+		t.Fatalf("non-finite setting should remain invalid: %#v", values["nan"])
+	}
+}
 
 func TestWriteSettingsSerializesConcurrentMerges(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")

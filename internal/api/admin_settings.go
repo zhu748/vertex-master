@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
 
 	"github.com/bsfdsagfadg/vertex/internal/config"
@@ -504,7 +505,8 @@ func adminSettingInt(value any) (int, bool) {
 	if !ok || math.IsNaN(number) || math.IsInf(number, 0) || math.Trunc(number) != number {
 		return 0, false
 	}
-	if number > float64(math.MaxInt) || number < float64(math.MinInt) {
+	limit := float64(uint64(1) << (strconv.IntSize - 1))
+	if number < -limit || number >= limit {
 		return 0, false
 	}
 	return int(number), true

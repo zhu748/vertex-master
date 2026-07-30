@@ -12,13 +12,6 @@ import (
 	"github.com/bsfdsagfadg/vertex/internal/base64x"
 )
 
-func errToStr(err error) string {
-	if err == nil {
-		return ""
-	}
-	return err.Error()
-}
-
 func min(a, b int) int {
 	if a < b {
 		return a

@@ -52,21 +52,6 @@ func isTruthy(v any) bool {
 	}
 }
 
-// asMapSlice 把 any 规整成 []map[string]any（非 map 元素丢弃）。
-func asMapSlice(v any) []map[string]any {
-	arr, ok := v.([]any)
-	if !ok {
-		return nil
-	}
-	out := make([]map[string]any, 0, len(arr))
-	for _, item := range arr {
-		if m, ok := item.(map[string]any); ok {
-			out = append(out, m)
-		}
-	}
-	return out
-}
-
 // trimLowerSuffix 是给响应/猜测 mime 用的小工具，去掉 query/fragment 后转小写。
 func trimLowerSuffix(s string) string {
 	if parts := strings.SplitN(s, "?", 2); len(parts) > 0 {
