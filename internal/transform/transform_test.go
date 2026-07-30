@@ -955,49 +955,45 @@ func TestSplitAssistantContent_PlainText(t *testing.T) {
 		t.Errorf("纯文本应原样为单个 text part，got %v", parts)
 	}
 }
-func TestStripGeminiIDs(t *testing.T) {
+func TestNormalizeGeminiToolCallID(t *testing.T) {
+	for value, want := range map[string]string{
+		"gemini-tool-call-1-vp12345678": "gemini-tool-call-1",
+		"gemini-tool-call-1-vp1234567":  "gemini-tool-call-1-vp1234567",
+		"call-1-vp12345678":             "call-1-vp12345678",
+		"gemini-tool-call-1":            "gemini-tool-call-1",
+	} {
+		if got := normalizeGeminiToolCallID(value); got != want {
+			t.Errorf("normalizeGeminiToolCallID(%q)=%q, want %q", value, got, want)
+		}
+	}
+}
+
+func TestBuildVertexVariablesPreservesPromptTextThatLooksLikeInternalID(t *testing.T) {
+	const text = "gemini-tool-call-1-vp12345678"
 	payload := map[string]any{
-		"contents": []any{
-			map[string]any{
-				"role": "model",
-				"parts": []any{
-					map[string]any{
-						"functionCall": map[string]any{
-							"id": "gemini-tool-call-1-vp12345678",
-						},
-					},
-				},
+		"contents": []any{map[string]any{
+			"role": "user", "parts": []any{
+				map[string]any{"text": text},
+				map[string]any{"functionCall": map[string]any{
+					"id": text, "name": "lookup", "args": map[string]any{},
+				}},
 			},
-			map[string]any{
-				"role": "function",
-				"parts": []any{
-					map[string]any{
-						"functionResponse": map[string]any{
-							"id": "gemini-tool-call-1-vp12345678",
-						},
-					},
-				},
-			},
+		}},
+		"systemInstruction": map[string]any{
+			"parts": []any{map[string]any{"text": text}},
 		},
 	}
-
-	sanitized, changed := stripGeminiIDsCopy(payload, 0)
-	if !changed {
-		t.Fatal("expected Gemini IDs to be normalized")
-	}
-	payload = sanitized.(map[string]any)
-
-	contents := payload["contents"].([]any)
-	m1 := contents[0].(map[string]any)
-	fc := m1["parts"].([]any)[0].(map[string]any)["functionCall"].(map[string]any)
-	if fc["id"] != "gemini-tool-call-1" {
-		t.Errorf("functionCall.id stripping 失败: %v", fc["id"])
-	}
-
-	m2 := contents[1].(map[string]any)
-	fr := m2["parts"].([]any)[0].(map[string]any)["functionResponse"].(map[string]any)
-	if fr["id"] != "gemini-tool-call-1" {
-		t.Errorf("functionResponse.id stripping 失败: %v", fr["id"])
+	vars := BuildVertexVariables(
+		"gemini-3.1-flash",
+		payload,
+		config.StaticProvider(config.DefaultConfig()),
+	)
+	contents := vars["contents"].([]any)
+	gotText := contents[0].(map[string]any)["parts"].([]any)[0].(map[string]any)["text"]
+	system := vars["systemInstruction"].(map[string]any)
+	gotSystem := system["parts"].([]any)[0].(map[string]any)["text"]
+	if gotText != text || gotSystem != text {
+		t.Fatalf("prompt-like IDs were modified: content=%q system=%q", gotText, gotSystem)
 	}
 }
 
@@ -1011,7 +1007,7 @@ func TestBuildVertexVariablesStripsIDsWithoutMutatingInput(t *testing.T) {
 			}},
 			map[string]any{"role": "function", "parts": []any{
 				map[string]any{"functionResponse": map[string]any{
-					"id": "gemini-tool-call-1-vp12345678", "name": "lookup", "response": map[string]any{},
+					"id": "gemini-tool-call-1", "response": map[string]any{},
 				}},
 			}},
 		},
@@ -1039,14 +1035,8 @@ func TestBuildVertexVariablesStripsIDsWithoutMutatingInput(t *testing.T) {
 	if _, exists := response["id"]; exists {
 		t.Fatalf("outbound functionResponse retained internal ID: %#v", response)
 	}
-	sanitized, changed := stripGeminiIDsCopy(payload, 0)
-	if !changed {
-		t.Fatal("copy-on-write ID normalization did not detect suffixes")
-	}
-	sanitizedContents := sanitized.(map[string]any)["contents"].([]any)
-	sanitizedCall := sanitizedContents[0].(map[string]any)["parts"].([]any)[0].(map[string]any)["functionCall"].(map[string]any)
-	if sanitizedCall["id"] != "gemini-tool-call-1" {
-		t.Fatalf("copy-on-write ID=%v", sanitizedCall["id"])
+	if response["name"] != "lookup" {
+		t.Fatalf("normalized ID did not anchor function response name: %#v", response)
 	}
 }
 

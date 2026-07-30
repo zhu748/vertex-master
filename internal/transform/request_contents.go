@@ -230,9 +230,8 @@ func hasRemotePrefix(url string) bool {
 
 // BuildVertexVariables 由 geminiPayload 构建发往上游的 variables。
 func BuildVertexVariables(model string, geminiPayload map[string]any, cfg config.ConfigProvider) map[string]any {
-	if sanitized, changed := stripGeminiIDsCopy(geminiPayload, 0); changed {
-		geminiPayload = sanitized.(map[string]any)
-	}
+	contents := geminiPayload["contents"]
+	canonicalTextContents := canonicalTextContentsCanPassThrough(contents)
 	vars := make(map[string]any, len(supportedVarFields)+2)
 	resolvedModel := parseModelName(model)
 	vars["model"] = resolvedModel
@@ -248,7 +247,7 @@ func BuildVertexVariables(model string, geminiPayload map[string]any, cfg config
 	handleSystemInstruction(vars)
 
 	if c, ok := vars["contents"]; ok {
-		if !canonicalTextContentsCanPassThrough(c) {
+		if !canonicalTextContents {
 			c = normalizeContents(c)
 			c = handleInlineDataCase(c)
 			c = normalizeContents(c)
@@ -861,7 +860,7 @@ func filterEmptyContents(contents any) any {
 								if callIDMap == nil {
 									callIDMap = make(map[string]string)
 								}
-								callIDMap[fid] = name
+								callIDMap[normalizeGeminiToolCallID(fid)] = name
 							}
 						}
 					}
@@ -924,59 +923,13 @@ func filterEmptyContents(contents any) any {
 	return list
 }
 
-const maxGeminiIDStripDepth = 256
-
-// stripGeminiIDsCopy 只复制包含需要清洗 ID 的祖先 map/slice。绝大多数请求
-// 不包含代理追加的 -vpXXXXXXXX 后缀，因此直接返回原树，允许并发候选安全共享。
-func stripGeminiIDsCopy(value any, depth int) (any, bool) {
-	if depth > maxGeminiIDStripDepth {
-		return value, false
+func normalizeGeminiToolCallID(value string) string {
+	if !strings.HasPrefix(value, "gemini-tool-call-") {
+		return value
 	}
-	switch typed := value.(type) {
-	case string:
-		if strings.HasPrefix(typed, "gemini-tool-call-") && len(typed) > 11 && strings.Contains(typed, "-vp") {
-			index := strings.LastIndex(typed, "-vp")
-			if index > 0 && len(typed)-index == 11 {
-				return typed[:index], true
-			}
-		}
-		return value, false
-	case map[string]any:
-		var copied map[string]any
-		for key, child := range typed {
-			normalized, changed := stripGeminiIDsCopy(child, depth+1)
-			if !changed {
-				continue
-			}
-			if copied == nil {
-				copied = make(map[string]any, len(typed))
-				for originalKey, originalValue := range typed {
-					copied[originalKey] = originalValue
-				}
-			}
-			copied[key] = normalized
-		}
-		if copied != nil {
-			return copied, true
-		}
-		return value, false
-	case []any:
-		var copied []any
-		for index, child := range typed {
-			normalized, changed := stripGeminiIDsCopy(child, depth+1)
-			if !changed {
-				continue
-			}
-			if copied == nil {
-				copied = append([]any(nil), typed...)
-			}
-			copied[index] = normalized
-		}
-		if copied != nil {
-			return copied, true
-		}
-		return value, false
-	default:
-		return value, false
+	index := strings.LastIndex(value, "-vp")
+	if index > 0 && len(value)-index == 11 {
+		return value[:index]
 	}
+	return value
 }

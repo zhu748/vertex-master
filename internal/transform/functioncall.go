@@ -126,7 +126,7 @@ func cleanPartWithID(part map[string]any, functionCallNames []string, responseIn
 			name := strings.TrimSpace(toString(frMap["name"]))
 			if name == "" {
 				if fid, _ := frMap["id"].(string); fid != "" && callIDMap != nil {
-					name = callIDMap[fid]
+					name = callIDMap[normalizeGeminiToolCallID(fid)]
 				}
 				if name == "" && responseIndex >= 0 && responseIndex < len(functionCallNames) {
 					name = functionCallNames[responseIndex]
