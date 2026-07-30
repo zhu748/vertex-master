@@ -23,6 +23,10 @@ func BenchmarkAdminGetNodesLargePoolPage(b *testing.B) {
 	benchmarkAdminGetNodesLargePool(b, "admin-page-benchmark", "&page=1&page_size=50")
 }
 
+func BenchmarkAdminGetNodesLargePoolPageNoMatch(b *testing.B) {
+	benchmarkAdminGetNodesLargePool(b, "admin-page-no-match", "-missing&page=1&page_size=50")
+}
+
 func BenchmarkAdminGetNodesLargePoolURIsOnly(b *testing.B) {
 	benchmarkAdminGetNodesLargePool(b, "admin-uris-benchmark", "&status=healthy&uris_only=true")
 }
@@ -93,6 +97,91 @@ func TestWriteAdminNodeURIsJSONMatchesGenericEncoding(t *testing.T) {
 			direct.Code,
 			direct.Header().Get("Content-Type"),
 			direct.Body.String(),
+			generic.Code,
+			generic.Header().Get("Content-Type"),
+			generic.Body.String(),
+		)
+	}
+}
+
+func TestAdminNodesPageResponseMatchesGenericEncoding(t *testing.T) {
+	health := map[string]nodes.NodeHealth{
+		"http://user:pass@example.com:8080/path?x=<&>#中文": {
+			SuccessCount:  1,
+			LastTestMs:    12.5,
+			LastTestError: "line\nbreak\u2028",
+		},
+	}
+	typedHealth := make(map[string]*nodes.NodeHealth, len(health))
+	for rawURI, nodeHealth := range health {
+		typedHealth[rawURI] = &nodeHealth
+	}
+	pageNodes := []nodes.Node{{
+		Type:   "http",
+		Name:   "node <&> 中文",
+		RawURI: "http://user:pass@example.com:8080/path?x=<&>#中文",
+	}}
+	poolStats := nodes.NodePoolStats{
+		Total: 2, Enabled: 1, Disabled: 1, Healthy: 1, Unhealthy: 1,
+	}
+	scheduler := ProxyHealthSchedulerStatus{
+		Enabled: true, Running: true, Checked: 2, Succeeded: 1, Failed: 1,
+	}
+	recent := nodes.RecentProxyStatus{
+		Available: true, Name: "node <&> 中文", Type: "http", Address: "example.com:8080",
+	}
+	history := []nodes.RecentProxyEvent{{
+		Name: "node <&> 中文", Type: "http", Address: "example.com:8080",
+	}}
+	typed := httptest.NewRecorder()
+	writeJSON(typed, http.StatusOK, adminNodesPageResponse{
+		DisabledCount:              1,
+		EnabledCount:               1,
+		Health:                     typedHealth,
+		HealthCycleEstimateMinutes: 30,
+		HealthScheduler:            scheduler,
+		Nodes:                      pageNodes,
+		OverallTotal:               2,
+		Page:                       1,
+		PageSize:                   50,
+		PoolStats:                  poolStats,
+		RecentProxy:                recent,
+		RecentProxyHistory:         history,
+		StickyNodePriority:         true,
+		StickyPoolAvailable:        3,
+		StickyPoolInUse:            2,
+		Total:                      1,
+		TotalPages:                 1,
+	})
+	generic := httptest.NewRecorder()
+	writeJSON(generic, http.StatusOK, map[string]any{
+		"disabled_count":                1,
+		"enabled_count":                 1,
+		"health":                        health,
+		"health_cycle_estimate_minutes": 30,
+		"health_scheduler":              scheduler,
+		"nodes":                         pageNodes,
+		"overall_total":                 2,
+		"page":                          1,
+		"page_size":                     50,
+		"pool_stats":                    poolStats,
+		"recent_proxy":                  recent,
+		"recent_proxy_history":          history,
+		"sticky_node_priority":          true,
+		"sticky_pool_available":         3,
+		"sticky_pool_in_use":            2,
+		"total":                         1,
+		"total_pages":                   1,
+	})
+
+	if typed.Code != generic.Code ||
+		typed.Header().Get("Content-Type") != generic.Header().Get("Content-Type") ||
+		typed.Body.String() != generic.Body.String() {
+		t.Fatalf(
+			"typed page response differs:\ntyped=%d %q %q\ngeneric=%d %q %q",
+			typed.Code,
+			typed.Header().Get("Content-Type"),
+			typed.Body.String(),
 			generic.Code,
 			generic.Header().Get("Content-Type"),
 			generic.Body.String(),

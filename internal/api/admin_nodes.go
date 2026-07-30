@@ -71,10 +71,10 @@ func (adm *AdminHandler) adminGetNodes(w http.ResponseWriter, r *http.Request) {
 	}
 	snapshot := nodes.LoadNodePoolPageSnapshot(time.Now(), page, pageSize, match)
 	pageNodes := snapshot.Nodes
-	pageHealth := make(map[string]nodes.NodeHealth, len(pageNodes))
+	pageHealth := make(map[string]*nodes.NodeHealth, len(pageNodes))
 	for index, node := range pageNodes {
 		if snapshot.HasHealth[index] {
-			pageHealth[node.RawURI] = snapshot.Health[index]
+			pageHealth[node.RawURI] = &snapshot.Health[index]
 		}
 	}
 
@@ -86,25 +86,47 @@ func (adm *AdminHandler) adminGetNodes(w http.ResponseWriter, r *http.Request) {
 		rounds := (poolStats.Enabled + batchSize - 1) / batchSize
 		healthCycleEstimateMinutes = rounds * max(1, adm.cfg.ProxyHealthCheckIntervalMinutes())
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"nodes":                         pageNodes,
-		"health":                        pageHealth,
-		"total":                         snapshot.TotalMatches,
-		"overall_total":                 poolStats.Total,
-		"page":                          snapshot.Page,
-		"page_size":                     snapshot.PageSize,
-		"total_pages":                   snapshot.TotalPages,
-		"enabled_count":                 poolStats.Enabled,
-		"disabled_count":                poolStats.Disabled,
-		"sticky_pool_available":         sp.AvailableCount(),
-		"sticky_pool_in_use":            sp.StaleCount(),
-		"sticky_node_priority":          adm.cfg.StickyNodePriority(),
-		"pool_stats":                    poolStats,
-		"health_scheduler":              GetProxyHealthSchedulerStatus(),
-		"health_cycle_estimate_minutes": healthCycleEstimateMinutes,
-		"recent_proxy":                  nodes.GetRecentProxyStatus(),
-		"recent_proxy_history":          nodes.GetRecentProxyHistory(10),
+	// Keep fields in the same lexicographic order used by encoding/json for
+	// string-keyed maps so the response remains byte-for-byte compatible.
+	writeJSON(w, http.StatusOK, adminNodesPageResponse{
+		DisabledCount:              poolStats.Disabled,
+		EnabledCount:               poolStats.Enabled,
+		Health:                     pageHealth,
+		HealthCycleEstimateMinutes: healthCycleEstimateMinutes,
+		HealthScheduler:            GetProxyHealthSchedulerStatus(),
+		Nodes:                      pageNodes,
+		OverallTotal:               poolStats.Total,
+		Page:                       snapshot.Page,
+		PageSize:                   snapshot.PageSize,
+		PoolStats:                  poolStats,
+		RecentProxy:                nodes.GetRecentProxyStatus(),
+		RecentProxyHistory:         nodes.GetRecentProxyHistory(10),
+		StickyNodePriority:         adm.cfg.StickyNodePriority(),
+		StickyPoolAvailable:        sp.AvailableCount(),
+		StickyPoolInUse:            sp.StaleCount(),
+		Total:                      snapshot.TotalMatches,
+		TotalPages:                 snapshot.TotalPages,
 	})
+}
+
+type adminNodesPageResponse struct {
+	DisabledCount              int                          `json:"disabled_count"`
+	EnabledCount               int                          `json:"enabled_count"`
+	Health                     map[string]*nodes.NodeHealth `json:"health"`
+	HealthCycleEstimateMinutes int                          `json:"health_cycle_estimate_minutes"`
+	HealthScheduler            ProxyHealthSchedulerStatus   `json:"health_scheduler"`
+	Nodes                      []nodes.Node                 `json:"nodes"`
+	OverallTotal               int                          `json:"overall_total"`
+	Page                       int                          `json:"page"`
+	PageSize                   int                          `json:"page_size"`
+	PoolStats                  nodes.NodePoolStats          `json:"pool_stats"`
+	RecentProxy                nodes.RecentProxyStatus      `json:"recent_proxy"`
+	RecentProxyHistory         []nodes.RecentProxyEvent     `json:"recent_proxy_history"`
+	StickyNodePriority         bool                         `json:"sticky_node_priority"`
+	StickyPoolAvailable        int                          `json:"sticky_pool_available"`
+	StickyPoolInUse            int                          `json:"sticky_pool_in_use"`
+	Total                      int                          `json:"total"`
+	TotalPages                 int                          `json:"total_pages"`
 }
 
 type adminNodeURIsResponse struct {
