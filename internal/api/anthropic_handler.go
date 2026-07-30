@@ -344,9 +344,13 @@ func appendAnthropicMessageToChat(result []any, role string, content any) ([]any
 						blockIndex,
 					)
 				}
-				toolCalls = append(toolCalls, map[string]any{
-					"id": block["id"], "type": "function",
-					"function": map[string]any{"name": block["name"], "arguments": jsonString(block["input"])},
+				toolCalls = append(toolCalls, transform.CanonicalOAIToolCall{
+					ID:   stringValue(block["id"]),
+					Type: "function",
+					Function: transform.CanonicalOAIFunctionCallData{
+						Name:      stringValue(block["name"]),
+						Arguments: normalizedIntermediateJSONValue(block["input"]),
+					},
 				})
 			case "thinking", "redacted_thinking":
 				// Extended-thinking history is provider-private context. Gemini
@@ -456,14 +460,14 @@ func anthropicUserTextContentCanPassThrough(content any) ([]any, bool) {
 	return blocks, true
 }
 
-func anthropicToolResult(v any) string {
+func anthropicToolResult(v any) any {
 	if s, ok := v.(string); ok {
 		return s
 	}
 	if text, ok := anthropicTextBlocks(v); ok && text != "" {
 		return text
 	}
-	return jsonString(v)
+	return normalizedIntermediateJSONValue(v)
 }
 
 type anthropicMessageResponse struct {

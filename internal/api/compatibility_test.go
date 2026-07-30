@@ -164,6 +164,65 @@ func TestResponsesStructuredToolValuesPassThroughWithoutMutation(t *testing.T) {
 	}
 }
 
+func TestAnthropicStructuredToolValuesPassThroughWithoutMutation(t *testing.T) {
+	arguments := map[string]any{"query": "<tag>", "limit": float64(2)}
+	output := map[string]any{"items": []any{"<one>", "&two"}}
+	body := map[string]any{
+		"max_tokens": float64(64),
+		"messages": []any{
+			map[string]any{
+				"role": "assistant",
+				"content": []any{map[string]any{
+					"type": "tool_use", "id": "call_1",
+					"name": "lookup", "input": arguments,
+				}},
+			},
+			map[string]any{
+				"role": "user",
+				"content": []any{map[string]any{
+					"type": "tool_result", "tool_use_id": "call_1",
+					"content": output,
+				}},
+			},
+		},
+	}
+	before, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chat, err := anthropicToChatRequest(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chat["model"] = "gemini-test"
+	model, payload, err := transform.ConvertChatRequest(
+		chat,
+		config.StaticProvider(config.DefaultConfig()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vars := transform.BuildVertexVariables(
+		model,
+		payload,
+		config.StaticProvider(config.DefaultConfig()),
+	)
+	contents := vars["contents"].([]any)
+	call := contents[0].(map[string]any)["parts"].([]any)[0].(map[string]any)["functionCall"].(map[string]any)
+	response := contents[1].(map[string]any)["parts"].([]any)[0].(map[string]any)["functionResponse"].(map[string]any)
+	if !reflect.DeepEqual(call["args"], arguments) ||
+		!reflect.DeepEqual(response["response"], output) {
+		t.Fatalf("Anthropic tool values changed: call=%#v response=%#v", call, response)
+	}
+	after, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("Anthropic conversion mutated input:\nbefore=%s\nafter=%s", before, after)
+	}
+}
+
 func TestResponsesTextContentPassesThroughFullConversion(t *testing.T) {
 	content := []any{
 		map[string]any{"type": "input_text", "text": "one"},

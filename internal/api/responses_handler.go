@@ -205,7 +205,7 @@ func responsesToChatRequest(body map[string]any) (map[string]any, error) {
 					Type: "function",
 					Function: transform.CanonicalOAIFunctionCallData{
 						Name: name,
-						Arguments: responsesIntermediateJSONValue(
+						Arguments: normalizedIntermediateJSONValue(
 							item["arguments"],
 						),
 					},
@@ -227,7 +227,7 @@ func responsesToChatRequest(body map[string]any) (map[string]any, error) {
 				messages = append(messages, map[string]any{
 					"role":         "tool",
 					"tool_call_id": item["call_id"],
-					"content":      responsesIntermediateJSONValue(item["output"]),
+					"content":      normalizedIntermediateJSONValue(item["output"]),
 				})
 			case "message", "":
 				flushToolCalls()
@@ -285,18 +285,6 @@ func responsesToChatRequest(body map[string]any) (map[string]any, error) {
 		}
 	}
 	return chat, nil
-}
-
-func responsesIntermediateJSONValue(value any) any {
-	switch typed := value.(type) {
-	case nil:
-		return map[string]any{}
-	case string:
-		if strings.TrimSpace(typed) == "" {
-			return map[string]any{}
-		}
-	}
-	return value
 }
 
 func convertResponsesTools(raw any) ([]any, map[string]responsesNamespacedTool, error) {

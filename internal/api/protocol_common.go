@@ -592,6 +592,18 @@ func jsonString(v any) string {
 	return data
 }
 
+func normalizedIntermediateJSONValue(value any) any {
+	switch typed := value.(type) {
+	case nil:
+		return map[string]any{}
+	case string:
+		if strings.TrimSpace(typed) == "" {
+			return map[string]any{}
+		}
+	}
+	return value
+}
+
 func jsonValue(s string) any {
 	if strings.TrimSpace(s) == "" {
 		return map[string]any{}

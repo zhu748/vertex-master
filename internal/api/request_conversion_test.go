@@ -3,6 +3,8 @@ package api
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/bsfdsagfadg/vertex/internal/transform"
 )
 
 func TestReusableResponsesMessageOnlyAcceptsCanonicalReadOnlyShape(t *testing.T) {
@@ -79,8 +81,9 @@ func TestAnthropicAssistantConversionPreservesTextAndToolOrder(t *testing.T) {
 	if len(toolCalls) != 1 {
 		t.Fatalf("assistant tools=%#v", toolCalls)
 	}
-	function := toolCalls[0].(map[string]any)["function"].(map[string]any)
-	if function["name"] != "lookup" || function["arguments"] != `{"q":"x"}` {
+	call, ok := toolCalls[0].(transform.CanonicalOAIToolCall)
+	if !ok || call.Function.Name != "lookup" ||
+		call.Function.Arguments.(map[string]any)["q"] != "x" {
 		t.Fatalf("assistant tools=%#v", toolCalls)
 	}
 	after, err := json.Marshal(content)
@@ -270,10 +273,9 @@ func TestAnthropicToolResultPreservesMixedContent(t *testing.T) {
 	}
 	messages := converted["messages"].([]any)
 	tool := messages[0].(map[string]any)
-	content := tool["content"].(string)
-	var blocks []any
-	if err := json.Unmarshal([]byte(content), &blocks); err != nil {
-		t.Fatalf("复合 tool_result 应保留为 JSON 数组，got %q: %v", content, err)
+	blocks, ok := tool["content"].([]any)
+	if !ok {
+		t.Fatalf("复合 tool_result 应保留已解码数组，got %#v", tool["content"])
 	}
 	if len(blocks) != 2 {
 		t.Fatalf("复合 tool_result 丢失内容块: %#v", blocks)
