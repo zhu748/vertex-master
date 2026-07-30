@@ -1087,8 +1087,8 @@ func TestCleanNativeFunctionParametersFusesCleaningWithoutMutatingInput(t *testi
 		t.Fatalf("native properties=%#v", properties)
 	}
 	property := properties[0]
-	value := property.Value.(map[string]any)
-	if property.Key != "enabled" || value["type"] != "BOOLEAN" || value["$ref"] != nil {
+	value, ok := property.Value.(nativeTypeOnlySchema)
+	if !ok || property.Key != "enabled" || value.Type != "BOOLEAN" {
 		t.Fatalf("native property=%#v", property)
 	}
 	encodedProperties, err := json.Marshal(properties)
@@ -1101,6 +1101,85 @@ func TestCleanNativeFunctionParametersFusesCleaningWithoutMutatingInput(t *testi
 	}
 	if genericProperties[0]["key"] != "enabled" {
 		t.Fatalf("紧凑属性切片的 JSON 结构不兼容: %s", encodedProperties)
+	}
+}
+
+func TestCompactNativeSchemaLeafPreservesCleanedJSON(t *testing.T) {
+	tests := []struct {
+		name   string
+		schema map[string]any
+		want   string
+	}{
+		{
+			name:   "type only with unsupported field",
+			schema: map[string]any{"type": "string", "$ref": "#/$defs/value"},
+			want:   `{"type":"STRING"}`,
+		},
+		{
+			name:   "missing type defaults to object",
+			schema: map[string]any{},
+			want:   `{"type":"OBJECT"}`,
+		},
+		{
+			name:   "empty description remains present",
+			schema: map[string]any{"description": "", "type": "boolean"},
+			want:   `{"description":"","type":"BOOLEAN"}`,
+		},
+		{
+			name:   "nil enum remains present",
+			schema: map[string]any{"enum": nil, "type": "string"},
+			want:   `{"enum":null,"type":"STRING"}`,
+		},
+		{
+			name: "description and enum",
+			schema: map[string]any{
+				"description": "mode", "enum": []any{"fast", "safe"}, "type": "string",
+			},
+			want: `{"description":"mode","enum":["fast","safe"],"type":"STRING"}`,
+		},
+		{
+			name:   "zero default remains present",
+			schema: map[string]any{"default": float64(0), "type": "integer"},
+			want:   `{"default":0,"type":"INTEGER"}`,
+		},
+		{
+			name: "false default remains present",
+			schema: map[string]any{
+				"default": false, "description": "enabled", "type": "boolean",
+			},
+			want: `{"default":false,"description":"enabled","type":"BOOLEAN"}`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			before, err := json.Marshal(test.schema)
+			if err != nil {
+				t.Fatal(err)
+			}
+			compact, ok := compactNativeSchemaLeaf(test.schema)
+			if !ok {
+				t.Fatal("common schema leaf did not use compact representation")
+			}
+			encoded, err := json.Marshal(compact)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(encoded) != test.want {
+				t.Fatalf("compact leaf=%s, want %s", encoded, test.want)
+			}
+			after, err := json.Marshal(test.schema)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(after) != string(before) {
+				t.Fatalf("compact conversion mutated input:\nbefore=%s\nafter=%s", before, after)
+			}
+		})
+	}
+	if compact, ok := compactNativeSchemaLeaf(map[string]any{
+		"default": "fast", "enum": []any{"fast", "safe"}, "type": "string",
+	}); ok || compact != nil {
+		t.Fatalf("unsupported compact field combination should use general path: %#v", compact)
 	}
 }
 
@@ -1127,6 +1206,13 @@ func TestCanonicalNativeToolsPassThroughOnlyNativeFunctionDeclarations(t *testin
 	}}}}
 	if got, ok := canonicalNativeTools(standard); ok || got != nil {
 		t.Fatalf("standard schema unexpectedly passed native fast path: %#v", got)
+	}
+	compact := []any{map[string]any{"functionDeclarations": []any{map[string]any{
+		"name":       "lookup",
+		"parameters": nativeTypeOnlySchema{Type: "OBJECT"},
+	}}}}
+	if got, ok := canonicalNativeTools(compact); !ok || len(got) != 1 || &got[0] != &compact[0] {
+		t.Fatalf("compact native schema did not pass through: ok=%v got=%#v", ok, got)
 	}
 	withExtraField := []any{map[string]any{"functionDeclarations": []any{map[string]any{
 		"name": "lookup", "parameters": map[string]any{"type": "OBJECT"}, "unexpected": true,

@@ -6,10 +6,12 @@ import (
 	"testing"
 
 	"github.com/bsfdsagfadg/vertex/internal/config"
+	"github.com/bsfdsagfadg/vertex/internal/jsonx"
 )
 
 var benchmarkConvertedModel string           //nolint:gochecknoglobals
 var benchmarkConvertedPayload map[string]any //nolint:gochecknoglobals
+var benchmarkEncodedPayloadSize int          //nolint:gochecknoglobals
 
 func BenchmarkConvertChatRequest(b *testing.B) {
 	cfg := config.StaticProvider(config.DefaultConfig())
@@ -81,6 +83,25 @@ func BenchmarkConvertAndBuildVertexVariablesLargeToolSchema(b *testing.B) {
 			b.Fatal(err)
 		}
 		benchmarkConvertedPayload = BuildVertexVariables(model, payload, cfg)
+	}
+}
+
+func BenchmarkConvertBuildAndMarshalLargeToolSchema(b *testing.B) {
+	cfg := config.StaticProvider(config.DefaultConfig())
+	body := largeToolSchemaBenchmarkBody("question")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		model, payload, err := ConvertChatRequest(body, cfg)
+		if err != nil {
+			b.Fatal(err)
+		}
+		vars := BuildVertexVariables(model, payload, cfg)
+		if err := jsonx.MarshalView(vars, func(encoded []byte) {
+			benchmarkEncodedPayloadSize = len(encoded)
+		}); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 

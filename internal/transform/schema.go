@@ -5,15 +5,10 @@ import (
 	"strings"
 )
 
-// geminiAllowedSchemaFields 是 functionDeclarations.parameters 的 JSON Schema 字段白名单。
-var geminiAllowedSchemaFields = map[string]bool{ //nolint:gochecknoglobals
-	"anyOf": true, "default": true, "description": true, "enum": true,
-	"example": true, "format": true, "items": true,
-	"maxItems": true, "maxLength": true, "maxProperties": true, "maximum": true,
-	"minItems": true, "minLength": true, "minProperties": true, "minimum": true,
-	"nullable": true, "pattern": true, "properties": true, "propertyOrdering": true,
-	"required": true, "title": true, "type": true,
-}
+const (
+	nativeSchemaFieldCount        = 20
+	compactNativeSchemaFieldLimit = 8
+)
 
 // schemaUnsupportedKeys 是 Vertex AI 原生 Schema 不支持、需剥离的 JSON-Schema 关键字。
 var schemaUnsupportedKeys = map[string]bool{ //nolint:gochecknoglobals
@@ -33,6 +28,39 @@ type nativeSchemaProperty struct {
 
 type nativeSchemaProperties []nativeSchemaProperty
 
+// 常见叶子 schema 使用固定结构体，避免为每个属性分别创建动态 map。
+// 字段顺序与 encoding/json 对 map 键的排序一致，保持出站 JSON 稳定。
+type nativeTypeOnlySchema struct {
+	Type string `json:"type"`
+}
+
+type nativeDescriptionSchema struct {
+	Description any    `json:"description"`
+	Type        string `json:"type"`
+}
+
+type nativeEnumSchema struct {
+	Enum any    `json:"enum"`
+	Type string `json:"type"`
+}
+
+type nativeDescriptionEnumSchema struct {
+	Description any    `json:"description"`
+	Enum        any    `json:"enum"`
+	Type        string `json:"type"`
+}
+
+type nativeDefaultSchema struct {
+	Default any    `json:"default"`
+	Type    string `json:"type"`
+}
+
+type nativeDefaultDescriptionSchema struct {
+	Default     any    `json:"default"`
+	Description any    `json:"description"`
+	Type        string `json:"type"`
+}
+
 // cleanNativeFunctionParameters 在一次递归中用 Gemini 白名单清洗 JSON
 // Schema，并转换为匿名 Vertex UI 端点需要的原生 Map-style Schema。
 func cleanNativeFunctionParameters(schema any) any {
@@ -44,10 +72,16 @@ func cleanNativeFunctionParameters(schema any) any {
 		}
 		return out
 	case map[string]any:
+		// 限制快速路径的探测大小，避免超大复杂 schema 被完整扫描两次。
+		if len(s) <= compactNativeSchemaFieldLimit {
+			if compact, ok := compactNativeSchemaLeaf(s); ok {
+				return compact
+			}
+		}
 		// 不按不受信任 schema 的总键数无限预分配；最终只会保留白名单字段。
-		cleaned := make(map[string]any, min(len(s), len(geminiAllowedSchemaFields)))
+		cleaned := make(map[string]any, min(len(s), nativeSchemaFieldCount))
 		for key, value := range s {
-			if !geminiAllowedSchemaFields[key] || schemaUnsupportedKeys[key] {
+			if !retainedNativeSchemaField(key) {
 				continue
 			}
 			switch key {
@@ -78,6 +112,64 @@ func cleanNativeFunctionParameters(schema any) any {
 		return cleaned
 	default:
 		return schema
+	}
+}
+
+// compactNativeSchemaLeaf recognizes the dominant Claude Code/OpenAI tool
+// schema leaves. Unsupported and unknown JSON-Schema fields are intentionally
+// ignored exactly as in the general cleaning path.
+func compactNativeSchemaLeaf(schema map[string]any) (any, bool) {
+	var rawType, defaultValue, description, enum any
+	var hasDefault, hasDescription, hasEnum bool
+	for key, value := range schema {
+		if !retainedNativeSchemaField(key) {
+			continue
+		}
+		switch key {
+		case "type":
+			rawType = value
+		case "default":
+			defaultValue, hasDefault = value, true
+		case "description":
+			description, hasDescription = value, true
+		case "enum":
+			enum, hasEnum = value, true
+		default:
+			return nil, false
+		}
+	}
+	typ := nativeSchemaType(rawType)
+	switch {
+	case hasDefault && hasDescription && !hasEnum:
+		return nativeDefaultDescriptionSchema{
+			Default: defaultValue, Description: description, Type: typ,
+		}, true
+	case hasDefault && !hasDescription && !hasEnum:
+		return nativeDefaultSchema{Default: defaultValue, Type: typ}, true
+	case !hasDefault && hasDescription && hasEnum:
+		return nativeDescriptionEnumSchema{
+			Description: description, Enum: enum, Type: typ,
+		}, true
+	case !hasDefault && hasDescription:
+		return nativeDescriptionSchema{Description: description, Type: typ}, true
+	case !hasDefault && hasEnum:
+		return nativeEnumSchema{Enum: enum, Type: typ}, true
+	case !hasDefault:
+		return nativeTypeOnlySchema{Type: typ}, true
+	default:
+		return nil, false
+	}
+}
+
+func retainedNativeSchemaField(key string) bool {
+	switch key {
+	case "default", "description", "enum", "example", "format", "items",
+		"maxItems", "maxLength", "maxProperties", "maximum",
+		"minItems", "minLength", "minProperties", "minimum",
+		"nullable", "pattern", "properties", "propertyOrdering", "required", "type":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -175,6 +267,11 @@ func convertNativeSchemaNumericConstraints(schema map[string]any) {
 }
 
 func canonicalNativeSchema(schema any) bool {
+	switch schema.(type) {
+	case nativeTypeOnlySchema, nativeDescriptionSchema, nativeEnumSchema,
+		nativeDescriptionEnumSchema, nativeDefaultSchema, nativeDefaultDescriptionSchema:
+		return true
+	}
 	m, ok := schema.(map[string]any)
 	typ, typeOK := m["type"].(string)
 	if !ok || !typeOK || !validNativeSchemaType(typ) {
