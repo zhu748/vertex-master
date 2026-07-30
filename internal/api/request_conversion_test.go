@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/bsfdsagfadg/vertex/internal/config"
 	"github.com/bsfdsagfadg/vertex/internal/transform"
 )
 
@@ -40,12 +41,22 @@ func TestAnthropicMessagePassThroughOnlyAcceptsCanonicalReadOnlyShape(t *testing
 	if !anthropicMessageCanPassThrough(assistantText, "assistant") {
 		t.Fatalf("canonical assistant string message was not reusable: %#v", assistantText)
 	}
+	assistantTextBlock := map[string]any{
+		"role": "assistant",
+		"content": []any{
+			map[string]any{"type": "text", "text": "hello"},
+		},
+	}
+	if !anthropicMessageCanPassThrough(assistantTextBlock, "assistant") {
+		t.Fatalf("single assistant text block was not reusable: %#v", assistantTextBlock)
+	}
 
 	for name, message := range map[string]map[string]any{
-		"assistant blocks require flattening": {
+		"multiple assistant blocks require flattening": {
 			"role": "assistant",
 			"content": []any{
 				map[string]any{"type": "text", "text": "hello"},
+				map[string]any{"type": "text", "text": "again"},
 			},
 		},
 		"extra fields must be sanitized": {
@@ -53,6 +64,12 @@ func TestAnthropicMessagePassThroughOnlyAcceptsCanonicalReadOnlyShape(t *testing
 		},
 		"empty blocks do not produce a message": {
 			"role": "user", "content": []any{},
+		},
+		"empty assistant text requires flattening": {
+			"role": "assistant",
+			"content": []any{
+				map[string]any{"type": "text", "text": ""},
+			},
 		},
 		"invalid text block requires validation": {
 			"role": "user",
@@ -66,6 +83,56 @@ func TestAnthropicMessagePassThroughOnlyAcceptsCanonicalReadOnlyShape(t *testing
 				t.Fatalf("non-canonical message was reused: %#v", message)
 			}
 		})
+	}
+}
+
+func TestAnthropicSingleAssistantTextBlockPassesThroughFullConversion(t *testing.T) {
+	content := []any{map[string]any{
+		"type": "text", "text": "assistant prefill",
+		"cache_control": map[string]any{"type": "ephemeral"},
+	}}
+	body := map[string]any{"messages": []any{map[string]any{
+		"role": "assistant", "content": content,
+	}}}
+	before, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chat, err := anthropicToChatRequest(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := chat["messages"].([]any)[0].(map[string]any)
+	passedContent := message["content"].([]any)
+	if &passedContent[0] != &content[0] {
+		t.Fatal("single assistant text block was copied instead of reused")
+	}
+
+	chat["model"] = "gemini-test"
+	_, payload, err := transform.DefaultRequestConverter().Convert(
+		chat,
+		config.StaticProvider(config.DefaultConfig()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := payload["contents"].([]any)
+	compact, ok := contents[0].(interface {
+		CanonicalTextContent() (role, text string, ok bool)
+	})
+	if !ok {
+		t.Fatalf("converted assistant content type=%T", contents[0])
+	}
+	role, text, valid := compact.CanonicalTextContent()
+	if !valid || role != "model" || text != "assistant prefill" {
+		t.Fatalf("converted assistant content=(%q, %q, %v)", role, text, valid)
+	}
+	after, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("conversion mutated input:\n before: %s\n after:  %s", before, after)
 	}
 }
 

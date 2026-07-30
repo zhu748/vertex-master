@@ -285,11 +285,19 @@ func anthropicMessageCanPassThrough(message map[string]any, role string) bool {
 	if _, ok := content.(string); ok {
 		return true
 	}
-	if role != "user" {
+	textContent, ok := anthropicUserTextContentCanPassThrough(content)
+	if !ok {
 		return false
 	}
-	_, ok := anthropicUserTextContentCanPassThrough(content)
-	return ok
+	if role == "user" {
+		return true
+	}
+	if role != "assistant" || len(textContent) != 1 {
+		return false
+	}
+	block, _ := textContent[0].(map[string]any)
+	text, _ := block["text"].(string)
+	return text != ""
 }
 
 func anthropicInstructionText(v any) (string, error) {
