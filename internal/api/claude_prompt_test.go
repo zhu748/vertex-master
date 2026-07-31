@@ -253,6 +253,57 @@ func TestClaudePromptPolicyPreservesMidConversationSystemOrder(t *testing.T) {
 	}
 }
 
+func TestClaudePromptPolicySegmentedRemovalPreservesRemainingOrder(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ClaudePromptReplacementEnabled = true
+	cfg.ClaudePromptReplacements = []config.ClaudePromptReplacementRule{{
+		From: "REMOVE",
+	}}
+	chatBody := map[string]any{"messages": []any{
+		map[string]any{"role": "system", "content": "REMOVE"},
+		map[string]any{"role": "user", "content": "first"},
+		map[string]any{"role": "system", "content": "KEEP REMOVE"},
+		map[string]any{"role": "user", "content": "second"},
+	}}
+
+	result, err := applyClaudePromptPolicy(chatBody, config.StaticProvider(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.EffectivePrompt != "KEEP " || result.ReplacementCount != 2 {
+		t.Fatalf("unexpected segmented removal result: %#v", result)
+	}
+	messages := chatBody["messages"].([]any)
+	if len(messages) != 3 ||
+		messages[0].(map[string]any)["content"] != "first" ||
+		messages[1].(map[string]any)["role"] != "system" ||
+		messages[1].(map[string]any)["content"] != "KEEP " ||
+		messages[2].(map[string]any)["content"] != "second" {
+		t.Fatalf("segmented removal reordered messages: %#v", messages)
+	}
+}
+
+func TestClaudePromptPolicySegmentedExpansionEnforcesCombinedLimit(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.MaxRequestMB = 1
+	cfg.ClaudePromptReplacementEnabled = true
+	cfg.ClaudePromptReplacements = []config.ClaudePromptReplacementRule{{
+		From: "a",
+		To:   "aa",
+	}}
+	segment := strings.Repeat("a", 300<<10)
+	chatBody := map[string]any{"messages": []any{
+		map[string]any{"role": "system", "content": segment},
+		map[string]any{"role": "user", "content": "continue"},
+		map[string]any{"role": "system", "content": segment},
+	}}
+
+	_, err := applyClaudePromptPolicy(chatBody, config.StaticProvider(cfg))
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("expected combined segmented output limit error, got %v", err)
+	}
+}
+
 func TestClaudePromptPolicyFallsBackForCrossSegmentReplacement(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.ClaudePromptReplacementEnabled = true
@@ -924,5 +975,77 @@ func TestAdminClaudePromptPreviewReportsDefaultSecurityPreambleReplacement(t *te
 		response["security_preamble_replacement_count"] != float64(1) ||
 		response["replacement_count"] != float64(0) {
 		t.Fatalf("unexpected security-preamble preview: %#v", response)
+	}
+}
+
+func BenchmarkClaudePromptPolicySegmentedLiteralRules(b *testing.B) {
+	cfg := config.DefaultConfig()
+	cfg.ClaudePromptReplacementEnabled = true
+	cfg.ClaudePromptReplacements = []config.ClaudePromptReplacementRule{
+		{From: "TOKEN_0", To: "VALUE_0"},
+		{From: "TOKEN_1", To: "VALUE_1"},
+		{From: "TOKEN_2", To: "VALUE_2"},
+		{From: "TOKEN_3", To: "VALUE_3"},
+	}
+	provider := config.StaticProvider(cfg)
+	messages := make([]any, 0, 9)
+	for index := range 4 {
+		segment := strings.Repeat("system context ", 1024) +
+			fmt.Sprintf(" TOKEN_%d TOKEN_%d TOKEN_%d TOKEN_%d", index, index, index, index)
+		messages = append(messages, map[string]any{
+			"role": "system", "content": segment,
+		})
+		messages = append(messages, map[string]any{
+			"role": "user", "content": "continue",
+		})
+	}
+	chatBody := map[string]any{"messages": messages}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		chatBody["messages"] = messages
+		result, err := applyClaudePromptPolicy(chatBody, provider)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if result.ReplacementCount != 16 {
+			b.Fatalf("replacement count=%d, want 16", result.ReplacementCount)
+		}
+	}
+}
+
+func BenchmarkClaudePromptPolicyDefaultLargeSystem(b *testing.B) {
+	cfg := config.StaticProvider(config.DefaultConfig())
+	for _, segments := range []int{1, 4} {
+		b.Run(fmt.Sprintf("segments_%d", segments), func(b *testing.B) {
+			messages := make([]any, 0, segments*2)
+			for range segments {
+				messages = append(messages, map[string]any{
+					"role": "system",
+					"content": strings.Repeat(
+						"ordinary Claude Code system context ",
+						512,
+					),
+				})
+				messages = append(messages, map[string]any{
+					"role": "user", "content": "continue",
+				})
+			}
+			chatBody := map[string]any{"messages": messages}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				chatBody["messages"] = messages
+				result, err := applyClaudePromptPolicy(chatBody, cfg)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if result.EffectivePrompt == "" {
+					b.Fatal("effective prompt is empty")
+				}
+			}
+		})
 	}
 }
