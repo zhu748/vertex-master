@@ -627,6 +627,63 @@ func TestConvertChatRequest_LegacyFunctions(t *testing.T) {
 
 // ============ 工具调用：id 锚点 + 哨兵（多轮 round-trip） ============
 
+func TestCleanPartWithIDSingleToolParts(t *testing.T) {
+	call := map[string]any{
+		"functionCall": map[string]any{
+			"id":   "call_1",
+			"name": "lookup",
+			"args": `{"city":"深圳"}`,
+		},
+	}
+	cleanedCall, ok := cleanPartWithID(call, nil, -1, nil)
+	if !ok {
+		t.Fatal("single functionCall should remain valid")
+	}
+	functionCall := cleanedCall["functionCall"].(map[string]any)
+	if _, exists := functionCall["id"]; exists {
+		t.Fatalf("cleaned functionCall retained id: %#v", functionCall)
+	}
+	if _, ok := functionCall["args"].(map[string]any); !ok {
+		t.Fatalf("cleaned functionCall args were not decoded: %#v", functionCall)
+	}
+	if cleanedCall["thoughtSignature"] != encodedSkipThoughtSentinel {
+		t.Fatalf("thoughtSignature=%v, want %v", cleanedCall["thoughtSignature"], encodedSkipThoughtSentinel)
+	}
+	if call["functionCall"].(map[string]any)["id"] != "call_1" {
+		t.Fatalf("cleaning mutated input functionCall: %#v", call)
+	}
+
+	response := map[string]any{
+		"functionResponse": map[string]any{
+			"id":       "call_1",
+			"response": "sunny",
+		},
+	}
+	cleanedResponse, ok := cleanPartWithID(
+		response,
+		[]string{"fallback"},
+		0,
+		map[string]string{"call_1": "lookup"},
+	)
+	if !ok {
+		t.Fatal("single functionResponse should remain valid")
+	}
+	functionResponse := cleanedResponse["functionResponse"].(map[string]any)
+	if functionResponse["name"] != "lookup" {
+		t.Fatalf("functionResponse.name=%v, want lookup", functionResponse["name"])
+	}
+	if _, exists := functionResponse["id"]; exists {
+		t.Fatalf("cleaned functionResponse retained id: %#v", functionResponse)
+	}
+	body, ok := functionResponse["response"].(map[string]any)
+	if !ok || body["result"] != "sunny" {
+		t.Fatalf("functionResponse.response=%#v, want wrapped sunny result", functionResponse["response"])
+	}
+	if response["functionResponse"].(map[string]any)["id"] != "call_1" {
+		t.Fatalf("cleaning mutated input functionResponse: %#v", response)
+	}
+}
+
 func TestToolCallRoundTrip_IDAnchor(t *testing.T) {
 	// 模拟多轮：user → assistant(tool_calls) → tool(结果) → 走完整 BuildVertexVariables 管线。
 	body := map[string]any{

@@ -96,6 +96,35 @@ func (t *FcNameTracker) NextName() (string, bool) {
 
 // cleanPartWithID 是 CleanPart 的 id 锚点版本。
 func cleanPartWithID(part map[string]any, functionCallNames []string, responseIndex int, callIDMap map[string]string) (map[string]any, bool) {
+	if len(part) == 1 {
+		if fcRaw, ok := part["functionCall"]; ok {
+			fcMap, valid := fcRaw.(map[string]any)
+			if !valid || !truthyStr(fcMap["name"]) {
+				return nil, false
+			}
+			fixed := fixFunctionCallArgs(fcMap)
+			delete(fixed, "id")
+			return map[string]any{
+				"functionCall":     fixed,
+				"thoughtSignature": encodedSkipThoughtSentinel,
+			}, true
+		}
+		if frRaw, ok := part["functionResponse"]; ok {
+			frMap, valid := frRaw.(map[string]any)
+			if !valid {
+				return nil, false
+			}
+			return map[string]any{
+				"functionResponse": cleanFunctionResponseWithID(
+					frMap,
+					functionCallNames,
+					responseIndex,
+					callIDMap,
+				),
+			}, true
+		}
+	}
+
 	hasValid := false
 	cleaned := map[string]any{}
 
@@ -123,23 +152,12 @@ func cleanPartWithID(part map[string]any, functionCallNames []string, responseIn
 
 	if frRaw, ok := part["functionResponse"]; ok {
 		if frMap, ok := frRaw.(map[string]any); ok {
-			name := strings.TrimSpace(toString(frMap["name"]))
-			if name == "" {
-				if fid, _ := frMap["id"].(string); fid != "" && callIDMap != nil {
-					name = callIDMap[normalizeGeminiToolCallID(fid)]
-				}
-				if name == "" && responseIndex >= 0 && responseIndex < len(functionCallNames) {
-					name = functionCallNames[responseIndex]
-				}
-				if name == "" {
-					name = "unknown"
-				}
-			}
-			fixed := copyMap(frMap)
-			fixed["name"] = name
-			delete(fixed, "id")
-			normalizeFunctionResponseBody(fixed)
-			cleaned["functionResponse"] = fixed
+			cleaned["functionResponse"] = cleanFunctionResponseWithID(
+				frMap,
+				functionCallNames,
+				responseIndex,
+				callIDMap,
+			)
 			hasValid = true
 		}
 	}
@@ -185,6 +203,31 @@ func cleanPartWithID(part map[string]any, functionCallNames []string, responseIn
 		return cleaned, true
 	}
 	return nil, false
+}
+
+func cleanFunctionResponseWithID(
+	fr map[string]any,
+	functionCallNames []string,
+	responseIndex int,
+	callIDMap map[string]string,
+) map[string]any {
+	name := strings.TrimSpace(toString(fr["name"]))
+	if name == "" {
+		if fid, _ := fr["id"].(string); fid != "" && callIDMap != nil {
+			name = callIDMap[normalizeGeminiToolCallID(fid)]
+		}
+		if name == "" && responseIndex >= 0 && responseIndex < len(functionCallNames) {
+			name = functionCallNames[responseIndex]
+		}
+		if name == "" {
+			name = "unknown"
+		}
+	}
+	fixed := copyMap(fr)
+	fixed["name"] = name
+	delete(fixed, "id")
+	normalizeFunctionResponseBody(fixed)
+	return fixed
 }
 
 // cleanPartCanPassThrough 识别无需删字段、补名称或写 thoughtSignature 的标准
