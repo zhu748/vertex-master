@@ -80,6 +80,75 @@ func TestDefaultRequestConverterCompactsPlainTextWithoutChangingWireJSON(t *test
 	}
 }
 
+func TestDefaultRequestConverterCompactsTextInsideToolHistory(t *testing.T) {
+	cfg := config.StaticProvider(config.DefaultConfig())
+	body := map[string]any{
+		"model": "gemini-3.1-flash",
+		"messages": []any{
+			map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": "input_text", "text": "question"},
+			}},
+			map[string]any{
+				"role": "assistant", "content": "",
+				"tool_calls": []any{&CanonicalOAIToolCall{
+					ID:   "call_1",
+					Type: "function",
+					Function: CanonicalOAIFunctionCallData{
+						Name: "lookup", Arguments: map[string]any{"query": "value"},
+					},
+				}},
+			},
+			map[string]any{
+				"role": "tool", "tool_call_id": "call_1",
+				"content": map[string]any{"result": "answer"},
+			},
+		},
+	}
+	model, compatibilityPayload, err := ConvertChatRequest(body, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compactModel, compactPayload, err := DefaultRequestConverter().Convert(body, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := compactPayload["contents"].([]any)
+	if len(contents) != 3 {
+		t.Fatalf("compact contents=%d, want 3", len(contents))
+	}
+	if _, ok := contents[0].(*canonicalSingleTextContent); !ok {
+		t.Fatalf("mixed user text type=%T, want compact text content", contents[0])
+	}
+
+	for stage, values := range []struct {
+		compatibility any
+		compact       any
+	}{
+		{compatibility: compatibilityPayload, compact: compactPayload},
+		{
+			compatibility: BuildVertexVariables(model, compatibilityPayload, cfg),
+			compact:       BuildVertexVariables(compactModel, compactPayload, cfg),
+		},
+	} {
+		compatibilityJSON, err := json.Marshal(values.compatibility)
+		if err != nil {
+			t.Fatal(err)
+		}
+		compactJSON, err := json.Marshal(values.compact)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(compactJSON) != string(compatibilityJSON) {
+			t.Fatalf(
+				"stage %d compact tool history changed JSON:\ncompact=%s\ncompat=%s",
+				stage,
+				compactJSON,
+				compatibilityJSON,
+			)
+		}
+	}
+}
+
 func TestDefaultRequestConverterKeepsGemini36PrefillMapShape(t *testing.T) {
 	body := map[string]any{
 		"model": "gemini-3.6-flash",

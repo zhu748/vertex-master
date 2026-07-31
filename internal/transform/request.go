@@ -69,6 +69,8 @@ func convertChatRequest(
 		contents = make([]any, 0, len(messagesRaw))
 	}
 	var toolIDToName map[string]string
+	var mixedTextStorage []canonicalSingleTextContent
+	compactMixedText := compactTextHistory && !isGemini36Model(resolvedModel)
 
 	hasValidContents := compactContents
 	for messageIndex, msgRaw := range messagesRaw {
@@ -135,6 +137,22 @@ func convertChatRequest(
 				)
 			}
 		case "user":
+			if compactMixedText {
+				if text, textOK := compactSingleTextValue(content, false); textOK {
+					if mixedTextStorage == nil {
+						mixedTextStorage = make(
+							[]canonicalSingleTextContent, 0, min(len(messagesRaw), 8),
+						)
+					}
+					mixedTextStorage = append(mixedTextStorage, canonicalSingleTextContent{
+						Parts: [1]canonicalSingleTextPart{{Text: text}},
+						Role:  "user",
+					})
+					contents = append(contents, &mixedTextStorage[len(mixedTextStorage)-1])
+					hasValidContents = true
+					break
+				}
+			}
 			if err := validateConvertibleMessageContent(content); err != nil {
 				return "", nil, fmt.Errorf("messages[%d] user %w", messageIndex, err)
 			}

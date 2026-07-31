@@ -585,6 +585,17 @@ func normalizeContents(contents any) any {
 			if s, ok := item.(string); ok {
 				ensureNormalized(index)
 				pendingText = append(pendingText, map[string]any{"text": s})
+			} else if compact, ok := item.(*canonicalSingleTextContent); ok {
+				if _, _, valid := compact.CanonicalTextContent(); !valid {
+					ensureNormalized(index)
+					continue
+				}
+				if len(pendingText) > 0 {
+					flushPending()
+				}
+				if normalized != nil {
+					normalized = append(normalized, compact)
+				}
 			} else if m, ok := item.(map[string]any); ok {
 				if len(pendingText) > 0 {
 					flushPending()
@@ -971,6 +982,16 @@ func filterEmptyContents(contents any) any {
 		}
 	}
 	for contentIndex, c := range list {
+		if compact, ok := c.(*canonicalSingleTextContent); ok {
+			if _, _, valid := compact.CanonicalTextContent(); valid {
+				if filtered != nil {
+					filtered = append(filtered, compact)
+				}
+			} else {
+				ensureFiltered(contentIndex)
+			}
+			continue
+		}
 		cm, ok := c.(map[string]any)
 		if !ok {
 			ensureFiltered(contentIndex)
