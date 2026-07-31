@@ -76,7 +76,8 @@ func convertChatRequest(
 	// read-only full slice without allocating one parts array per message.
 	var packedCompactFunctionCallParts canonicalFunctionCallParts
 	var packedCompactFunctionResponseParts canonicalFunctionResponseParts
-	compactCanonicalHistory := compactTextHistory && !isGemini36Model(resolvedModel)
+	compactMixedText := compactTextHistory && !isGemini36Model(resolvedModel)
+	compactToolHistory := compactTextHistory
 
 	hasValidContents := compactContents
 	for messageIndex, msgRaw := range messagesRaw {
@@ -143,7 +144,7 @@ func convertChatRequest(
 				)
 			}
 		case "user":
-			if compactCanonicalHistory {
+			if compactMixedText {
 				if text, textOK := compactSingleTextValue(content, false); textOK {
 					if mixedTextStorage == nil {
 						mixedTextStorage = make(
@@ -189,7 +190,7 @@ func convertChatRequest(
 						messageIndex,
 					)
 				}
-				if compactCanonicalHistory && len(parts) == 0 && len(toolCalls) > 0 {
+				if compactToolHistory && len(parts) == 0 && len(toolCalls) > 0 {
 					if packedCompactFunctionCallParts == nil {
 						packedCompactFunctionCallParts = make(
 							canonicalFunctionCallParts,
@@ -278,7 +279,7 @@ func convertChatRequest(
 			tcID, _ := msg["tool_call_id"].(string)
 			name := firstTruthyString(msg["name"], toolIDToName.Get(tcID))
 			response := coerceFunctionResponse(msg["content"])
-			if compactCanonicalHistory && base64TreeCanSkipNormalization(response) {
+			if compactToolHistory && base64TreeCanSkipNormalization(response) {
 				part := canonicalFunctionResponsePart{
 					FunctionResponse: canonicalFunctionResponse{
 						ID:       tcID,

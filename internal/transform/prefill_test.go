@@ -1,6 +1,7 @@
 package transform
 
 import (
+	"encoding/json"
 	"strconv"
 	"strings"
 	"testing"
@@ -99,6 +100,126 @@ func TestGemini36ConvertsTrailingAssistantTextArrayPrefill(t *testing.T) {
 	contents := payload["contents"].([]any)
 	if got := contents[len(contents)-1].(map[string]any)["role"]; got != "user" {
 		t.Fatalf("转换后最后一轮应为 user，got %v", got)
+	}
+}
+
+func TestGemini36CompactToolHistoryPreservesTrailingAssistantPrefill(t *testing.T) {
+	cfg := config.StaticProvider(config.DefaultConfig())
+	body := map[string]any{
+		"model": "gemini-3.6-flash",
+		"messages": []any{
+			map[string]any{"role": "user", "content": "question"},
+			map[string]any{
+				"role": "assistant", "content": "",
+				"tool_calls": []any{&CanonicalOAIToolCall{
+					ID:   "call_1",
+					Type: "function",
+					Function: CanonicalOAIFunctionCallData{
+						Name: "lookup", Arguments: map[string]any{"query": "value"},
+					},
+				}},
+			},
+			map[string]any{
+				"role": "tool", "tool_call_id": "call_1",
+				"content": map[string]any{"result": "answer"},
+			},
+			map[string]any{"role": "assistant", "content": "Alice:"},
+		},
+	}
+	model, compatibilityPayload, err := ConvertChatRequest(body, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compactModel, compactPayload, err := DefaultRequestConverter().Convert(body, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compactModel != model {
+		t.Fatalf("compact model=%q, want %q", compactModel, model)
+	}
+	if got := AssistantPrefillFromPayload(compactPayload); got != "Alice:" {
+		t.Fatalf("compact tool history prefill=%q, want Alice:", got)
+	}
+	contents := compactPayload["contents"].([]any)
+	if _, ok := contents[1].(*canonicalFunctionCallContent); !ok {
+		t.Fatalf("Gemini 3.6 tool call type=%T, want compact content", contents[1])
+	}
+	if _, ok := contents[2].(*canonicalFunctionResponseContent); !ok {
+		t.Fatalf("Gemini 3.6 tool response type=%T, want compact content", contents[2])
+	}
+	if role := canonicalContentRole(contents[len(contents)-1]); role != "user" {
+		t.Fatalf("Gemini 3.6 compact history ended with role %q, want user", role)
+	}
+
+	for stage, values := range []struct {
+		compatibility any
+		compact       any
+	}{
+		{compatibility: compatibilityPayload, compact: compactPayload},
+		{
+			compatibility: BuildVertexVariables(model, compatibilityPayload, cfg),
+			compact:       BuildVertexVariables(compactModel, compactPayload, cfg),
+		},
+	} {
+		compatibilityJSON, err := json.Marshal(values.compatibility)
+		if err != nil {
+			t.Fatal(err)
+		}
+		compactJSON, err := json.Marshal(values.compact)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(compactJSON) != string(compatibilityJSON) {
+			t.Fatalf(
+				"stage %d Gemini 3.6 compact tool history changed JSON:\ncompact=%s\ncompat=%s",
+				stage,
+				compactJSON,
+				compatibilityJSON,
+			)
+		}
+	}
+}
+
+func TestGemini36CompactTrailingToolCallIsNotPrefill(t *testing.T) {
+	body := map[string]any{
+		"model": "gemini-3.6-flash",
+		"messages": []any{
+			map[string]any{"role": "user", "content": "question"},
+			map[string]any{
+				"role": "assistant", "content": "",
+				"tool_calls": []any{&CanonicalOAIToolCall{
+					ID:   "call_1",
+					Type: "function",
+					Function: CanonicalOAIFunctionCallData{
+						Name: "lookup", Arguments: map[string]any{},
+					},
+				}},
+			},
+		},
+	}
+	model, payload, err := DefaultRequestConverter().Convert(
+		body,
+		config.StaticProvider(config.DefaultConfig()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := AssistantPrefillFromPayload(payload); got != "" {
+		t.Fatalf("trailing tool call was treated as prefill: %q", got)
+	}
+	contents := payload["contents"].([]any)
+	if _, ok := contents[len(contents)-1].(*canonicalFunctionCallContent); !ok {
+		t.Fatalf("trailing tool call type=%T, want compact content", contents[len(contents)-1])
+	}
+	vars := BuildVertexVariables(
+		model,
+		payload,
+		config.StaticProvider(config.DefaultConfig()),
+	)
+	outbound := vars["contents"].([]any)
+	last := outbound[len(outbound)-1].(map[string]any)
+	if last["role"] != "model" {
+		t.Fatalf("outbound trailing tool call role=%v, want model", last["role"])
 	}
 }
 

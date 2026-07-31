@@ -103,8 +103,7 @@ func convertTrailingAssistantPrefill(contents []any) ([]any, string) {
 	// character text into the nearest user instruction. This is the common
 	// SillyTavern Continue Prefill shape.
 	if len(contents) > 1 {
-		previous, _ := contents[len(contents)-2].(map[string]any)
-		previousRole, _ := previous["role"].(string)
+		previousRole := canonicalContentRole(contents[len(contents)-2])
 		if previousRole == "user" || previousRole == "function" {
 			nudge := map[string]any{
 				"role": "user",
@@ -132,6 +131,27 @@ func convertTrailingAssistantPrefill(contents []any) ([]any, string) {
 	}
 	contents = append(contents, map[string]any{"role": "user", "parts": []any{instructionPart}})
 	return contents, prefix
+}
+
+func canonicalContentRole(value any) string {
+	switch content := value.(type) {
+	case map[string]any:
+		role, _ := content["role"].(string)
+		return role
+	case *canonicalSingleTextContent:
+		if content != nil {
+			return content.Role
+		}
+	case *canonicalFunctionCallContent:
+		if content != nil {
+			return content.Role
+		}
+	case *canonicalFunctionResponseContent:
+		if content != nil {
+			return content.Role
+		}
+	}
+	return ""
 }
 
 func buildAssistantPrefillInstruction(prefix string) string {

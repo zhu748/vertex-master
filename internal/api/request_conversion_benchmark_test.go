@@ -82,9 +82,18 @@ func BenchmarkResponsesStringToolRequestConversion(b *testing.B) {
 }
 
 func BenchmarkResponsesToolHistoryRequestPipeline(b *testing.B) {
+	benchmarkResponsesToolHistoryRequestPipeline(b, "gemini-3.1-flash")
+}
+
+func BenchmarkResponsesToolHistoryRequestPipelineGemini36(b *testing.B) {
+	benchmarkResponsesToolHistoryRequestPipeline(b, "gemini-3.6-flash")
+}
+
+func benchmarkResponsesToolHistoryRequestPipeline(b *testing.B, modelName string) {
 	body := responsesRequestBenchmarkBody(false)
 	cfg := config.StaticProvider(config.DefaultConfig())
 	converter := transform.DefaultRequestConverter()
+	modelValue := any(modelName)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
@@ -92,7 +101,7 @@ func BenchmarkResponsesToolHistoryRequestPipeline(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		converted["model"] = "gemini-3.1-flash"
+		converted["model"] = modelValue
 		model, payload, err := converter.Convert(converted, cfg)
 		if err != nil {
 			b.Fatal(err)
