@@ -350,6 +350,8 @@ func hasRemotePrefix(url string) bool {
 func BuildVertexVariables(model string, geminiPayload map[string]any, cfg config.ConfigProvider) map[string]any {
 	contents := geminiPayload["contents"]
 	canonicalTextContents := canonicalTextContentsCanPassThrough(contents)
+	canonicalToolContents := !canonicalTextContents &&
+		canonicalToolContentsCanSkipNormalization(contents)
 	vars := make(map[string]any, len(supportedVarFields)+2)
 	resolvedModel := parseModelName(model)
 	vars["model"] = resolvedModel
@@ -366,12 +368,16 @@ func BuildVertexVariables(model string, geminiPayload map[string]any, cfg config
 
 	if c, ok := vars["contents"]; ok {
 		if !canonicalTextContents {
-			c = normalizeContents(c)
-			c = handleInlineDataCase(c)
-			c = normalizeContents(c)
-			c = HandleBase64InContents(c)
+			if !canonicalToolContents {
+				c = normalizeContents(c)
+				c = handleInlineDataCase(c)
+				c = normalizeContents(c)
+				c = HandleBase64InContents(c)
+			}
 			c = filterEmptyContents(c)
-			c = EncodeThoughtSignature(c, 0)
+			if !canonicalToolContents {
+				c = EncodeThoughtSignature(c, 0)
+			}
 		}
 		vars["contents"] = c
 	}
@@ -449,6 +455,167 @@ func canonicalTextContentsCanPassThrough(contents any) bool {
 			}
 		default:
 			return false
+		}
+	}
+	return true
+}
+
+// canonicalToolContentsCanSkipNormalization accepts only the canonical
+// text/function shapes emitted by the request converters. These parts still
+// pass through filterEmptyContents to strip internal IDs, resolve response
+// names and add encoded thought signatures, but need none of the preceding
+// role/key/base64 normalization or the final recursive signature scan.
+func canonicalToolContentsCanSkipNormalization(contents any) bool {
+	list, ok := contents.([]any)
+	if !ok || len(list) == 0 {
+		return false
+	}
+
+	hasToolPart := false
+	previousFunctionTurn := false
+	for _, rawContent := range list {
+		if compact, ok := rawContent.(*canonicalSingleTextContent); ok {
+			if _, _, valid := compact.CanonicalTextContent(); !valid {
+				return false
+			}
+			previousFunctionTurn = false
+			continue
+		}
+
+		content, ok := rawContent.(map[string]any)
+		if !ok || len(content) != 2 {
+			return false
+		}
+		role, _ := content["role"].(string)
+		if role != "user" && role != "model" && role != "function" {
+			return false
+		}
+		functionTurn := role == "function"
+		if functionTurn && previousFunctionTurn {
+			return false
+		}
+		previousFunctionTurn = functionTurn
+
+		parts, ok := content["parts"].([]any)
+		if !ok || len(parts) == 0 {
+			return false
+		}
+		for _, rawPart := range parts {
+			part, ok := rawPart.(map[string]any)
+			if !ok || len(part) != 1 {
+				return false
+			}
+			switch role {
+			case "user":
+				if !canonicalPlainTextPartCanSkipNormalization(part) {
+					return false
+				}
+			case "model":
+				if canonicalPlainTextPartCanSkipNormalization(part) {
+					continue
+				}
+				if !canonicalFunctionCallPartCanSkipNormalization(part) {
+					return false
+				}
+				hasToolPart = true
+			case "function":
+				if !canonicalFunctionResponsePartCanSkipNormalization(part) {
+					return false
+				}
+				hasToolPart = true
+			}
+		}
+	}
+	return hasToolPart
+}
+
+func canonicalPlainTextPartCanSkipNormalization(part map[string]any) bool {
+	text, ok := part["text"].(string)
+	return ok && text != ""
+}
+
+func canonicalFunctionCallPartCanSkipNormalization(part map[string]any) bool {
+	call, ok := part["functionCall"].(map[string]any)
+	if !ok || len(call) < 2 || len(call) > 3 || !truthyStr(call["name"]) {
+		return false
+	}
+	if _, exists := call["args"]; !exists {
+		return false
+	} else if _, needsDecoding := call["args"].(string); needsDecoding {
+		return false
+	} else if !base64TreeCanSkipNormalization(call["args"]) {
+		return false
+	}
+	for key, value := range call {
+		switch key {
+		case "name", "args":
+		case "id":
+			id, ok := value.(string)
+			if !ok || id == "" {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func canonicalFunctionResponsePartCanSkipNormalization(part map[string]any) bool {
+	response, ok := part["functionResponse"].(map[string]any)
+	if !ok || len(response) == 0 || len(response) > 3 {
+		return false
+	}
+	if _, ok := response["response"].(map[string]any); !ok {
+		return false
+	}
+	if !base64TreeCanSkipNormalization(response["response"]) {
+		return false
+	}
+	for key, value := range response {
+		switch key {
+		case "response":
+		case "name":
+			if _, ok := value.(string); !ok {
+				return false
+			}
+		case "id":
+			id, ok := value.(string)
+			if !ok || id == "" {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func base64TreeCanSkipNormalization(value any) bool {
+	switch current := value.(type) {
+	case []any:
+		for _, item := range current {
+			if !base64TreeCanSkipNormalization(item) {
+				return false
+			}
+		}
+	case map[string]any:
+		for key, nested := range current {
+			if key == "inlineData" {
+				if inline, ok := nested.(map[string]any); ok {
+					if data, ok := inline["data"].(string); ok {
+						if NormalizeBase64(data) != data {
+							return false
+						}
+						// HandleBase64InContents treats this inlineData node as
+						// an opaque payload once it finds a string data field.
+						continue
+					}
+				}
+			}
+			if !base64TreeCanSkipNormalization(nested) {
+				return false
+			}
 		}
 	}
 	return true

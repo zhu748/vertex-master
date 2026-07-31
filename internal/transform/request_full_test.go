@@ -119,6 +119,9 @@ func TestDefaultRequestConverterCompactsTextInsideToolHistory(t *testing.T) {
 	if _, ok := contents[0].(*canonicalSingleTextContent); !ok {
 		t.Fatalf("mixed user text type=%T, want compact text content", contents[0])
 	}
+	if !canonicalToolContentsCanSkipNormalization(compactPayload["contents"]) {
+		t.Fatal("canonical mixed tool history did not select the normalization fast path")
+	}
 
 	for stage, values := range []struct {
 		compatibility any
@@ -146,6 +149,107 @@ func TestDefaultRequestConverterCompactsTextInsideToolHistory(t *testing.T) {
 				compatibilityJSON,
 			)
 		}
+	}
+}
+
+func TestCanonicalToolContentsSkipNormalizationOnlyWhenSafe(t *testing.T) {
+	canonical := func(call, response map[string]any) []any {
+		return []any{
+			map[string]any{
+				"role":  "model",
+				"parts": []any{map[string]any{"functionCall": call}},
+			},
+			map[string]any{
+				"role":  "function",
+				"parts": []any{map[string]any{"functionResponse": response}},
+			},
+		}
+	}
+	validCall := map[string]any{
+		"id": "call_1", "name": "lookup", "args": map[string]any{"query": "value"},
+	}
+	validResponse := map[string]any{
+		"id": "call_1", "name": "lookup", "response": map[string]any{"result": "value"},
+	}
+	if !canonicalToolContentsCanSkipNormalization(canonical(validCall, validResponse)) {
+		t.Fatal("canonical tool history should skip redundant normalization")
+	}
+	fastContents := canonical(validCall, validResponse)
+	fallbackContents := canonical(validCall, validResponse)
+	fallbackContents[0].(map[string]any)["parts"].([]any)[0].(map[string]any)["type"] = ""
+	cfg := config.StaticProvider(config.DefaultConfig())
+	fastVariables := BuildVertexVariables("gemini-test", map[string]any{"contents": fastContents}, cfg)
+	fallbackVariables := BuildVertexVariables(
+		"gemini-test",
+		map[string]any{"contents": fallbackContents},
+		cfg,
+	)
+	fastJSON, err := json.Marshal(fastVariables)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fallbackJSON, err := json.Marshal(fallbackVariables)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(fastJSON) != string(fallbackJSON) {
+		t.Fatalf("fast path changed normalized output:\nfast=%s\nfallback=%s", fastJSON, fallbackJSON)
+	}
+
+	tests := []struct {
+		name     string
+		call     map[string]any
+		response map[string]any
+	}{
+		{
+			name: "string arguments need decoding",
+			call: map[string]any{
+				"id": "call_1", "name": "lookup", "args": `{"query":"value"}`,
+			},
+			response: validResponse,
+		},
+		{
+			name: "scalar response needs wrapping",
+			call: validCall,
+			response: map[string]any{
+				"id": "call_1", "name": "lookup", "response": "value",
+			},
+		},
+		{
+			name: "aliased call id needs normalization",
+			call: map[string]any{
+				"tool_call_id": "call_1", "name": "lookup", "args": map[string]any{},
+			},
+			response: validResponse,
+		},
+		{
+			name: "nested base64 needs normalization",
+			call: map[string]any{
+				"id": "call_1", "name": "lookup",
+				"args": map[string]any{
+					"inlineData": map[string]any{"mimeType": "text/plain", "data": "YWJjZA"},
+				},
+			},
+			response: validResponse,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if canonicalToolContentsCanSkipNormalization(canonical(test.call, test.response)) {
+				t.Fatal("history requiring normalization selected the fast path")
+			}
+		})
+	}
+
+	adjacentResponses := append(
+		canonical(validCall, validResponse),
+		map[string]any{
+			"role":  "function",
+			"parts": []any{map[string]any{"functionResponse": validResponse}},
+		},
+	)
+	if canonicalToolContentsCanSkipNormalization(adjacentResponses) {
+		t.Fatal("adjacent function turns requiring merge selected the fast path")
 	}
 }
 
