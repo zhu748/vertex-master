@@ -1,7 +1,6 @@
 package vertex
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"math"
@@ -19,7 +18,10 @@ const (
 )
 
 var tokenCountKeyBufferPool = sync.Pool{ //nolint:gochecknoglobals
-	New: func() any { return new(bytes.Buffer) },
+	New: func() any {
+		buffer := make([]byte, 0, 512)
+		return &buffer
+	},
 }
 
 type tokenCountCacheKey [sha256.Size]byte
@@ -63,15 +65,16 @@ func makeTokenCountCacheKey(model string, contents []any) (tokenCountCacheKey, b
 	if remaining < 0 {
 		return tokenCountCacheKey{}, false
 	}
-	buffer := tokenCountKeyBufferPool.Get().(*bytes.Buffer)
-	buffer.Reset()
-	writeTokenCountHashString(buffer, tokenCountHashModel, model)
-	if !writeTokenCountHashValue(buffer, contents, &remaining, 0) {
-		releaseTokenCountKeyBuffer(buffer)
+	bufferPointer := tokenCountKeyBufferPool.Get().(*[]byte)
+	buffer := (*bufferPointer)[:0]
+	buffer = appendTokenCountHashString(buffer, tokenCountHashModel, model)
+	buffer, ok := appendTokenCountHashArray(buffer, contents, &remaining, 0)
+	if !ok {
+		releaseTokenCountKeyBuffer(bufferPointer, buffer)
 		return tokenCountCacheKey{}, false
 	}
-	key := tokenCountCacheKey(sha256.Sum256(buffer.Bytes()))
-	releaseTokenCountKeyBuffer(buffer)
+	key := tokenCountCacheKey(sha256.Sum256(buffer))
+	releaseTokenCountKeyBuffer(bufferPointer, buffer)
 	return key, true
 }
 
@@ -89,104 +92,96 @@ const (
 	tokenCountHashModel
 )
 
-// writeTokenCountHashValue 用类型标签、长度和有序对象键直接构造缓存摘要。
+// appendTokenCountHashValue 用类型标签、长度和有序对象键直接构造缓存摘要。
 // 与先编码整棵动态 JSON 再哈希相比，它不为每个 map/interface 创建反射临时对象；
 // 未知 Go 类型直接绕过缓存，绝不影响上游精确计数。
-func writeTokenCountHashValue(
-	buffer *bytes.Buffer,
+func appendTokenCountHashValue(
+	buffer []byte,
 	value any,
 	remaining *int,
 	depth int,
-) bool {
+) ([]byte, bool) {
 	if depth > valueBudgetMaxDepth {
-		return false
+		return buffer, false
 	}
 	(*remaining)--
 	if *remaining < 0 {
-		return false
+		return buffer, false
 	}
 
 	switch typed := value.(type) {
 	case nil:
-		writeTokenCountHashHeader(buffer, tokenCountHashNil, 0)
+		buffer = appendTokenCountHashHeader(buffer, tokenCountHashNil, 0)
 	case bool:
 		if typed {
-			writeTokenCountHashHeader(buffer, tokenCountHashTrue, 0)
+			buffer = appendTokenCountHashHeader(buffer, tokenCountHashTrue, 0)
 		} else {
-			writeTokenCountHashHeader(buffer, tokenCountHashFalse, 0)
+			buffer = appendTokenCountHashHeader(buffer, tokenCountHashFalse, 0)
 		}
 	case string:
 		*remaining -= len(typed)
 		if *remaining < 0 {
-			return false
+			return buffer, false
 		}
-		writeTokenCountHashString(buffer, tokenCountHashString, typed)
+		buffer = appendTokenCountHashString(buffer, tokenCountHashString, typed)
 	case []byte:
 		*remaining -= len(typed)
 		if *remaining < 0 {
-			return false
+			return buffer, false
 		}
-		writeTokenCountHashHeader(buffer, tokenCountHashBytes, uint64(len(typed)))
-		_, _ = buffer.Write(typed)
+		buffer = appendTokenCountHashHeader(buffer, tokenCountHashBytes, uint64(len(typed)))
+		buffer = append(buffer, typed...)
 	case float64:
 		if math.IsNaN(typed) || math.IsInf(typed, 0) {
-			return false
+			return buffer, false
 		}
-		writeTokenCountHashUint64(buffer, tokenCountHashFloat, math.Float64bits(typed))
+		buffer = appendTokenCountHashUint64(buffer, tokenCountHashFloat, math.Float64bits(typed))
 	case float32:
 		value64 := float64(typed)
 		if math.IsNaN(value64) || math.IsInf(value64, 0) {
-			return false
+			return buffer, false
 		}
-		writeTokenCountHashUint64(buffer, tokenCountHashFloat, math.Float64bits(value64))
+		buffer = appendTokenCountHashUint64(buffer, tokenCountHashFloat, math.Float64bits(value64))
 	case int:
-		writeTokenCountHashUint64(buffer, tokenCountHashSigned, uint64(int64(typed)))
+		buffer = appendTokenCountHashUint64(buffer, tokenCountHashSigned, uint64(int64(typed)))
 	case int8:
-		writeTokenCountHashUint64(buffer, tokenCountHashSigned, uint64(int64(typed)))
+		buffer = appendTokenCountHashUint64(buffer, tokenCountHashSigned, uint64(int64(typed)))
 	case int16:
-		writeTokenCountHashUint64(buffer, tokenCountHashSigned, uint64(int64(typed)))
+		buffer = appendTokenCountHashUint64(buffer, tokenCountHashSigned, uint64(int64(typed)))
 	case int32:
-		writeTokenCountHashUint64(buffer, tokenCountHashSigned, uint64(int64(typed)))
+		buffer = appendTokenCountHashUint64(buffer, tokenCountHashSigned, uint64(int64(typed)))
 	case int64:
-		writeTokenCountHashUint64(buffer, tokenCountHashSigned, uint64(typed))
+		buffer = appendTokenCountHashUint64(buffer, tokenCountHashSigned, uint64(typed))
 	case uint:
-		writeTokenCountHashUint64(buffer, tokenCountHashUnsigned, uint64(typed))
+		buffer = appendTokenCountHashUint64(buffer, tokenCountHashUnsigned, uint64(typed))
 	case uint8:
-		writeTokenCountHashUint64(buffer, tokenCountHashUnsigned, uint64(typed))
+		buffer = appendTokenCountHashUint64(buffer, tokenCountHashUnsigned, uint64(typed))
 	case uint16:
-		writeTokenCountHashUint64(buffer, tokenCountHashUnsigned, uint64(typed))
+		buffer = appendTokenCountHashUint64(buffer, tokenCountHashUnsigned, uint64(typed))
 	case uint32:
-		writeTokenCountHashUint64(buffer, tokenCountHashUnsigned, uint64(typed))
+		buffer = appendTokenCountHashUint64(buffer, tokenCountHashUnsigned, uint64(typed))
 	case uint64:
-		writeTokenCountHashUint64(buffer, tokenCountHashUnsigned, typed)
+		buffer = appendTokenCountHashUint64(buffer, tokenCountHashUnsigned, typed)
 	case canonicalTextContent:
 		role, text, ok := typed.CanonicalTextContent()
 		if !ok || !consumeCanonicalTextContentBudget(remaining, role, text) {
-			return false
+			return buffer, false
 		}
-		writeTokenCountHashHeader(buffer, tokenCountHashObject, 2)
-		writeTokenCountHashString(buffer, tokenCountHashString, "parts")
-		writeTokenCountHashHeader(buffer, tokenCountHashArray, 1)
-		writeTokenCountHashHeader(buffer, tokenCountHashObject, 1)
-		writeTokenCountHashString(buffer, tokenCountHashString, "text")
-		writeTokenCountHashString(buffer, tokenCountHashString, text)
-		writeTokenCountHashString(buffer, tokenCountHashString, "role")
-		writeTokenCountHashString(buffer, tokenCountHashString, role)
+		buffer = appendTokenCountHashHeader(buffer, tokenCountHashObject, 2)
+		buffer = appendTokenCountHashString(buffer, tokenCountHashString, "parts")
+		buffer = appendTokenCountHashHeader(buffer, tokenCountHashArray, 1)
+		buffer = appendTokenCountHashHeader(buffer, tokenCountHashObject, 1)
+		buffer = appendTokenCountHashString(buffer, tokenCountHashString, "text")
+		buffer = appendTokenCountHashString(buffer, tokenCountHashString, text)
+		buffer = appendTokenCountHashString(buffer, tokenCountHashString, "role")
+		buffer = appendTokenCountHashString(buffer, tokenCountHashString, role)
 	case []any:
-		if len(typed) > *remaining {
-			return false
-		}
-		writeTokenCountHashHeader(buffer, tokenCountHashArray, uint64(len(typed)))
-		for _, item := range typed {
-			if !writeTokenCountHashValue(buffer, item, remaining, depth+1) {
-				return false
-			}
-		}
+		return appendTokenCountHashArrayItems(buffer, typed, remaining, depth)
 	case map[string]any:
 		if len(typed) > *remaining {
-			return false
+			return buffer, false
 		}
-		writeTokenCountHashHeader(buffer, tokenCountHashObject, uint64(len(typed)))
+		buffer = appendTokenCountHashHeader(buffer, tokenCountHashObject, uint64(len(typed)))
 		var inlineKeys [8]string
 		keys := inlineKeys[:0]
 		if len(typed) > len(inlineKeys) {
@@ -195,48 +190,92 @@ func writeTokenCountHashValue(
 		for key := range typed {
 			*remaining -= len(key)
 			if *remaining < 0 {
-				return false
+				return buffer, false
 			}
 			keys = append(keys, key)
 		}
 		sort.Strings(keys)
 		for _, key := range keys {
-			writeTokenCountHashString(buffer, tokenCountHashString, key)
-			if !writeTokenCountHashValue(buffer, typed[key], remaining, depth+1) {
-				return false
+			buffer = appendTokenCountHashString(buffer, tokenCountHashString, key)
+			var ok bool
+			buffer, ok = appendTokenCountHashValue(buffer, typed[key], remaining, depth+1)
+			if !ok {
+				return buffer, false
 			}
 		}
 	default:
-		return false
+		return buffer, false
 	}
-	return true
+	return buffer, true
 }
 
-func writeTokenCountHashString(buffer *bytes.Buffer, tag byte, value string) {
-	writeTokenCountHashHeader(buffer, tag, uint64(len(value)))
-	_, _ = buffer.WriteString(value)
+func appendTokenCountHashArray(
+	buffer []byte,
+	values []any,
+	remaining *int,
+	depth int,
+) ([]byte, bool) {
+	if depth > valueBudgetMaxDepth {
+		return buffer, false
+	}
+	(*remaining)--
+	if *remaining < 0 {
+		return buffer, false
+	}
+	return appendTokenCountHashArrayItems(buffer, values, remaining, depth)
 }
 
-func writeTokenCountHashHeader(buffer *bytes.Buffer, tag byte, length uint64) {
-	_ = buffer.WriteByte(tag)
-	var encoded [binary.MaxVarintLen64]byte
-	count := binary.PutUvarint(encoded[:], length)
-	_, _ = buffer.Write(encoded[:count])
+func appendTokenCountHashArrayItems(
+	buffer []byte,
+	values []any,
+	remaining *int,
+	depth int,
+) ([]byte, bool) {
+	if len(values) > *remaining {
+		return buffer, false
+	}
+	buffer = appendTokenCountHashHeader(buffer, tokenCountHashArray, uint64(len(values)))
+	for _, item := range values {
+		var ok bool
+		buffer, ok = appendTokenCountHashValue(buffer, item, remaining, depth+1)
+		if !ok {
+			return buffer, false
+		}
+	}
+	return buffer, true
 }
 
-func writeTokenCountHashUint64(buffer *bytes.Buffer, tag byte, value uint64) {
-	_ = buffer.WriteByte(tag)
-	var encoded [8]byte
-	binary.LittleEndian.PutUint64(encoded[:], value)
-	_, _ = buffer.Write(encoded[:])
+func appendTokenCountHashString(buffer []byte, tag byte, value string) []byte {
+	buffer = appendTokenCountHashHeader(buffer, tag, uint64(len(value)))
+	return append(buffer, value...)
 }
 
-func releaseTokenCountKeyBuffer(buffer *bytes.Buffer) {
-	if buffer.Cap() > maxPooledTokenKeyBytes {
+func appendTokenCountHashHeader(buffer []byte, tag byte, length uint64) []byte {
+	buffer = append(buffer, tag)
+	return binary.AppendUvarint(buffer, length)
+}
+
+func appendTokenCountHashUint64(buffer []byte, tag byte, value uint64) []byte {
+	return append(
+		buffer,
+		tag,
+		byte(value),
+		byte(value>>8),
+		byte(value>>16),
+		byte(value>>24),
+		byte(value>>32),
+		byte(value>>40),
+		byte(value>>48),
+		byte(value>>56),
+	)
+}
+
+func releaseTokenCountKeyBuffer(bufferPointer *[]byte, buffer []byte) {
+	if cap(buffer) > maxPooledTokenKeyBytes {
 		return
 	}
-	buffer.Reset()
-	tokenCountKeyBufferPool.Put(buffer)
+	*bufferPointer = buffer[:0]
+	tokenCountKeyBufferPool.Put(bufferPointer)
 }
 
 func (c *VertexAIClient) loadTokenCountCache(key tokenCountCacheKey) (int, bool) {

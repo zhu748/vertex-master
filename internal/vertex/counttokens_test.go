@@ -832,6 +832,29 @@ func TestTokenCountCacheKeyIsDeterministicAndTypeSafe(t *testing.T) {
 	}
 }
 
+func TestTokenCountCacheKeyEncodingIsStable(t *testing.T) {
+	key, ok := makeTokenCountCacheKey("gemini-test", []any{map[string]any{
+		"array": []any{
+			nil,
+			false,
+			true,
+			"text",
+			[]byte{0, 1, 0xff},
+			float64(1.25),
+			int64(-2),
+			uint64(3),
+		},
+		"object": map[string]any{"second": "b", "first": "a"},
+	}})
+	if !ok {
+		t.Fatal("representative cache key input was rejected")
+	}
+	const want = "5e3ef1183ccdabf98f1d4de6cf4f680d1625c2d2d6ff270ae4a143b7f1515cfc"
+	if got := fmt.Sprintf("%x", key); got != want {
+		t.Fatalf("cache key encoding changed: got %s, want %s", got, want)
+	}
+}
+
 func TestTokenCountCacheExpiresAndRemainsBounded(t *testing.T) {
 	client := NewVertexAIClient(config.StaticProvider(config.DefaultConfig()))
 	var expiredKey tokenCountCacheKey
