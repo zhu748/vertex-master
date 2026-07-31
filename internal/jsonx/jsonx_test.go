@@ -155,6 +155,40 @@ func TestEncodeWritesUnescapedJSONWithTrailingNewline(t *testing.T) {
 	}
 }
 
+func TestEncodeDynamicJSONIntegersMatchStandardEncoder(t *testing.T) {
+	value := map[string]any{
+		"count": int64(1234567890),
+		"items": []any{int(-2), "<tag>&value"},
+	}
+	var want bytes.Buffer
+	encoder := json.NewEncoder(&want)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
+		t.Fatal(err)
+	}
+
+	var got bytes.Buffer
+	if err := Encode(&got, value); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got.Bytes(), want.Bytes()) {
+		t.Fatalf("Encode()=%q, standard encoder=%q", got.Bytes(), want.Bytes())
+	}
+}
+
+func TestEncodeDynamicJSONReportsShortWrites(t *testing.T) {
+	writer := shortJSONWriter{}
+	if err := Encode(writer, map[string]any{"value": int64(1)}); err == nil {
+		t.Fatal("short write error = nil")
+	}
+}
+
+type shortJSONWriter struct{}
+
+func (shortJSONWriter) Write(value []byte) (int, error) {
+	return max(len(value)-1, 0), nil
+}
+
 func TestEncodeNoTrailingNewlineMatchesMarshal(t *testing.T) {
 	value := map[string]any{
 		"html":   "<b>你好</b> & ok",
@@ -251,7 +285,7 @@ func TestMarshalCyclicValueReturnsError(t *testing.T) {
 }
 
 func TestMarshalViewMatchesMarshalAndSkipsConsumerOnError(t *testing.T) {
-	value := map[string]any{"html": "<b>你好</b> & ok"}
+	value := map[string]any{"html": "<b>你好</b> & ok", "count": int64(42)}
 	want, err := Marshal(value)
 	if err != nil {
 		t.Fatal(err)

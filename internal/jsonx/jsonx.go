@@ -28,10 +28,42 @@ var marshalBufferPool = sync.Pool{ //nolint:gochecknoglobals
 	New: func() any { return new(bytes.Buffer) },
 }
 
+var jsonValueBufferPool = sync.Pool{ //nolint:gochecknoglobals
+	New: func() any {
+		buffer := make([]byte, 0, 512)
+		return &buffer
+	},
+}
+
 // Encode 将 JSON 写入 writer，不做 HTML 转义。与 json.Encoder.Encode 一样，
 // 成功时末尾包含一个换行符，适合直接嵌入流式协议缓冲。
 func Encode(writer io.Writer, value any) error {
+	if !jsonValueRootCanUseFastPath(value) {
+		return encode(writer, value, false)
+	}
+	var writeErr error
+	if encodeJSONValuePooled(value, func(encoded []byte) {
+		written, err := writer.Write(encoded)
+		if written != len(encoded) && err == nil {
+			err = io.ErrShortWrite
+		}
+		writeErr = err
+	}) {
+		if writeErr != nil {
+			return fmt.Errorf("序列化 JSON: %w", writeErr)
+		}
+		return nil
+	}
 	return encode(writer, value, false)
+}
+
+func jsonValueRootCanUseFastPath(value any) bool {
+	switch value.(type) {
+	case nil, bool, string, float64, int, int64, []any, map[string]any:
+		return true
+	default:
+		return false
+	}
 }
 
 func encode(writer io.Writer, value any, escapeHTML bool) error {
@@ -154,7 +186,7 @@ func MarshalHTMLJSONValue(value any) (encoded []byte, ok bool) {
 		return nil, false
 	}
 	buffer := make([]byte, 0, size)
-	buffer, ok = appendJSONValueMode(buffer, value, 0, true)
+	buffer, ok = appendJSONValueMode(buffer, value, 0, true, false)
 	if !ok || len(buffer) != size {
 		return nil, false
 	}
@@ -176,7 +208,7 @@ func MarshalHTMLJSONValueView(value any, consume func([]byte)) bool {
 
 	buf.Grow(size)
 	view := buf.AvailableBuffer()
-	view, ok = appendJSONValueMode(view, value, 0, true)
+	view, ok = appendJSONValueMode(view, value, 0, true, false)
 	if !ok || len(view) != size {
 		return false
 	}
@@ -282,10 +314,16 @@ func jsonValueEncodedSizeMode(value any, depth int, escapeHTML bool) (int, bool)
 }
 
 func appendJSONValue(buffer []byte, value any, depth int) ([]byte, bool) {
-	return appendJSONValueMode(buffer, value, depth, false)
+	return appendJSONValueMode(buffer, value, depth, false, false)
 }
 
-func appendJSONValueMode(buffer []byte, value any, depth int, escapeHTML bool) ([]byte, bool) {
+func appendJSONValueMode(
+	buffer []byte,
+	value any,
+	depth int,
+	escapeHTML bool,
+	allowIntegers bool,
+) ([]byte, bool) {
 	if depth > maxFastJSONValueDepth {
 		return buffer, false
 	}
@@ -301,6 +339,16 @@ func appendJSONValueMode(buffer []byte, value any, depth int, escapeHTML bool) (
 			return buffer, false
 		}
 		return appendJSONFloat(buffer, typed), true
+	case int:
+		if !allowIntegers {
+			return buffer, false
+		}
+		return strconv.AppendInt(buffer, int64(typed), 10), true
+	case int64:
+		if !allowIntegers {
+			return buffer, false
+		}
+		return strconv.AppendInt(buffer, typed, 10), true
 	case []any:
 		if typed == nil {
 			return append(buffer, "null"...), true
@@ -311,7 +359,13 @@ func appendJSONValueMode(buffer []byte, value any, depth int, escapeHTML bool) (
 				buffer = append(buffer, ',')
 			}
 			var ok bool
-			buffer, ok = appendJSONValueMode(buffer, item, depth+1, escapeHTML)
+			buffer, ok = appendJSONValueMode(
+				buffer,
+				item,
+				depth+1,
+				escapeHTML,
+				allowIntegers,
+			)
 			if !ok {
 				return buffer, false
 			}
@@ -338,7 +392,13 @@ func appendJSONValueMode(buffer []byte, value any, depth int, escapeHTML bool) (
 			buffer = appendJSONStringMode(buffer, key, escapeHTML)
 			buffer = append(buffer, ':')
 			var ok bool
-			buffer, ok = appendJSONValueMode(buffer, typed[key], depth+1, escapeHTML)
+			buffer, ok = appendJSONValueMode(
+				buffer,
+				typed[key],
+				depth+1,
+				escapeHTML,
+				allowIntegers,
+			)
 			if !ok {
 				return buffer, false
 			}
@@ -473,6 +533,25 @@ func MarshalView(v any, consume func([]byte)) error {
 	defer releaseMarshalBuffer(buf)
 	consume(view)
 	return nil
+}
+
+func encodeJSONValuePooled(value any, consume func([]byte)) bool {
+	bufferPointer := jsonValueBufferPool.Get().(*[]byte)
+	buffer := (*bufferPointer)[:0]
+	encoded, ok := appendJSONValueMode(buffer, value, 0, false, true)
+	if ok {
+		encoded = append(encoded, '\n')
+	}
+	defer func() {
+		if cap(encoded) <= maxPooledMarshalBufferCapacity {
+			*bufferPointer = encoded[:0]
+			jsonValueBufferPool.Put(bufferPointer)
+		}
+	}()
+	if ok {
+		consume(encoded)
+	}
+	return ok
 }
 
 // MarshalHTMLView is the zero-copy callback form of encoding/json.Marshal.
