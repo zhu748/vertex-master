@@ -149,6 +149,39 @@ func TestDefaultRequestConverterCompactsTextInsideToolHistory(t *testing.T) {
 	}
 }
 
+func TestHandleInlineDataCaseReusesCanonicalFunctionReferences(t *testing.T) {
+	contents := []any{map[string]any{
+		"role": "model",
+		"parts": []any{
+			map[string]any{"functionCall": map[string]any{
+				"id": "call_1", "name": "lookup",
+				"args": map[string]any{"snake_key_is_payload": true},
+			}},
+			map[string]any{"functionResponse": map[string]any{
+				"id": "call_1", "name": "lookup",
+				"response": map[string]any{"snake_key_is_payload": true},
+			}},
+		},
+	}}
+	got, changed := handleInlineDataCaseCopy(contents)
+	if changed || &got.([]any)[0] != &contents[0] {
+		t.Fatalf("canonical function references were copied: changed=%v, got=%#v", changed, got)
+	}
+
+	aliased := map[string]any{
+		"tool_call_id": "call_2",
+		"name":         "lookup",
+		"response":     map[string]any{"value": true},
+	}
+	normalized, changed := camelizeFunctionRefCopy(aliased, "response")
+	if !changed || normalized["id"] != "call_2" || normalized["toolCallId"] != nil {
+		t.Fatalf("aliased function reference was not normalized: %#v", normalized)
+	}
+	if aliased["tool_call_id"] != "call_2" {
+		t.Fatalf("function reference input was mutated: %#v", aliased)
+	}
+}
+
 func TestDefaultRequestConverterKeepsGemini36PrefillMapShape(t *testing.T) {
 	body := map[string]any{
 		"model": "gemini-3.6-flash",

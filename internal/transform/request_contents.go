@@ -904,16 +904,18 @@ func handleInlineDataCaseCopy(contents any) (any, bool) {
 				}
 			case "functionCall":
 				if vm, ok := v.(map[string]any); ok {
-					normalized = camelizeFunctionRef(vm, "args")
-					changed = true
+					var nestedChanged bool
+					normalized, nestedChanged = camelizeFunctionRefCopy(vm, "args")
+					changed = changed || nestedChanged
 				} else if nested, nestedChanged := handleInlineDataCaseCopy(v); nestedChanged {
 					normalized = nested
 					changed = true
 				}
 			case "functionResponse":
 				if vm, ok := v.(map[string]any); ok {
-					normalized = camelizeFunctionRef(vm, "response")
-					changed = true
+					var nestedChanged bool
+					normalized, nestedChanged = camelizeFunctionRefCopy(vm, "response")
+					changed = changed || nestedChanged
 				} else if nested, nestedChanged := handleInlineDataCaseCopy(v); nestedChanged {
 					normalized = nested
 					changed = true
@@ -944,10 +946,16 @@ func handleInlineDataCaseCopy(contents any) (any, bool) {
 	}
 }
 
-// camelizeFunctionRef 处理 functionCall/functionResponse 分支。
-func camelizeFunctionRef(v map[string]any, payloadKey string) map[string]any {
+// camelizeFunctionRefCopy 处理 functionCall/functionResponse 分支。已经使用
+// camelCase 且无需删除别名的引用保持原只读 map，避免规范工具历史重复复制。
+func camelizeFunctionRefCopy(v map[string]any, payloadKey string) (map[string]any, bool) {
+	if functionRefCanPassThrough(v, payloadKey) {
+		return v, false
+	}
+
+	fid := firstTruthyString(v["id"], v["tool_call_id"], v["toolCallId"])
 	out := map[string]any{}
-	if fid := firstTruthyString(v["id"], v["tool_call_id"], v["toolCallId"]); fid != "" {
+	if fid != "" {
 		out["id"] = fid
 	}
 	for ik, iv := range v {
@@ -960,7 +968,79 @@ func camelizeFunctionRef(v map[string]any, payloadKey string) map[string]any {
 			out[cik] = handleInlineDataCase(iv)
 		}
 	}
-	return out
+	return out, true
+}
+
+func functionRefCanPassThrough(v map[string]any, payloadKey string) bool {
+	fid := firstTruthyString(v["id"], v["tool_call_id"], v["toolCallId"])
+	for key, value := range v {
+		if strings.IndexByte(key, '_') >= 0 {
+			return false
+		}
+		switch key {
+		case "id":
+			id, ok := value.(string)
+			if !ok || id == "" || id != fid {
+				return false
+			}
+		case "toolCallId":
+			return false
+		case payloadKey:
+		default:
+			if !inlineDataCaseCanPassThrough(value) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func inlineDataCaseCanPassThrough(contents any) bool {
+	switch value := contents.(type) {
+	case []any:
+		for _, item := range value {
+			if !inlineDataCaseCanPassThrough(item) {
+				return false
+			}
+		}
+	case map[string]any:
+		for key, nested := range value {
+			if strings.IndexByte(key, '_') >= 0 {
+				return false
+			}
+			switch key {
+			case "inlineData":
+				if inline, ok := nested.(map[string]any); ok {
+					for inlineKey := range inline {
+						if strings.IndexByte(inlineKey, '_') >= 0 {
+							return false
+						}
+					}
+				}
+			case "functionCall":
+				if functionCall, ok := nested.(map[string]any); ok {
+					if !functionRefCanPassThrough(functionCall, "args") {
+						return false
+					}
+				} else if !inlineDataCaseCanPassThrough(nested) {
+					return false
+				}
+			case "functionResponse":
+				if functionResponse, ok := nested.(map[string]any); ok {
+					if !functionRefCanPassThrough(functionResponse, "response") {
+						return false
+					}
+				} else if !inlineDataCaseCanPassThrough(nested) {
+					return false
+				}
+			default:
+				if !inlineDataCaseCanPassThrough(nested) {
+					return false
+				}
+			}
+		}
+	}
+	return true
 }
 
 // filterEmptyContents 对每个 content 的 parts 逐个清洗。

@@ -93,11 +93,11 @@ func BenchmarkResponsesToolHistoryRequestPipeline(b *testing.B) {
 			b.Fatal(err)
 		}
 		converted["model"] = "gemini-3.1-flash"
-		_, payload, err := converter.Convert(converted, cfg)
+		model, payload, err := converter.Convert(converted, cfg)
 		if err != nil {
 			b.Fatal(err)
 		}
-		benchmarkRequestConversionResult = payload
+		benchmarkRequestConversionResult = transform.BuildVertexVariables(model, payload, cfg)
 	}
 }
 
