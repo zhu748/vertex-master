@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -76,6 +77,71 @@ func TestLegacyClaudePromptReplacementRuleRemainsCompatible(t *testing.T) {
 	cfg.ClaudePromptReplacements = []ClaudePromptReplacementRule{}
 	if rules := StaticProvider(cfg).ClaudePromptReplacementRules(); len(rules) != 0 {
 		t.Fatalf("explicit empty multi-rule config must override legacy fields: %#v", rules)
+	}
+}
+
+func TestClaudePromptPolicySnapshotValidationFollowsHotReload(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("VPROXY_CONFIG", path)
+	t.Cleanup(InvalidateCache)
+	provider := GetProvider()
+
+	writeConfig := func(data string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		InvalidateCache()
+	}
+
+	writeConfig(`{
+		"claude_prompt_replacement_enabled":true,
+		"claude_prompt_replacements":[
+			{"from":"source","to":"target","models":["fake-model"]}
+		]
+	}`)
+	first := provider.ClaudePromptPolicySnapshot()
+	second := provider.ClaudePromptPolicySnapshot()
+	if err := first.ValidationError(); err != nil {
+		t.Fatalf("valid policy snapshot failed validation: %v", err)
+	}
+	if len(first.ReplacementRules) != 1 ||
+		&first.ReplacementRules[0] != &second.ReplacementRules[0] {
+		t.Fatal("unchanged policy snapshots did not reuse immutable rule storage")
+	}
+	detached := provider.ClaudePromptPolicy()
+	detached.ReplacementRules[0].From = "mutated"
+	detached.ReplacementRules[0].Models[0] = "mutated-model"
+	current := provider.ClaudePromptPolicySnapshot()
+	if current.ReplacementRules[0].From != "source" ||
+		current.ReplacementRules[0].Models[0] != "fake-model" {
+		t.Fatal("detached policy copy mutated the cached snapshot")
+	}
+
+	writeConfig(`{
+		"claude_prompt_replacement_enabled":true,
+		"claude_prompt_replacements":[
+			{"from":"duplicate","to":"one"},
+			{"from":"duplicate","to":"two"}
+		]
+	}`)
+	invalid := provider.ClaudePromptPolicySnapshot()
+	if err := invalid.ValidationError(); err == nil ||
+		!strings.Contains(err.Error(), "duplicate source") {
+		t.Fatalf("invalid reloaded policy validation error=%v", err)
+	}
+
+	writeConfig(`{
+		"claude_prompt_replacement_enabled":true,
+		"claude_prompt_replacements":[
+			{"from":"fixed","to":"value"}
+		]
+	}`)
+	recovered := provider.ClaudePromptPolicySnapshot()
+	if err := recovered.ValidationError(); err != nil ||
+		len(recovered.ReplacementRules) != 1 ||
+		recovered.ReplacementRules[0].From != "fixed" {
+		t.Fatalf("policy snapshot did not recover after reload: policy=%#v err=%v", recovered, err)
 	}
 }
 

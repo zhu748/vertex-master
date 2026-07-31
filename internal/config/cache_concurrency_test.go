@@ -36,6 +36,10 @@ func TestLoadIsRaceFreeUnderHotReload(t *testing.T) {
 					t.Errorf("读到不一致的配置快照: port=%d retries=%d", cfg.PortAPI, cfg.MaxRetries)
 					return
 				}
+				if err := GetProvider().ClaudePromptPolicySnapshot().ValidationError(); err != nil {
+					t.Errorf("读到无效的提示词策略快照: %v", err)
+					return
+				}
 			}
 		}()
 	}

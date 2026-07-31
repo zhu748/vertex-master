@@ -1,10 +1,16 @@
 package config
 
 type staticConfig struct {
-	c AppConfig
+	c                  AppConfig
+	claudePromptPolicy ClaudePromptPolicyConfig
 }
 
-func StaticProvider(c AppConfig) ConfigProvider { return staticConfig{c} }
+func StaticProvider(c AppConfig) ConfigProvider {
+	return staticConfig{
+		c:                  c,
+		claudePromptPolicy: c.ClaudePromptPolicy(),
+	}
+}
 
 func (s staticConfig) PortAPI() int               { return s.c.PortAPI }
 func (s staticConfig) MaxRetries() int            { return s.c.MaxRetries }
@@ -35,7 +41,12 @@ func (s staticConfig) ClaudePromptReplacementRules() []ClaudePromptReplacementRu
 	return s.c.EffectiveClaudePromptReplacementRules()
 }
 func (s staticConfig) ClaudePromptPolicy() ClaudePromptPolicyConfig {
-	return s.c.ClaudePromptPolicy()
+	policy := s.claudePromptPolicy
+	policy.ReplacementRules = cloneClaudePromptReplacementRules(policy.ReplacementRules)
+	return policy
+}
+func (s staticConfig) ClaudePromptPolicySnapshot() ClaudePromptPolicyConfig {
+	return s.claudePromptPolicy
 }
 func (s staticConfig) VertexAPIKey() string              { return s.c.VertexAPIKey }
 func (s staticConfig) CountTokensQuerySignature() string { return s.c.CountTokensQuerySignature }

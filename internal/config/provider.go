@@ -23,6 +23,9 @@ type ConfigProvider interface {
 	ClaudePromptReplacementEnabled() bool
 	ClaudePromptReplacementRules() []ClaudePromptReplacementRule
 	ClaudePromptPolicy() ClaudePromptPolicyConfig
+	// ClaudePromptPolicySnapshot returns immutable shared rule storage.
+	// Callers must not mutate the returned rules or nested model filters.
+	ClaudePromptPolicySnapshot() ClaudePromptPolicyConfig
 
 	VertexAPIKey() string
 	CountTokensQuerySignature() string
@@ -104,7 +107,12 @@ func (d dynamicConfig) ClaudePromptReplacementRules() []ClaudePromptReplacementR
 	return Load().EffectiveClaudePromptReplacementRules()
 }
 func (d dynamicConfig) ClaudePromptPolicy() ClaudePromptPolicyConfig {
-	return Load().ClaudePromptPolicy()
+	policy := loadCacheEntry().claudePromptPolicy
+	policy.ReplacementRules = cloneClaudePromptReplacementRules(policy.ReplacementRules)
+	return policy
+}
+func (d dynamicConfig) ClaudePromptPolicySnapshot() ClaudePromptPolicyConfig {
+	return loadCacheEntry().claudePromptPolicy
 }
 func (d dynamicConfig) VertexAPIKey() string              { return Load().VertexAPIKey }
 func (d dynamicConfig) CountTokensQuerySignature() string { return Load().CountTokensQuerySignature }

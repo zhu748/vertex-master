@@ -20,6 +20,13 @@ const (
 	defaultCountTokensQuerySig = "2/mENOSldfC+HZM+tGhVuJLrl8M6gEyK3HRjUKuA5AM58="
 	defaultMaxRetries          = 10
 	defaultParallelPoolSize    = 10
+
+	// MaxClaudePromptSettingBytes bounds one configured prompt policy payload.
+	MaxClaudePromptSettingBytes = 1 << 20
+	// MaxClaudePromptReplacementRules bounds ordered literal rewrite work.
+	MaxClaudePromptReplacementRules = 32
+	// MaxClaudePromptRuleModels bounds model filters attached to one rule.
+	MaxClaudePromptRuleModels = 16
 )
 
 type AppConfig struct { //nolint:govet
@@ -102,27 +109,50 @@ type ClaudePromptPolicyConfig struct {
 	ReplacementEnabled bool
 	ReplacementRules   []ClaudePromptReplacementRule
 	MaxRequestMB       int
+	validationErr      error
 }
 
 func (c AppConfig) ClaudePromptPolicy() ClaudePromptPolicyConfig {
-	return ClaudePromptPolicyConfig{
+	policy := c.ClaudePromptPolicySnapshot()
+	policy.ReplacementRules = cloneClaudePromptReplacementRules(policy.ReplacementRules)
+	return policy
+}
+
+// ClaudePromptPolicySnapshot returns a read-only view backed by the immutable
+// configuration snapshot. Callers must not mutate ReplacementRules or their
+// nested Models slices. Use ClaudePromptPolicy when a detached copy is needed.
+func (c AppConfig) ClaudePromptPolicySnapshot() ClaudePromptPolicyConfig {
+	policy := ClaudePromptPolicyConfig{
 		InjectionEnabled:   c.ClaudePromptInjectionEnabled,
 		InjectionPosition:  normalizeClaudePromptInjectionPosition(c.ClaudePromptInjectionPosition),
 		InjectionText:      c.ClaudePromptInjectionText,
 		StripPromotions:    c.ClaudePromptStripPromotions,
 		ReplaceSecurity:    c.ClaudePromptReplaceSecurity,
 		ReplacementEnabled: c.ClaudePromptReplacementEnabled,
-		ReplacementRules:   c.EffectiveClaudePromptReplacementRules(),
+		ReplacementRules:   c.effectiveClaudePromptReplacementRulesSnapshot(),
 		MaxRequestMB:       c.MaxRequestMB,
 	}
+	policy.validationErr = ValidateClaudePromptPolicyConfig(policy)
+	return policy
+}
+
+// ValidationError returns the validation result captured with this snapshot.
+func (p ClaudePromptPolicyConfig) ValidationError() error {
+	return p.validationErr
 }
 
 // EffectiveClaudePromptReplacementRules returns a detached replacement rule
 // slice. An explicitly configured multi-rule array takes precedence; old
 // config files that only contain the legacy from/to fields keep working.
 func (c AppConfig) EffectiveClaudePromptReplacementRules() []ClaudePromptReplacementRule {
+	return cloneClaudePromptReplacementRules(
+		c.effectiveClaudePromptReplacementRulesSnapshot(),
+	)
+}
+
+func (c AppConfig) effectiveClaudePromptReplacementRulesSnapshot() []ClaudePromptReplacementRule {
 	if c.ClaudePromptReplacements != nil {
-		return cloneClaudePromptReplacementRules(c.ClaudePromptReplacements)
+		return c.ClaudePromptReplacements
 	}
 	if c.ClaudePromptReplaceFrom == "" {
 		return []ClaudePromptReplacementRule{}
@@ -142,6 +172,79 @@ func cloneClaudePromptReplacementRules(
 		cloned[index].Models = append([]string(nil), rules[index].Models...)
 	}
 	return cloned
+}
+
+// ValidateClaudePromptPolicyConfig validates a complete prompt policy.
+func ValidateClaudePromptPolicyConfig(policy ClaudePromptPolicyConfig) error {
+	if policy.ReplacementEnabled {
+		if err := ValidateClaudePromptReplacementRules(policy.ReplacementRules); err != nil {
+			return err
+		}
+		activeRules := 0
+		for _, rule := range policy.ReplacementRules {
+			if !rule.Disabled {
+				activeRules++
+			}
+		}
+		if activeRules == 0 {
+			return fmt.Errorf("claude prompt replacement is enabled without an active rule")
+		}
+	}
+	if policy.InjectionEnabled {
+		if strings.TrimSpace(policy.InjectionText) == "" {
+			return fmt.Errorf("claude prompt injection is enabled without content")
+		}
+		if len(policy.InjectionText) > MaxClaudePromptSettingBytes {
+			return fmt.Errorf("configured Claude prompt injection exceeds 1 MiB")
+		}
+	}
+	return nil
+}
+
+// ValidateClaudePromptReplacementRules validates ordered literal rewrite rules.
+func ValidateClaudePromptReplacementRules(rules []ClaudePromptReplacementRule) error {
+	if len(rules) > MaxClaudePromptReplacementRules {
+		return fmt.Errorf(
+			"configured Claude prompt replacement rules exceed the limit of %d",
+			MaxClaudePromptReplacementRules,
+		)
+	}
+	seen := make(map[string]struct{}, len(rules))
+	totalBytes := 0
+	for index, rule := range rules {
+		if rule.From == "" {
+			return fmt.Errorf("claude prompt replacement rule %d has an empty source", index+1)
+		}
+		if _, duplicate := seen[rule.From]; duplicate {
+			return fmt.Errorf("claude prompt replacement rule %d has a duplicate source", index+1)
+		}
+		seen[rule.From] = struct{}{}
+		totalBytes += len(rule.From) + len(rule.To)
+		if len(rule.Models) > MaxClaudePromptRuleModels {
+			return fmt.Errorf(
+				"claude prompt replacement rule %d has more than %d models",
+				index+1,
+				MaxClaudePromptRuleModels,
+			)
+		}
+		seenModels := make(map[string]struct{}, len(rule.Models))
+		for _, model := range rule.Models {
+			model = strings.TrimSpace(model)
+			if model == "" {
+				return fmt.Errorf("claude prompt replacement rule %d has an empty model", index+1)
+			}
+			normalized := strings.ToLower(model)
+			if _, duplicate := seenModels[normalized]; duplicate {
+				return fmt.Errorf("claude prompt replacement rule %d has a duplicate model", index+1)
+			}
+			seenModels[normalized] = struct{}{}
+			totalBytes += len(model)
+		}
+		if totalBytes > MaxClaudePromptSettingBytes {
+			return fmt.Errorf("configured Claude prompt replacement rules exceed 1 MiB")
+		}
+	}
+	return nil
 }
 
 func DefaultConfig() AppConfig {
@@ -182,8 +285,9 @@ func DefaultConfig() AppConfig {
 // cacheEntry 是一份不可变的配置快照。发布后其字段不再修改，
 // 因此读路径可以无锁取用（见 Load）。
 type cacheEntry struct {
-	cfg      AppConfig
-	loadedAt time.Time
+	cfg                AppConfig
+	claudePromptPolicy ClaudePromptPolicyConfig
+	loadedAt           time.Time
 }
 
 var (
@@ -369,8 +473,12 @@ func writeJSONFile(path string, v any) error {
 }
 
 func Load() AppConfig {
+	return loadCacheEntry().cfg
+}
+
+func loadCacheEntry() *cacheEntry {
 	if entry := cached.Load(); entry != nil && time.Since(entry.loadedAt) < cacheTTL {
-		return entry.cfg
+		return entry
 	}
 
 	// 缓存过期：加锁重填，避免一批并发读同时去读盘。
@@ -378,7 +486,7 @@ func Load() AppConfig {
 	defer reloadMu.Unlock()
 	// 双重检查——可能已有其它 goroutine 在等锁期间填好了缓存。
 	if entry := cached.Load(); entry != nil && time.Since(entry.loadedAt) < cacheTTL {
-		return entry.cfg
+		return entry
 	}
 
 	cfg := DefaultConfig()
@@ -480,8 +588,13 @@ func Load() AppConfig {
 		log.Printf("[Config] 读取 config.json 失败: %v", err)
 	}
 	applyEnvironmentOverrides(&cfg)
-	cached.Store(&cacheEntry{cfg: cfg, loadedAt: time.Now()})
-	return cfg
+	entry := &cacheEntry{
+		cfg:                cfg,
+		claudePromptPolicy: cfg.ClaudePromptPolicySnapshot(),
+		loadedAt:           time.Now(),
+	}
+	cached.Store(entry)
+	return entry
 }
 
 func applyEnvironmentOverrides(cfg *AppConfig) {

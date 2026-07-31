@@ -1049,3 +1049,68 @@ func BenchmarkClaudePromptPolicyDefaultLargeSystem(b *testing.B) {
 		})
 	}
 }
+
+func BenchmarkClaudePromptPolicyRuleMetadata(b *testing.B) {
+	cfg := config.DefaultConfig()
+	cfg.ClaudePromptReplacementEnabled = true
+	cfg.ClaudePromptReplacements = benchmarkClaudePromptReplacementRules()
+	provider := config.StaticProvider(cfg)
+	messages := []any{
+		map[string]any{"role": "system", "content": "ordinary system prompt"},
+		map[string]any{"role": "user", "content": "continue"},
+	}
+	chatBody := map[string]any{"messages": messages}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		chatBody["messages"] = messages
+		result, err := applyClaudePromptPolicy(
+			chatBody,
+			provider,
+			"unmatched-model",
+			"unmatched-model",
+		)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if result.ApplicableRules != 0 {
+			b.Fatalf("applicable rules=%d, want 0", result.ApplicableRules)
+		}
+	}
+}
+
+func BenchmarkValidateClaudePromptPolicyConfig(b *testing.B) {
+	cfg := config.DefaultConfig()
+	cfg.ClaudePromptReplacementEnabled = true
+	cfg.ClaudePromptReplacements = benchmarkClaudePromptReplacementRules()
+	policy := cfg.ClaudePromptPolicy()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if err := validateClaudePromptPolicyConfig(policy); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func benchmarkClaudePromptReplacementRules() []config.ClaudePromptReplacementRule {
+	rules := make(
+		[]config.ClaudePromptReplacementRule,
+		maxClaudePromptReplacementRules,
+	)
+	for ruleIndex := range rules {
+		rules[ruleIndex].From = fmt.Sprintf("source-%02d", ruleIndex)
+		rules[ruleIndex].To = fmt.Sprintf("target-%02d", ruleIndex)
+		rules[ruleIndex].Models = make([]string, 8)
+		for modelIndex := range rules[ruleIndex].Models {
+			rules[ruleIndex].Models[modelIndex] = fmt.Sprintf(
+				"model-%02d-%02d",
+				ruleIndex,
+				modelIndex,
+			)
+		}
+	}
+	return rules
+}

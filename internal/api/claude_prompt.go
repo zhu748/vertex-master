@@ -12,10 +12,10 @@ import (
 )
 
 const (
-	maxClaudePromptSettingBytes     = 1 << 20
+	maxClaudePromptSettingBytes     = config.MaxClaudePromptSettingBytes
 	maxClaudePromptRecordBytes      = 1 << 20
-	maxClaudePromptReplacementRules = 32
-	maxClaudePromptRuleModels       = 16
+	maxClaudePromptReplacementRules = config.MaxClaudePromptReplacementRules
+	maxClaudePromptRuleModels       = config.MaxClaudePromptRuleModels
 	maxClaudeProcessedPromptBytes   = 8 << 20
 	maxClaudeReplacementWorkBytes   = 64 << 20
 )
@@ -116,8 +116,8 @@ func applyClaudePromptPolicy(
 	if cfg == nil {
 		return result, nil
 	}
-	policy := cfg.ClaudePromptPolicy()
-	if err := validateClaudePromptPolicyConfig(policy); err != nil {
+	policy := cfg.ClaudePromptPolicySnapshot()
+	if err := policy.ValidationError(); err != nil {
 		return result, claudePromptConfigError(err)
 	}
 	limit := maxClaudePromptBytesForPolicy(policy)
@@ -499,76 +499,13 @@ func rewriteClaudeSystemPromptMessages(
 }
 
 func validateClaudePromptPolicyConfig(policy config.ClaudePromptPolicyConfig) error {
-	if policy.ReplacementEnabled {
-		if err := validateClaudePromptReplacementRules(policy.ReplacementRules); err != nil {
-			return err
-		}
-		activeRules := 0
-		for _, rule := range policy.ReplacementRules {
-			if !rule.Disabled {
-				activeRules++
-			}
-		}
-		if activeRules == 0 {
-			return fmt.Errorf("claude prompt replacement is enabled without an active rule")
-		}
-	}
-	if policy.InjectionEnabled {
-		if strings.TrimSpace(policy.InjectionText) == "" {
-			return fmt.Errorf("claude prompt injection is enabled without content")
-		}
-		if len(policy.InjectionText) > maxClaudePromptSettingBytes {
-			return fmt.Errorf("configured Claude prompt injection exceeds 1 MiB")
-		}
-	}
-	return nil
+	return config.ValidateClaudePromptPolicyConfig(policy)
 }
 
 func validateClaudePromptReplacementRules(
 	rules []config.ClaudePromptReplacementRule,
 ) error {
-	if len(rules) > maxClaudePromptReplacementRules {
-		return fmt.Errorf(
-			"configured Claude prompt replacement rules exceed the limit of %d",
-			maxClaudePromptReplacementRules,
-		)
-	}
-	seen := make(map[string]struct{}, len(rules))
-	totalBytes := 0
-	for index, rule := range rules {
-		if rule.From == "" {
-			return fmt.Errorf("claude prompt replacement rule %d has an empty source", index+1)
-		}
-		if _, duplicate := seen[rule.From]; duplicate {
-			return fmt.Errorf("claude prompt replacement rule %d has a duplicate source", index+1)
-		}
-		seen[rule.From] = struct{}{}
-		totalBytes += len(rule.From) + len(rule.To)
-		if len(rule.Models) > maxClaudePromptRuleModels {
-			return fmt.Errorf(
-				"claude prompt replacement rule %d has more than %d models",
-				index+1,
-				maxClaudePromptRuleModels,
-			)
-		}
-		seenModels := make(map[string]struct{}, len(rule.Models))
-		for _, model := range rule.Models {
-			model = strings.TrimSpace(model)
-			if model == "" {
-				return fmt.Errorf("claude prompt replacement rule %d has an empty model", index+1)
-			}
-			normalized := strings.ToLower(model)
-			if _, duplicate := seenModels[normalized]; duplicate {
-				return fmt.Errorf("claude prompt replacement rule %d has a duplicate model", index+1)
-			}
-			seenModels[normalized] = struct{}{}
-			totalBytes += len(model)
-		}
-		if totalBytes > maxClaudePromptSettingBytes {
-			return fmt.Errorf("configured Claude prompt replacement rules exceed 1 MiB")
-		}
-	}
-	return nil
+	return config.ValidateClaudePromptReplacementRules(rules)
 }
 
 func claudePromptRuleAppliesToModel(
