@@ -198,6 +198,44 @@ func TestCleanPartKeepsPublicThoughtSignatureContract(t *testing.T) {
 	}
 }
 
+func TestFilterEmptyContentsPackedPartsRemainIndependent(t *testing.T) {
+	functionPart := func(id, name string) map[string]any {
+		return map[string]any{"functionCall": map[string]any{
+			"id": id, "name": name, "args": map[string]any{},
+		}}
+	}
+	contents := []any{
+		map[string]any{
+			"role": "model", "parts": []any{functionPart("call_1", "first")},
+		},
+		map[string]any{
+			"role": "model", "parts": []any{
+				functionPart("call_2", "second"),
+				functionPart("call_3", "third"),
+			},
+		},
+	}
+	filtered := filterEmptyContents(contents).([]any)
+	firstParts := filtered[0].(map[string]any)["parts"].([]any)
+	secondParts := filtered[1].(map[string]any)["parts"].([]any)
+	if len(firstParts) != 1 || len(secondParts) != 2 {
+		t.Fatalf("packed parts lengths=%d/%d, want 1/2", len(firstParts), len(secondParts))
+	}
+
+	firstParts = append(firstParts, map[string]any{"text": "appended"})
+	if len(firstParts) != 2 || firstParts[1].(map[string]any)["text"] != "appended" {
+		t.Fatalf("append to first packed slice failed: %#v", firstParts)
+	}
+	secondCall := secondParts[0].(map[string]any)["functionCall"].(map[string]any)
+	if secondCall["name"] != "second" {
+		t.Fatalf("appending first packed slice overwrote the second: %#v", secondParts)
+	}
+	originalCall := contents[0].(map[string]any)["parts"].([]any)[0].(map[string]any)["functionCall"].(map[string]any)
+	if originalCall["id"] != "call_1" {
+		t.Fatalf("packed cleaning mutated input: %#v", originalCall)
+	}
+}
+
 func TestDefaultRequestConverterKeepsGemini36PrefillMapShape(t *testing.T) {
 	body := map[string]any{
 		"model": "gemini-3.6-flash",

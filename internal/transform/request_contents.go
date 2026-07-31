@@ -1051,10 +1051,12 @@ func filterEmptyContents(contents any) any {
 	}
 
 	var callIDMap map[string]string
+	var lastModelFunctionCallsInline [8]string
 	var lastModelFunctionCalls []string
 	responseIndex := 0
 
 	var filtered []any
+	var packedCleanedParts []any
 	ensureFiltered := func(prefixEnd int) {
 		if filtered == nil {
 			filtered = make([]any, 0, len(list))
@@ -1081,7 +1083,7 @@ func filterEmptyContents(contents any) any {
 		parts := asAnySlice(cm["parts"])
 
 		if role == "model" {
-			lastModelFunctionCalls = nil
+			lastModelFunctionCalls = lastModelFunctionCallsInline[:0]
 			responseIndex = 0
 			for _, p := range parts {
 				if pm, ok := p.(map[string]any); ok {
@@ -1090,7 +1092,7 @@ func filterEmptyContents(contents any) any {
 							lastModelFunctionCalls = append(lastModelFunctionCalls, name)
 							if fid, _ := fc["id"].(string); fid != "" {
 								if callIDMap == nil {
-									callIDMap = make(map[string]string)
+									callIDMap = make(map[string]string, min(len(list), 8))
 								}
 								callIDMap[normalizeGeminiToolCallID(fid)] = name
 							}
@@ -1100,11 +1102,14 @@ func filterEmptyContents(contents any) any {
 			}
 		}
 
-		var cleanedParts []any
+		cleanedPartsStart := -1
 		ensureCleanedParts := func(prefixEnd int) {
-			if cleanedParts == nil {
-				cleanedParts = make([]any, 0, len(parts))
-				cleanedParts = append(cleanedParts, parts[:prefixEnd]...)
+			if cleanedPartsStart < 0 {
+				if packedCleanedParts == nil {
+					packedCleanedParts = make([]any, 0, len(list))
+				}
+				cleanedPartsStart = len(packedCleanedParts)
+				packedCleanedParts = append(packedCleanedParts, parts[:prefixEnd]...)
 			}
 		}
 		for partIndex, p := range parts {
@@ -1114,8 +1119,8 @@ func filterEmptyContents(contents any) any {
 				continue
 			}
 			if cleanPartCanPassThrough(pm) {
-				if cleanedParts != nil {
-					cleanedParts = append(cleanedParts, pm)
+				if cleanedPartsStart >= 0 {
+					packedCleanedParts = append(packedCleanedParts, pm)
 				}
 				continue
 			}
@@ -1127,14 +1132,17 @@ func filterEmptyContents(contents any) any {
 			}
 			if cleaned, ok := cleanPartWithID(pm, lastModelFunctionCalls, idx, callIDMap); ok {
 				ensureCleanedParts(partIndex)
-				cleanedParts = append(cleanedParts, cleaned)
+				packedCleanedParts = append(packedCleanedParts, cleaned)
 			} else {
 				ensureCleanedParts(partIndex)
 			}
 		}
-		partsChanged := cleanedParts != nil
+		partsChanged := cleanedPartsStart >= 0
+		var cleanedParts []any
 		if !partsChanged {
 			cleanedParts = parts
+		} else {
+			cleanedParts = packedCleanedParts[cleanedPartsStart:len(packedCleanedParts):len(packedCleanedParts)]
 		}
 		if len(cleanedParts) > 0 {
 			if partsChanged {
