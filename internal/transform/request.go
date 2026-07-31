@@ -166,8 +166,8 @@ func convertChatRequest(
 					)
 				}
 				for toolCallIndex, tc := range toolCalls {
-					parsed := extractOAIToolCall(tc)
-					if parsed == nil {
+					parsed, parsedOK := extractOAIToolCall(tc)
+					if !parsedOK {
 						return "", nil, fmt.Errorf(
 							"messages[%d] assistant tool_calls[%d] must contain a function name",
 							messageIndex,

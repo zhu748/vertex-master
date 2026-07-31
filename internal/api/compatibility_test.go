@@ -89,6 +89,62 @@ func TestResponsesRequestConversionGroupsParallelFunctionCalls(t *testing.T) {
 	if assistant["role"] != "assistant" || len(toolCalls) != 2 {
 		t.Fatalf("并行 function_call 未合并: %#v", assistant)
 	}
+	first, firstOK := toolCalls[0].(*transform.CanonicalOAIToolCall)
+	second, secondOK := toolCalls[1].(*transform.CanonicalOAIToolCall)
+	if !firstOK || !secondOK || first == second ||
+		first.ID != "call_1" || second.ID != "call_2" {
+		t.Fatalf("并行 function_call 未使用独立连续存储: %#v", toolCalls)
+	}
+}
+
+func TestResponsesFunctionCallStorageSurvivesGrowth(t *testing.T) {
+	const callCount = 17
+	input := make([]any, callCount)
+	for index := range input {
+		input[index] = map[string]any{
+			"type":      "function_call",
+			"call_id":   fmt.Sprintf("call_%d", index),
+			"name":      "lookup",
+			"arguments": map[string]any{"index": float64(index)},
+		}
+	}
+	chat, err := responsesToChatRequest(map[string]any{"input": input})
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages := chat["messages"].([]any)
+	if len(messages) != 1 {
+		t.Fatalf("messages=%d, want one grouped assistant message", len(messages))
+	}
+	toolCalls := messages[0].(map[string]any)["tool_calls"].([]any)
+	if len(toolCalls) != callCount {
+		t.Fatalf("tool calls=%d, want %d", len(toolCalls), callCount)
+	}
+	for index, raw := range toolCalls {
+		call, ok := raw.(*transform.CanonicalOAIToolCall)
+		if !ok || call.ID != fmt.Sprintf("call_%d", index) {
+			t.Fatalf("tool call %d changed after storage growth: %#v", index, raw)
+		}
+	}
+
+	chat["model"] = "gemini-test"
+	_, payload, err := transform.DefaultRequestConverter().Convert(
+		chat,
+		config.StaticProvider(config.DefaultConfig()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := payload["contents"].([]any)[0].(map[string]any)["parts"].([]any)
+	if len(parts) != callCount {
+		t.Fatalf("converted parts=%d, want %d", len(parts), callCount)
+	}
+	for index, raw := range parts {
+		functionCall := raw.(map[string]any)["functionCall"].(map[string]any)
+		if functionCall["id"] != fmt.Sprintf("call_%d", index) {
+			t.Fatalf("converted tool call %d changed: %#v", index, functionCall)
+		}
+	}
 }
 
 func TestResponsesStructuredToolValuesPassThroughWithoutMutation(t *testing.T) {

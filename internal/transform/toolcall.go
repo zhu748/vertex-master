@@ -26,20 +26,30 @@ type CanonicalOAIFunctionCallData struct {
 }
 
 // extractOAIToolCall 健壮解析 OpenAI tool_call。
-func extractOAIToolCall(tc any) *oaiToolCall {
-	if canonical, ok := tc.(CanonicalOAIToolCall); ok {
+func extractOAIToolCall(tc any) (oaiToolCall, bool) {
+	switch canonical := tc.(type) {
+	case CanonicalOAIToolCall:
 		if canonical.Function.Name == "" {
-			return nil
+			return oaiToolCall{}, false
 		}
-		return &oaiToolCall{
+		return oaiToolCall{
 			id:   canonical.ID,
 			name: canonical.Function.Name,
 			args: coerceFunctionArgs(canonical.Function.Arguments),
+		}, true
+	case *CanonicalOAIToolCall:
+		if canonical == nil || canonical.Function.Name == "" {
+			return oaiToolCall{}, false
 		}
+		return oaiToolCall{
+			id:   canonical.ID,
+			name: canonical.Function.Name,
+			args: coerceFunctionArgs(canonical.Function.Arguments),
+		}, true
 	}
 	m, ok := tc.(map[string]any)
 	if !ok {
-		return nil
+		return oaiToolCall{}, false
 	}
 	id := firstTruthyString(m["id"], m["tool_call_id"], m["call_id"])
 
@@ -53,9 +63,9 @@ func extractOAIToolCall(tc any) *oaiToolCall {
 		args = firstPresentIn(m, "arguments", "args")
 	}
 	if name == "" {
-		return nil
+		return oaiToolCall{}, false
 	}
-	return &oaiToolCall{id: id, name: name, args: coerceFunctionArgs(args)}
+	return oaiToolCall{id: id, name: name, args: coerceFunctionArgs(args)}, true
 }
 
 // extractOAIFunctionTool 从 tools 项提取 function 声明。

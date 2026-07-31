@@ -166,6 +166,9 @@ func responsesToChatRequest(body map[string]any) (map[string]any, error) {
 			return nil, fmt.Errorf("'input' must not be empty")
 		}
 		var allToolCalls []any
+		// Pointers into typed storage avoid heap-boxing every canonical call when
+		// it enters []any. Old backing arrays remain valid if append must grow.
+		var canonicalToolCalls []transform.CanonicalOAIToolCall
 		pendingToolCallStart := 0
 		flushToolCalls := func() {
 			if pendingToolCallStart == len(allToolCalls) {
@@ -200,9 +203,11 @@ func responsesToChatRequest(body map[string]any) (map[string]any, error) {
 					name = flattenResponsesToolName(namespace, name)
 				}
 				if allToolCalls == nil {
-					allToolCalls = make([]any, 0, min(len(value), 8))
+					capacity := min(len(value), 8)
+					allToolCalls = make([]any, 0, capacity)
+					canonicalToolCalls = make([]transform.CanonicalOAIToolCall, 0, capacity)
 				}
-				allToolCalls = append(allToolCalls, transform.CanonicalOAIToolCall{
+				canonicalToolCalls = append(canonicalToolCalls, transform.CanonicalOAIToolCall{
 					ID:   id,
 					Type: "function",
 					Function: transform.CanonicalOAIFunctionCallData{
@@ -212,6 +217,7 @@ func responsesToChatRequest(body map[string]any) (map[string]any, error) {
 						),
 					},
 				})
+				allToolCalls = append(allToolCalls, &canonicalToolCalls[len(canonicalToolCalls)-1])
 			case "function_call_output":
 				if stringValue(item["call_id"]) == "" {
 					return nil, fmt.Errorf(

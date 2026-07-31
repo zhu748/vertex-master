@@ -400,10 +400,12 @@ func TestExtractCanonicalOAIToolCall(t *testing.T) {
 			Name: "lookup", Arguments: arguments,
 		},
 	}
-	parsed := extractOAIToolCall(call)
-	if parsed == nil || parsed.id != "call_1" || parsed.name != "lookup" ||
-		!reflect.DeepEqual(parsed.args, arguments) {
-		t.Fatalf("canonical tool call parsed incorrectly: %#v", parsed)
+	for _, value := range []any{call, &call} {
+		parsed, ok := extractOAIToolCall(value)
+		if !ok || parsed.id != "call_1" || parsed.name != "lookup" ||
+			!reflect.DeepEqual(parsed.args, arguments) {
+			t.Fatalf("canonical tool call %T parsed incorrectly: %#v", value, parsed)
+		}
 	}
 	encoded, err := json.Marshal(call)
 	if err != nil {
