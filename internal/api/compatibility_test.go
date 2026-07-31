@@ -135,7 +135,15 @@ func TestResponsesFunctionCallStorageSurvivesGrowth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	parts := payload["contents"].([]any)[0].(map[string]any)["parts"].([]any)
+	encodedContents, err := json.Marshal(payload["contents"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wireContents []any
+	if err := json.Unmarshal(encodedContents, &wireContents); err != nil {
+		t.Fatal(err)
+	}
+	parts := wireContents[0].(map[string]any)["parts"].([]any)
 	if len(parts) != callCount {
 		t.Fatalf("converted parts=%d, want %d", len(parts), callCount)
 	}

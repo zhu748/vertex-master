@@ -70,7 +70,13 @@ func convertChatRequest(
 	}
 	var toolIDToName functionCallNameIndex
 	var mixedTextStorage []canonicalSingleTextContent
-	compactMixedText := compactTextHistory && !isGemini36Model(resolvedModel)
+	var compactFunctionCallStorage []canonicalFunctionCallContent
+	var compactFunctionResponseStorage []canonicalFunctionResponseContent
+	// Packed backing arrays let each compact turn expose an independent,
+	// read-only full slice without allocating one parts array per message.
+	var packedCompactFunctionCallParts canonicalFunctionCallParts
+	var packedCompactFunctionResponseParts canonicalFunctionResponseParts
+	compactCanonicalHistory := compactTextHistory && !isGemini36Model(resolvedModel)
 
 	hasValidContents := compactContents
 	for messageIndex, msgRaw := range messagesRaw {
@@ -137,7 +143,7 @@ func convertChatRequest(
 				)
 			}
 		case "user":
-			if compactMixedText {
+			if compactCanonicalHistory {
 				if text, textOK := compactSingleTextValue(content, false); textOK {
 					if mixedTextStorage == nil {
 						mixedTextStorage = make(
@@ -183,6 +189,68 @@ func convertChatRequest(
 						messageIndex,
 					)
 				}
+				if compactCanonicalHistory && len(parts) == 0 && len(toolCalls) > 0 {
+					if packedCompactFunctionCallParts == nil {
+						packedCompactFunctionCallParts = make(
+							canonicalFunctionCallParts,
+							0,
+							min(len(messagesRaw), 8),
+						)
+					}
+					compactPartsStart := len(packedCompactFunctionCallParts)
+					canCompact := true
+					for toolCallIndex, tc := range toolCalls {
+						parsed, parsedOK := extractOAIToolCall(tc)
+						if !parsedOK {
+							return "", nil, fmt.Errorf(
+								"messages[%d] assistant tool_calls[%d] must contain a function name",
+								messageIndex,
+								toolCallIndex,
+							)
+						}
+						if parsed.id != "" {
+							toolIDToName.Set(parsed.id, parsed.name)
+						}
+						if strings.TrimSpace(parsed.name) == "" ||
+							!base64TreeCanSkipNormalization(parsed.args) {
+							canCompact = false
+						}
+						packedCompactFunctionCallParts = append(
+							packedCompactFunctionCallParts,
+							canonicalFunctionCallPart{
+								FunctionCall: canonicalFunctionCall{
+									Args: parsed.args,
+									ID:   parsed.id,
+									Name: parsed.name,
+								},
+							},
+						)
+					}
+					if canCompact {
+						compactParts := packedCompactFunctionCallParts[compactPartsStart:len(packedCompactFunctionCallParts):len(packedCompactFunctionCallParts)]
+						if compactFunctionCallStorage == nil {
+							compactFunctionCallStorage = make(
+								[]canonicalFunctionCallContent,
+								0,
+								min(len(messagesRaw), 8),
+							)
+						}
+						compactFunctionCallStorage = append(
+							compactFunctionCallStorage,
+							canonicalFunctionCallContent{
+								Parts:      compactParts,
+								Role:       "model",
+								normalized: true,
+							},
+						)
+						contents = append(
+							contents,
+							&compactFunctionCallStorage[len(compactFunctionCallStorage)-1],
+						)
+						hasValidContents = true
+						break
+					}
+				}
 				for toolCallIndex, tc := range toolCalls {
 					parsed, parsedOK := extractOAIToolCall(tc)
 					if !parsedOK {
@@ -209,7 +277,62 @@ func convertChatRequest(
 		case "tool":
 			tcID, _ := msg["tool_call_id"].(string)
 			name := firstTruthyString(msg["name"], toolIDToName.Get(tcID))
-			fr := map[string]any{"response": coerceFunctionResponse(msg["content"])}
+			response := coerceFunctionResponse(msg["content"])
+			if compactCanonicalHistory && base64TreeCanSkipNormalization(response) {
+				part := canonicalFunctionResponsePart{
+					FunctionResponse: canonicalFunctionResponse{
+						ID:       tcID,
+						Name:     name,
+						Response: response,
+					},
+				}
+				if packedCompactFunctionResponseParts == nil {
+					packedCompactFunctionResponseParts = make(
+						canonicalFunctionResponseParts,
+						0,
+						min(len(messagesRaw), 8),
+					)
+				}
+				if n := len(contents); n > 0 {
+					if last, ok := contents[n-1].(*canonicalFunctionResponseContent); ok {
+						partsStart := len(packedCompactFunctionResponseParts) - len(last.Parts)
+						packedCompactFunctionResponseParts = append(
+							packedCompactFunctionResponseParts,
+							part,
+						)
+						last.Parts = packedCompactFunctionResponseParts[partsStart:len(packedCompactFunctionResponseParts):len(packedCompactFunctionResponseParts)]
+						hasValidContents = true
+						break
+					}
+				}
+				partsStart := len(packedCompactFunctionResponseParts)
+				packedCompactFunctionResponseParts = append(
+					packedCompactFunctionResponseParts,
+					part,
+				)
+				if compactFunctionResponseStorage == nil {
+					compactFunctionResponseStorage = make(
+						[]canonicalFunctionResponseContent,
+						0,
+						min(len(messagesRaw), 8),
+					)
+				}
+				compactFunctionResponseStorage = append(
+					compactFunctionResponseStorage,
+					canonicalFunctionResponseContent{
+						Parts:      packedCompactFunctionResponseParts[partsStart:len(packedCompactFunctionResponseParts):len(packedCompactFunctionResponseParts)],
+						Role:       "function",
+						normalized: true,
+					},
+				)
+				contents = append(
+					contents,
+					&compactFunctionResponseStorage[len(compactFunctionResponseStorage)-1],
+				)
+				hasValidContents = true
+				break
+			}
+			fr := map[string]any{"response": response}
 			if name != "" {
 				fr["name"] = name
 			}

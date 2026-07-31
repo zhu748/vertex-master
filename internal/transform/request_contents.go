@@ -189,6 +189,159 @@ type canonicalSingleTextContent struct {
 	Role  string                     `json:"role"`
 }
 
+// canonicalFunctionCallContent keeps the JSON shape emitted by the compatibility
+// converter while avoiding three dynamic maps per function call. It is converted
+// back to the ordinary outbound map shape by filterEmptyContents.
+type canonicalFunctionCallContent struct {
+	Parts canonicalFunctionCallParts `json:"parts"`
+	Role  string                     `json:"role"`
+	// normalized is private so encoding/json preserves the exact map wire shape.
+	normalized bool
+}
+
+type canonicalFunctionCallParts []canonicalFunctionCallPart
+
+type canonicalFunctionCallPart struct {
+	FunctionCall canonicalFunctionCall `json:"functionCall"`
+}
+
+type canonicalFunctionCall struct {
+	Args any    `json:"args"`
+	ID   string `json:"id,omitempty"`
+	Name string `json:"name"`
+}
+
+// canonicalFunctionResponseContent is the response-side counterpart of
+// canonicalFunctionCallContent. Response remains a read-only decoded object.
+type canonicalFunctionResponseContent struct {
+	Parts      canonicalFunctionResponseParts `json:"parts"`
+	Role       string                         `json:"role"`
+	normalized bool
+}
+
+type canonicalFunctionResponseParts []canonicalFunctionResponsePart
+
+type canonicalFunctionResponsePart struct {
+	FunctionResponse canonicalFunctionResponse `json:"functionResponse"`
+}
+
+type canonicalFunctionResponse struct {
+	ID       string         `json:"id,omitempty"`
+	Name     string         `json:"name,omitempty"`
+	Response map[string]any `json:"response"`
+}
+
+func (content *canonicalFunctionCallContent) CanonicalJSONFieldCount() (int, bool) {
+	return 2, canonicalFunctionCallContentValid(content)
+}
+
+func (content *canonicalFunctionCallContent) CanonicalJSONField(index int) (string, any) {
+	if index == 0 {
+		return "parts", &content.Parts
+	}
+	return "role", content.Role
+}
+
+func (parts *canonicalFunctionCallParts) CanonicalJSONItemCount() (int, bool) {
+	if parts == nil {
+		return 0, false
+	}
+	return len(*parts), true
+}
+
+func (parts *canonicalFunctionCallParts) CanonicalJSONItem(index int) any {
+	return &(*parts)[index]
+}
+
+func (part *canonicalFunctionCallPart) CanonicalJSONFieldCount() (int, bool) {
+	return 1, part != nil
+}
+
+func (part *canonicalFunctionCallPart) CanonicalJSONField(_ int) (string, any) {
+	return "functionCall", &part.FunctionCall
+}
+
+func (call *canonicalFunctionCall) CanonicalJSONFieldCount() (int, bool) {
+	if call == nil {
+		return 0, false
+	}
+	if call.ID == "" {
+		return 2, true
+	}
+	return 3, true
+}
+
+func (call *canonicalFunctionCall) CanonicalJSONField(index int) (string, any) {
+	if index == 0 {
+		return "args", call.Args
+	}
+	if call.ID != "" {
+		if index == 1 {
+			return "id", call.ID
+		}
+	}
+	return "name", call.Name
+}
+
+func (content *canonicalFunctionResponseContent) CanonicalJSONFieldCount() (int, bool) {
+	return 2, canonicalFunctionResponseContentValid(content)
+}
+
+func (content *canonicalFunctionResponseContent) CanonicalJSONField(index int) (string, any) {
+	if index == 0 {
+		return "parts", &content.Parts
+	}
+	return "role", content.Role
+}
+
+func (parts *canonicalFunctionResponseParts) CanonicalJSONItemCount() (int, bool) {
+	if parts == nil {
+		return 0, false
+	}
+	return len(*parts), true
+}
+
+func (parts *canonicalFunctionResponseParts) CanonicalJSONItem(index int) any {
+	return &(*parts)[index]
+}
+
+func (part *canonicalFunctionResponsePart) CanonicalJSONFieldCount() (int, bool) {
+	return 1, part != nil
+}
+
+func (part *canonicalFunctionResponsePart) CanonicalJSONField(_ int) (string, any) {
+	return "functionResponse", &part.FunctionResponse
+}
+
+func (response *canonicalFunctionResponse) CanonicalJSONFieldCount() (int, bool) {
+	if response == nil {
+		return 0, false
+	}
+	count := 1
+	if response.ID != "" {
+		count++
+	}
+	if response.Name != "" {
+		count++
+	}
+	return count, true
+}
+
+func (response *canonicalFunctionResponse) CanonicalJSONField(index int) (string, any) {
+	if response.ID != "" {
+		if index == 0 {
+			return "id", response.ID
+		}
+		index--
+	}
+	if response.Name != "" {
+		if index == 0 {
+			return "name", response.Name
+		}
+	}
+	return "response", response.Response
+}
+
 // CanonicalTextContent exposes the validated scalar fields to downstream
 // budget and cache-key walkers without exporting the compact wire type.
 func (content *canonicalSingleTextContent) CanonicalTextContent() (role, text string, ok bool) {
@@ -474,11 +627,26 @@ func canonicalToolContentsCanSkipNormalization(contents any) bool {
 	hasToolPart := false
 	previousFunctionTurn := false
 	for _, rawContent := range list {
-		if compact, ok := rawContent.(*canonicalSingleTextContent); ok {
+		switch compact := rawContent.(type) {
+		case *canonicalSingleTextContent:
 			if _, _, valid := compact.CanonicalTextContent(); !valid {
 				return false
 			}
 			previousFunctionTurn = false
+			continue
+		case *canonicalFunctionCallContent:
+			if !canonicalFunctionCallContentValid(compact) {
+				return false
+			}
+			previousFunctionTurn = false
+			hasToolPart = true
+			continue
+		case *canonicalFunctionResponseContent:
+			if previousFunctionTurn || !canonicalFunctionResponseContentValid(compact) {
+				return false
+			}
+			previousFunctionTurn = true
+			hasToolPart = true
 			continue
 		}
 
@@ -527,6 +695,29 @@ func canonicalToolContentsCanSkipNormalization(contents any) bool {
 		}
 	}
 	return hasToolPart
+}
+
+func canonicalFunctionCallContentValid(content *canonicalFunctionCallContent) bool {
+	if content == nil ||
+		!content.normalized ||
+		content.Role != "model" ||
+		len(content.Parts) == 0 {
+		return false
+	}
+	for _, part := range content.Parts {
+		call := part.FunctionCall
+		if strings.TrimSpace(call.Name) == "" {
+			return false
+		}
+	}
+	return true
+}
+
+func canonicalFunctionResponseContentValid(content *canonicalFunctionResponseContent) bool {
+	return content != nil &&
+		content.normalized &&
+		content.Role == "function" &&
+		len(content.Parts) > 0
 }
 
 func canonicalPlainTextPartCanSkipNormalization(part map[string]any) bool {
@@ -754,6 +945,28 @@ func normalizeContents(contents any) any {
 				pendingText = append(pendingText, map[string]any{"text": s})
 			} else if compact, ok := item.(*canonicalSingleTextContent); ok {
 				if _, _, valid := compact.CanonicalTextContent(); !valid {
+					ensureNormalized(index)
+					continue
+				}
+				if len(pendingText) > 0 {
+					flushPending()
+				}
+				if normalized != nil {
+					normalized = append(normalized, compact)
+				}
+			} else if compact, ok := item.(*canonicalFunctionCallContent); ok {
+				if !canonicalFunctionCallContentValid(compact) {
+					ensureNormalized(index)
+					continue
+				}
+				if len(pendingText) > 0 {
+					flushPending()
+				}
+				if normalized != nil {
+					normalized = append(normalized, compact)
+				}
+			} else if compact, ok := item.(*canonicalFunctionResponseContent); ok {
+				if !canonicalFunctionResponseContentValid(compact) {
 					ensureNormalized(index)
 					continue
 				}
@@ -1231,7 +1444,8 @@ func filterEmptyContents(contents any) any {
 		}
 	}
 	for contentIndex, c := range list {
-		if compact, ok := c.(*canonicalSingleTextContent); ok {
+		switch compact := c.(type) {
+		case *canonicalSingleTextContent:
 			if _, _, valid := compact.CanonicalTextContent(); valid {
 				if filtered != nil {
 					filtered = append(filtered, compact)
@@ -1239,6 +1453,39 @@ func filterEmptyContents(contents any) any {
 			} else {
 				ensureFiltered(contentIndex)
 			}
+			continue
+		case *canonicalFunctionCallContent:
+			if !canonicalFunctionCallContentValid(compact) {
+				ensureFiltered(contentIndex)
+				continue
+			}
+			lastModelFunctionCalls = lastModelFunctionCallsInline[:0]
+			responseIndex = 0
+			for _, part := range compact.Parts {
+				call := part.FunctionCall
+				lastModelFunctionCalls = append(lastModelFunctionCalls, call.Name)
+				if call.ID != "" {
+					callIDIndex.Set(normalizeGeminiToolCallID(call.ID), call.Name)
+				}
+			}
+			ensureFiltered(contentIndex)
+			filtered = append(filtered, cleanCanonicalFunctionCallContent(compact))
+			continue
+		case *canonicalFunctionResponseContent:
+			if !canonicalFunctionResponseContentValid(compact) {
+				ensureFiltered(contentIndex)
+				continue
+			}
+			ensureFiltered(contentIndex)
+			filtered = append(
+				filtered,
+				cleanCanonicalFunctionResponseContent(
+					compact,
+					lastModelFunctionCalls,
+					&responseIndex,
+					&callIDIndex,
+				),
+			)
 			continue
 		}
 		cm, ok := c.(map[string]any)
@@ -1325,6 +1572,55 @@ func filterEmptyContents(contents any) any {
 		return filtered
 	}
 	return list
+}
+
+func cleanCanonicalFunctionCallContent(
+	content *canonicalFunctionCallContent,
+) map[string]any {
+	parts := make([]any, len(content.Parts))
+	for index, part := range content.Parts {
+		call := part.FunctionCall
+		parts[index] = map[string]any{
+			"functionCall": map[string]any{
+				"args": call.Args,
+				"name": call.Name,
+			},
+			"thoughtSignature": encodedSkipThoughtSentinel,
+		}
+	}
+	return map[string]any{"parts": parts, "role": "model"}
+}
+
+func cleanCanonicalFunctionResponseContent(
+	content *canonicalFunctionResponseContent,
+	functionCallNames []string,
+	responseIndex *int,
+	callIDIndex *functionCallNameIndex,
+) map[string]any {
+	parts := make([]any, len(content.Parts))
+	for index, part := range content.Parts {
+		response := part.FunctionResponse
+		name := strings.TrimSpace(response.Name)
+		if name == "" && response.ID != "" {
+			name = callIDIndex.Get(normalizeGeminiToolCallID(response.ID))
+		}
+		if name == "" &&
+			*responseIndex >= 0 &&
+			*responseIndex < len(functionCallNames) {
+			name = functionCallNames[*responseIndex]
+		}
+		if name == "" {
+			name = "unknown"
+		}
+		parts[index] = map[string]any{
+			"functionResponse": map[string]any{
+				"name":     name,
+				"response": response.Response,
+			},
+		}
+		*responseIndex++
+	}
+	return map[string]any{"parts": parts, "role": "function"}
 }
 
 func normalizeGeminiToolCallID(value string) string {

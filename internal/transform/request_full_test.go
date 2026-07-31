@@ -119,6 +119,12 @@ func TestDefaultRequestConverterCompactsTextInsideToolHistory(t *testing.T) {
 	if _, ok := contents[0].(*canonicalSingleTextContent); !ok {
 		t.Fatalf("mixed user text type=%T, want compact text content", contents[0])
 	}
+	if _, ok := contents[1].(*canonicalFunctionCallContent); !ok {
+		t.Fatalf("tool call type=%T, want compact function call content", contents[1])
+	}
+	if _, ok := contents[2].(*canonicalFunctionResponseContent); !ok {
+		t.Fatalf("tool response type=%T, want compact function response content", contents[2])
+	}
 	if !canonicalToolContentsCanSkipNormalization(compactPayload["contents"]) {
 		t.Fatal("canonical mixed tool history did not select the normalization fast path")
 	}
@@ -149,6 +155,148 @@ func TestDefaultRequestConverterCompactsTextInsideToolHistory(t *testing.T) {
 				compatibilityJSON,
 			)
 		}
+	}
+}
+
+func TestDefaultRequestConverterCompactsToolsInsideMultimodalHistory(t *testing.T) {
+	cfg := config.StaticProvider(config.DefaultConfig())
+	body := map[string]any{
+		"model": "gemini-3.1-flash",
+		"messages": []any{
+			map[string]any{"role": "user", "content": []any{
+				map[string]any{
+					"type": "image_url",
+					"image_url": map[string]any{
+						"url": "data:image/png;base64,YWJjZA",
+					},
+				},
+			}},
+			map[string]any{
+				"role": "assistant", "content": "",
+				"tool_calls": []any{&CanonicalOAIToolCall{
+					ID:   "call_1",
+					Type: "function",
+					Function: CanonicalOAIFunctionCallData{
+						Name: "inspect", Arguments: map[string]any{"query": "image"},
+					},
+				}},
+			},
+			map[string]any{
+				"role": "tool", "tool_call_id": "call_1",
+				"content": map[string]any{"result": "ok"},
+			},
+		},
+	}
+	model, compatibilityPayload, err := ConvertChatRequest(body, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compactModel, compactPayload, err := DefaultRequestConverter().Convert(body, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := compactPayload["contents"].([]any)
+	if _, ok := contents[1].(*canonicalFunctionCallContent); !ok {
+		t.Fatalf("mixed-media tool call type=%T, want compact content", contents[1])
+	}
+	if _, ok := contents[2].(*canonicalFunctionResponseContent); !ok {
+		t.Fatalf("mixed-media tool response type=%T, want compact content", contents[2])
+	}
+	if canonicalToolContentsCanSkipNormalization(compactPayload["contents"]) {
+		t.Fatal("multimodal history unexpectedly skipped required normalization")
+	}
+
+	for stage, values := range []struct {
+		compatibility any
+		compact       any
+	}{
+		{compatibility: compatibilityPayload, compact: compactPayload},
+		{
+			compatibility: BuildVertexVariables(model, compatibilityPayload, cfg),
+			compact:       BuildVertexVariables(compactModel, compactPayload, cfg),
+		},
+	} {
+		compatibilityJSON, err := json.Marshal(values.compatibility)
+		if err != nil {
+			t.Fatal(err)
+		}
+		compactJSON, err := json.Marshal(values.compact)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(compactJSON) != string(compatibilityJSON) {
+			t.Fatalf(
+				"stage %d multimodal compact history changed JSON:\ncompact=%s\ncompat=%s",
+				stage,
+				compactJSON,
+				compatibilityJSON,
+			)
+		}
+	}
+}
+
+func TestDefaultRequestConverterFallsBackForToolValuesNeedingBase64Normalization(t *testing.T) {
+	cfg := config.StaticProvider(config.DefaultConfig())
+	inlineData := func() map[string]any {
+		return map[string]any{
+			"inlineData": map[string]any{
+				"mimeType": "text/plain",
+				"data":     "YWJjZA",
+			},
+		}
+	}
+	body := map[string]any{
+		"model": "gemini-3.1-flash",
+		"messages": []any{
+			map[string]any{"role": "user", "content": "question"},
+			map[string]any{
+				"role": "assistant", "content": "",
+				"tool_calls": []any{&CanonicalOAIToolCall{
+					ID:   "call_1",
+					Type: "function",
+					Function: CanonicalOAIFunctionCallData{
+						Name: "lookup", Arguments: inlineData(),
+					},
+				}},
+			},
+			map[string]any{
+				"role": "tool", "tool_call_id": "call_1",
+				"content": inlineData(),
+			},
+		},
+	}
+	model, compatibilityPayload, err := ConvertChatRequest(body, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compactModel, compactPayload, err := DefaultRequestConverter().Convert(body, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := compactPayload["contents"].([]any)
+	if _, ok := contents[1].(map[string]any); !ok {
+		t.Fatalf("unnormalized tool call type=%T, want map fallback", contents[1])
+	}
+	if _, ok := contents[2].(map[string]any); !ok {
+		t.Fatalf("unnormalized tool response type=%T, want map fallback", contents[2])
+	}
+
+	compatibilityVariables := BuildVertexVariables(model, compatibilityPayload, cfg)
+	compactVariables := BuildVertexVariables(compactModel, compactPayload, cfg)
+	compatibilityJSON, err := json.Marshal(compatibilityVariables)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compactJSON, err := json.Marshal(compactVariables)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(compactJSON) != string(compatibilityJSON) {
+		t.Fatalf(
+			"base64 fallback changed variables:\ncompact=%s\ncompat=%s",
+			compactJSON,
+			compatibilityJSON,
+		)
 	}
 }
 
@@ -850,7 +998,10 @@ func TestToolCallRoundTrip_IDAnchor(t *testing.T) {
 			map[string]any{"role": "tool", "tool_call_id": "call_BJ", "content": `{"temp":"5C"}`},
 		},
 	}
-	model, gemini, err := ConvertChatRequest(body, config.StaticProvider(config.DefaultConfig()))
+	model, gemini, err := DefaultRequestConverter().Convert(
+		body,
+		config.StaticProvider(config.DefaultConfig()),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -861,6 +1012,9 @@ func TestToolCallRoundTrip_IDAnchor(t *testing.T) {
 	var modelParts []any
 	var funcParts []any
 	for _, c := range contents {
+		if _, ok := c.(*canonicalSingleTextContent); ok {
+			continue
+		}
 		cm := c.(map[string]any)
 		switch cm["role"] {
 		case "model":
@@ -920,10 +1074,16 @@ func TestToolCallNameResolution_PositionalFallback(t *testing.T) {
 			map[string]any{"role": "tool", "content": "r2"},
 		},
 	}
-	model, gemini, _ := ConvertChatRequest(body, config.StaticProvider(config.DefaultConfig()))
+	model, gemini, _ := DefaultRequestConverter().Convert(
+		body,
+		config.StaticProvider(config.DefaultConfig()),
+	)
 	vars := BuildVertexVariables(model, gemini, config.StaticProvider(config.DefaultConfig()))
 	var names []string
 	for _, c := range vars["contents"].([]any) {
+		if _, ok := c.(*canonicalSingleTextContent); ok {
+			continue
+		}
 		cm := c.(map[string]any)
 		if cm["role"] == "function" {
 			for _, p := range cm["parts"].([]any) {

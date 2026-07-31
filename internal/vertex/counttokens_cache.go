@@ -8,6 +8,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/bsfdsagfadg/vertex/internal/jsonx"
 )
 
 const (
@@ -175,6 +177,40 @@ func appendTokenCountHashValue(
 		buffer = appendTokenCountHashString(buffer, tokenCountHashString, text)
 		buffer = appendTokenCountHashString(buffer, tokenCountHashString, "role")
 		buffer = appendTokenCountHashString(buffer, tokenCountHashString, role)
+	case jsonx.CanonicalObjectView:
+		fieldCount, ok := typed.CanonicalJSONFieldCount()
+		if !ok || fieldCount > *remaining {
+			return buffer, false
+		}
+		buffer = appendTokenCountHashHeader(buffer, tokenCountHashObject, uint64(fieldCount))
+		for index := range fieldCount {
+			key, item := typed.CanonicalJSONField(index)
+			buffer, ok = appendTokenCountHashObjectKey(buffer, key, remaining)
+			if !ok {
+				return buffer, false
+			}
+			buffer, ok = appendTokenCountHashValue(buffer, item, remaining, depth+1)
+			if !ok {
+				return buffer, false
+			}
+		}
+	case jsonx.CanonicalArrayView:
+		itemCount, ok := typed.CanonicalJSONItemCount()
+		if !ok || itemCount > *remaining {
+			return buffer, false
+		}
+		buffer = appendTokenCountHashHeader(buffer, tokenCountHashArray, uint64(itemCount))
+		for index := range itemCount {
+			buffer, ok = appendTokenCountHashValue(
+				buffer,
+				typed.CanonicalJSONItem(index),
+				remaining,
+				depth+1,
+			)
+			if !ok {
+				return buffer, false
+			}
+		}
 	case []any:
 		return appendTokenCountHashArrayItems(buffer, typed, remaining, depth)
 	case map[string]any:
@@ -207,6 +243,18 @@ func appendTokenCountHashValue(
 		return buffer, false
 	}
 	return buffer, true
+}
+
+func appendTokenCountHashObjectKey(
+	buffer []byte,
+	key string,
+	remaining *int,
+) ([]byte, bool) {
+	*remaining -= len(key)
+	if *remaining < 0 {
+		return buffer, false
+	}
+	return appendTokenCountHashString(buffer, tokenCountHashString, key), true
 }
 
 func appendTokenCountHashArray(

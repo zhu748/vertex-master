@@ -1,5 +1,7 @@
 package vertex
 
+import "github.com/bsfdsagfadg/vertex/internal/jsonx"
+
 // valueBudgetMaxDepth 防止异常深的动态 JSON 结构让预算遍历消耗过多栈空间。
 // 超限时按“不适合并行复制/缓存”处理，比继续递归更安全。
 const valueBudgetMaxDepth = 256
@@ -31,6 +33,28 @@ func valueFitsBudgetDepth(value any, remaining *int, depth int) bool {
 		role, text, ok := typed.CanonicalTextContent()
 		if !ok || !consumeCanonicalTextContentBudget(remaining, role, text) {
 			return false
+		}
+	case jsonx.CanonicalObjectView:
+		fieldCount, ok := typed.CanonicalJSONFieldCount()
+		if !ok || fieldCount > *remaining {
+			return false
+		}
+		for index := range fieldCount {
+			key, item := typed.CanonicalJSONField(index)
+			*remaining -= len(key)
+			if !valueFitsBudgetDepth(item, remaining, depth+1) {
+				return false
+			}
+		}
+	case jsonx.CanonicalArrayView:
+		itemCount, ok := typed.CanonicalJSONItemCount()
+		if !ok || itemCount > *remaining {
+			return false
+		}
+		for index := range itemCount {
+			if !valueFitsBudgetDepth(typed.CanonicalJSONItem(index), remaining, depth+1) {
+				return false
+			}
 		}
 	case []any:
 		for _, item := range typed {
