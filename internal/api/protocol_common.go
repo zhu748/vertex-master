@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+	"unsafe"
 
 	"github.com/bsfdsagfadg/vertex/internal/jsonx"
 	"github.com/bsfdsagfadg/vertex/internal/transform"
@@ -545,6 +546,7 @@ func outputFromGeminiChunkWithUsage(
 	var out protocolOutput
 	var textAccumulator transform.StringAccumulator
 	var reasoningAccumulator transform.StringAccumulator
+	var packedToolArguments []byte
 	candidates := anySlice(chunk["candidates"])
 	var candidate map[string]any
 	if len(candidates) > 0 {
@@ -562,23 +564,38 @@ func outputFromGeminiChunkWithUsage(
 			}
 			if fc, ok := part["functionCall"].(map[string]any); ok && stringValue(fc["name"]) != "" {
 				if out.ToolCalls == nil {
-					toolCallCount := 1
-					for _, remainingRaw := range parts[partIndex+1:] {
+					toolCallCount := 0
+					argumentsCapacity := 0
+					capacityOK := true
+					for _, remainingRaw := range parts[partIndex:] {
 						remainingPart, _ := remainingRaw.(map[string]any)
 						remainingCall, _ := remainingPart["functionCall"].(map[string]any)
 						if stringValue(remainingCall["name"]) != "" {
 							toolCallCount++
+							size := jsonStringValueCapacityHint(remainingCall["args"])
+							if capacityOK && size <= math.MaxInt-argumentsCapacity {
+								argumentsCapacity += size
+							} else {
+								argumentsCapacity = 0
+								capacityOK = false
+							}
 						}
 					}
 					out.ToolCalls = make([]protocolToolCall, 0, toolCallCount)
+					packedToolArguments = make([]byte, 0, argumentsCapacity)
 				}
 				id := stringValue(fc["id"])
 				if id == "" {
 					id = reqID24WithPrefix("call_")
 				}
-				arguments := jsonString(fc["args"])
+				argumentsStart := len(packedToolArguments)
+				packedToolArguments = appendJSONStringValue(packedToolArguments, fc["args"])
+				argumentsEnd := len(packedToolArguments)
+				argumentsRaw := packedToolArguments[argumentsStart:argumentsEnd:argumentsEnd]
 				out.ToolCalls = append(out.ToolCalls, protocolToolCall{
-					ID: id, Name: stringValue(fc["name"]), Arguments: arguments,
+					ID: id, Name: stringValue(fc["name"]),
+					// Later appends begin after this segment and never mutate it.
+					Arguments: unsafe.String(unsafe.SliceData(argumentsRaw), len(argumentsRaw)),
 				})
 				continue
 			}
@@ -693,6 +710,59 @@ func jsonString(v any) string {
 		return "{}"
 	}
 	return data
+}
+
+func jsonStringValueCapacityHint(value any) int {
+	// Keep the planning pass shallow: walking every nested value here would
+	// repeat the encoder's work and cost more than the avoided allocations.
+	if canonical, ok := transform.CanonicalJSONStringValue(value); ok {
+		return len(canonical)
+	}
+	if text, ok := value.(string); ok {
+		if strings.TrimSpace(text) == "" {
+			return len("{}")
+		}
+		return len(text)
+	}
+	switch typed := value.(type) {
+	case nil:
+		return len("{}")
+	case map[string]any:
+		if len(typed) > (math.MaxInt-8)/16 {
+			return 64
+		}
+		return 8 + 16*len(typed)
+	case []any:
+		if len(typed) > (math.MaxInt-8)/8 {
+			return 64
+		}
+		return 8 + 8*len(typed)
+	default:
+		return 64
+	}
+}
+
+func appendJSONStringValue(buffer []byte, value any) []byte {
+	if canonical, ok := transform.CanonicalJSONStringValue(value); ok {
+		return append(buffer, canonical...)
+	}
+	if text, ok := value.(string); ok {
+		if strings.TrimSpace(text) == "" {
+			return append(buffer, "{}"...)
+		}
+		return append(buffer, text...)
+	}
+	if value == nil {
+		return append(buffer, "{}"...)
+	}
+	if encoded, ok := jsonx.AppendJSONValue(buffer, value); ok {
+		return encoded
+	}
+	encoded, err := jsonx.MarshalString(value)
+	if err != nil {
+		return append(buffer, "{}"...)
+	}
+	return append(buffer, encoded...)
 }
 
 func normalizedIntermediateJSONValue(value any) any {

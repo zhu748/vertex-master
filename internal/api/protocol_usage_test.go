@@ -146,6 +146,69 @@ func TestOutputFromGeminiChunkPreservesPartOrderAndInput(t *testing.T) {
 	}
 }
 
+func TestOutputFromGeminiChunkPacksToolArgumentsIndependently(t *testing.T) {
+	firstArguments := map[string]any{
+		"query": "first",
+		"limit": float64(1),
+	}
+	secondArguments := map[string]any{
+		"query":  "second",
+		"nested": []any{true, nil},
+	}
+	out := outputFromGeminiChunk(map[string]any{
+		"candidates": []any{map[string]any{
+			"content": map[string]any{"parts": []any{
+				map[string]any{"functionCall": map[string]any{
+					"id": "call_first", "name": "lookup", "args": firstArguments,
+				}},
+				map[string]any{"functionCall": map[string]any{
+					"id": "call_second", "name": "search", "args": secondArguments,
+				}},
+			}},
+		}},
+	})
+	if len(out.ToolCalls) != 2 {
+		t.Fatalf("tool calls=%d, want 2", len(out.ToolCalls))
+	}
+	wantArguments := []any{firstArguments, secondArguments}
+	for index := range out.ToolCalls {
+		want, err := jsonx.MarshalString(wantArguments[index])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out.ToolCalls[index].Arguments != want {
+			t.Fatalf("tool %d arguments=%q, want %q", index, out.ToolCalls[index].Arguments, want)
+		}
+		if len(out.ToolCalls[index].argumentsRaw) != 0 {
+			t.Fatalf("tool %d leaked temporary raw arguments: %q", index, out.ToolCalls[index].argumentsRaw)
+		}
+	}
+
+	firstArguments["query"] = "mutated"
+	secondArguments["nested"].([]any)[0] = false
+	if out.ToolCalls[0].Arguments != `{"limit":1,"query":"first"}` ||
+		out.ToolCalls[1].Arguments != `{"nested":[true,null],"query":"second"}` {
+		t.Fatalf("packed arguments changed with source maps: %#v", out.ToolCalls)
+	}
+}
+
+func TestAppendJSONStringValueMatchesStandaloneEncoding(t *testing.T) {
+	for _, value := range []any{
+		nil,
+		"",
+		"  ",
+		`{"raw":true}`,
+		float64(3),
+		3,
+		map[string]any{"nested": []any{true, nil, "value"}},
+		make(chan int),
+	} {
+		if got, want := string(appendJSONStringValue(nil, value)), jsonString(value); got != want {
+			t.Fatalf("appendJSONStringValue(%T)=%q, want %q", value, got, want)
+		}
+	}
+}
+
 func TestAnthropicValidToolInputMatchesParsedWireFormat(t *testing.T) {
 	geminiResponse := map[string]any{
 		"candidates": []any{map[string]any{
