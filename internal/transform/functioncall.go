@@ -179,7 +179,7 @@ func cleanPartWithID(part map[string]any, functionCallNames []string, responseIn
 		}
 	}
 
-	finalizeCleanedPart(cleaned)
+	finalizeCleanedPart(cleaned, true)
 
 	if hasValid {
 		return cleaned, true
@@ -240,8 +240,9 @@ func fixFunctionCallArgs(fc map[string]any) map[string]any {
 	return fixed
 }
 
-// finalizeCleanedPart 对清洗后的 part 做收尾归一。
-func finalizeCleanedPart(cleaned map[string]any) {
+// finalizeCleanedPart 对清洗后的 part 做收尾归一。encodeSignature 用于
+// BuildVertexVariables 的最终出站路径，避免先写哨兵再递归复制整段 contents。
+func finalizeCleanedPart(cleaned map[string]any, encodeSignature bool) {
 	if tv, ok := cleaned["thought"]; ok {
 		if _, isStr := tv.(string); !isStr {
 			if _, isBool := tv.(bool); !isBool {
@@ -258,7 +259,11 @@ func finalizeCleanedPart(cleaned map[string]any) {
 		_, hasThought := cleaned["thought"]
 		_, hasSig := cleaned["thoughtSignature"]
 		if hasFC || hasThought || hasSig {
-			cleaned["thoughtSignature"] = skipThoughtSentinel
+			signature := skipThoughtSentinel
+			if encodeSignature {
+				signature = encodedSkipThoughtSentinel
+			}
+			cleaned["thoughtSignature"] = signature
 		}
 	}
 

@@ -182,6 +182,22 @@ func TestHandleInlineDataCaseReusesCanonicalFunctionReferences(t *testing.T) {
 	}
 }
 
+func TestCleanPartKeepsPublicThoughtSignatureContract(t *testing.T) {
+	cleaned, ok := CleanPart(map[string]any{
+		"functionCall": map[string]any{"name": "lookup", "args": map[string]any{}},
+	}, nil, nil)
+	if !ok || cleaned["thoughtSignature"] != skipThoughtSentinel {
+		t.Fatalf("CleanPart signature=%#v, want raw sentinel", cleaned)
+	}
+	encoded := EncodeThoughtSignature([]any{map[string]any{
+		"role": "model", "parts": []any{cleaned},
+	}}, 0).([]any)
+	part := encoded[0].(map[string]any)["parts"].([]any)[0].(map[string]any)
+	if part["thoughtSignature"] != encodedSkipThoughtSentinel {
+		t.Fatalf("encoded signature=%#v, want base64 sentinel", part)
+	}
+}
+
 func TestDefaultRequestConverterKeepsGemini36PrefillMapShape(t *testing.T) {
 	body := map[string]any{
 		"model": "gemini-3.6-flash",

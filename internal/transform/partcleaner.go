@@ -98,7 +98,7 @@ func CleanPart(part map[string]any, functionCallNames []string, fc *FcNameTracke
 		}
 	}
 
-	finalizeCleanedPart(cleaned)
+	finalizeCleanedPart(cleaned, false)
 
 	if hasValid {
 		return cleaned, true
