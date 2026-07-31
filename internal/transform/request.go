@@ -68,7 +68,7 @@ func convertChatRequest(
 	if !compactContents {
 		contents = make([]any, 0, len(messagesRaw))
 	}
-	var toolIDToName map[string]string
+	var toolIDToName functionCallNameIndex
 	var mixedTextStorage []canonicalSingleTextContent
 	compactMixedText := compactTextHistory && !isGemini36Model(resolvedModel)
 
@@ -193,10 +193,7 @@ func convertChatRequest(
 						)
 					}
 					if parsed.id != "" {
-						if toolIDToName == nil {
-							toolIDToName = make(map[string]string)
-						}
-						toolIDToName[parsed.id] = parsed.name
+						toolIDToName.Set(parsed.id, parsed.name)
 					}
 					fc := map[string]any{"name": parsed.name, "args": parsed.args}
 					if parsed.id != "" {
@@ -211,7 +208,7 @@ func convertChatRequest(
 			}
 		case "tool":
 			tcID, _ := msg["tool_call_id"].(string)
-			name := firstTruthyString(msg["name"], toolIDToName[tcID])
+			name := firstTruthyString(msg["name"], toolIDToName.Get(tcID))
 			fr := map[string]any{"response": coerceFunctionResponse(msg["content"])}
 			if name != "" {
 				fr["name"] = name

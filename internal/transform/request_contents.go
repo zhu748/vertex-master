@@ -1217,7 +1217,7 @@ func filterEmptyContents(contents any) any {
 		return contents
 	}
 
-	var callIDMap map[string]string
+	var callIDIndex functionCallNameIndex
 	var lastModelFunctionCallsInline [8]string
 	var lastModelFunctionCalls []string
 	responseIndex := 0
@@ -1258,10 +1258,7 @@ func filterEmptyContents(contents any) any {
 						if name, _ := fc["name"].(string); strings.TrimSpace(name) != "" {
 							lastModelFunctionCalls = append(lastModelFunctionCalls, name)
 							if fid, _ := fc["id"].(string); fid != "" {
-								if callIDMap == nil {
-									callIDMap = make(map[string]string, min(len(list), 8))
-								}
-								callIDMap[normalizeGeminiToolCallID(fid)] = name
+								callIDIndex.Set(normalizeGeminiToolCallID(fid), name)
 							}
 						}
 					}
@@ -1297,7 +1294,7 @@ func filterEmptyContents(contents any) any {
 				idx = responseIndex
 				responseIndex++
 			}
-			if cleaned, ok := cleanPartWithID(pm, lastModelFunctionCalls, idx, callIDMap); ok {
+			if cleaned, ok := cleanPartWithID(pm, lastModelFunctionCalls, idx, &callIDIndex); ok {
 				ensureCleanedParts(partIndex)
 				packedCleanedParts = append(packedCleanedParts, cleaned)
 			} else {

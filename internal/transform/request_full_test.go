@@ -731,6 +731,47 @@ func TestConvertChatRequest_LegacyFunctions(t *testing.T) {
 
 // ============ 工具调用：id 锚点 + 哨兵（多轮 round-trip） ============
 
+func TestFunctionCallNameIndexInlineAndOverflow(t *testing.T) {
+	var index functionCallNameIndex
+	for _, entry := range []functionCallNameEntry{
+		{id: "call_1", name: "one"},
+		{id: "call_2", name: "two"},
+		{id: "call_3", name: "three"},
+		{id: "call_4", name: "four"},
+		{id: "call_5", name: "five"},
+		{id: "call_6", name: "six"},
+		{id: "call_7", name: "seven"},
+		{id: "call_8", name: "eight"},
+	} {
+		index.Set(entry.id, entry.name)
+	}
+	index.Set("call_2", "two-updated")
+	if index.overflow != nil || index.Get("call_2") != "two-updated" {
+		t.Fatalf("inline index changed unexpectedly: %#v", index)
+	}
+
+	index.Set("call_9", "nine")
+	index.Set("call_10", "ten")
+	index.Set("call_1", "one-updated")
+	if index.overflow == nil {
+		t.Fatal("ninth unique ID did not promote the index")
+	}
+	for id, want := range map[string]string{
+		"call_1":  "one-updated",
+		"call_2":  "two-updated",
+		"call_8":  "eight",
+		"call_9":  "nine",
+		"call_10": "ten",
+	} {
+		if got := index.Get(id); got != want {
+			t.Fatalf("index.Get(%q)=%q, want %q", id, got, want)
+		}
+	}
+	if got := index.Get("missing"); got != "" {
+		t.Fatalf("missing ID resolved to %q", got)
+	}
+}
+
 func TestCleanPartWithIDSingleToolParts(t *testing.T) {
 	call := map[string]any{
 		"functionCall": map[string]any{
@@ -763,11 +804,13 @@ func TestCleanPartWithIDSingleToolParts(t *testing.T) {
 			"response": "sunny",
 		},
 	}
+	var callIDIndex functionCallNameIndex
+	callIDIndex.Set("call_1", "lookup")
 	cleanedResponse, ok := cleanPartWithID(
 		response,
 		[]string{"fallback"},
 		0,
-		map[string]string{"call_1": "lookup"},
+		&callIDIndex,
 	)
 	if !ok {
 		t.Fatal("single functionResponse should remain valid")

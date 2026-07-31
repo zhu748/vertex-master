@@ -71,6 +71,63 @@ type FcNameTracker struct {
 	idx   int
 }
 
+type functionCallNameEntry struct {
+	id   string
+	name string
+}
+
+// functionCallNameIndex keeps the common short tool-call history entirely
+// inline. Once it grows beyond the inline capacity, all entries are promoted
+// to a map so lookup semantics remain unchanged for large or duplicate-ID
+// histories.
+type functionCallNameIndex struct {
+	inline   [8]functionCallNameEntry
+	overflow map[string]string
+	count    int
+}
+
+func (index *functionCallNameIndex) Set(id, name string) {
+	if index == nil || id == "" {
+		return
+	}
+	if index.overflow != nil {
+		index.overflow[id] = name
+		return
+	}
+	for entryIndex := range index.count {
+		if index.inline[entryIndex].id == id {
+			index.inline[entryIndex].name = name
+			return
+		}
+	}
+	if index.count < len(index.inline) {
+		index.inline[index.count] = functionCallNameEntry{id: id, name: name}
+		index.count++
+		return
+	}
+
+	index.overflow = make(map[string]string, len(index.inline)+1)
+	for _, entry := range index.inline {
+		index.overflow[entry.id] = entry.name
+	}
+	index.overflow[id] = name
+}
+
+func (index *functionCallNameIndex) Get(id string) string {
+	if index == nil || id == "" {
+		return ""
+	}
+	if index.overflow != nil {
+		return index.overflow[id]
+	}
+	for entryIndex := index.count - 1; entryIndex >= 0; entryIndex-- {
+		if index.inline[entryIndex].id == id {
+			return index.inline[entryIndex].name
+		}
+	}
+	return ""
+}
+
 // NewFcNameTracker 过滤掉空名后构造追踪器。
 func NewFcNameTracker(names []string) *FcNameTracker {
 	filtered := make([]string, 0, len(names))
@@ -95,7 +152,12 @@ func (t *FcNameTracker) NextName() (string, bool) {
 }
 
 // cleanPartWithID 是 CleanPart 的 id 锚点版本。
-func cleanPartWithID(part map[string]any, functionCallNames []string, responseIndex int, callIDMap map[string]string) (map[string]any, bool) {
+func cleanPartWithID(
+	part map[string]any,
+	functionCallNames []string,
+	responseIndex int,
+	callIDIndex *functionCallNameIndex,
+) (map[string]any, bool) {
 	if len(part) == 1 {
 		if fcRaw, ok := part["functionCall"]; ok {
 			fcMap, valid := fcRaw.(map[string]any)
@@ -119,7 +181,7 @@ func cleanPartWithID(part map[string]any, functionCallNames []string, responseIn
 					frMap,
 					functionCallNames,
 					responseIndex,
-					callIDMap,
+					callIDIndex,
 				),
 			}, true
 		}
@@ -156,7 +218,7 @@ func cleanPartWithID(part map[string]any, functionCallNames []string, responseIn
 				frMap,
 				functionCallNames,
 				responseIndex,
-				callIDMap,
+				callIDIndex,
 			)
 			hasValid = true
 		}
@@ -209,12 +271,12 @@ func cleanFunctionResponseWithID(
 	fr map[string]any,
 	functionCallNames []string,
 	responseIndex int,
-	callIDMap map[string]string,
+	callIDIndex *functionCallNameIndex,
 ) map[string]any {
 	name := strings.TrimSpace(toString(fr["name"]))
 	if name == "" {
-		if fid, _ := fr["id"].(string); fid != "" && callIDMap != nil {
-			name = callIDMap[normalizeGeminiToolCallID(fid)]
+		if fid, _ := fr["id"].(string); fid != "" {
+			name = callIDIndex.Get(normalizeGeminiToolCallID(fid))
 		}
 		if name == "" && responseIndex >= 0 && responseIndex < len(functionCallNames) {
 			name = functionCallNames[responseIndex]
