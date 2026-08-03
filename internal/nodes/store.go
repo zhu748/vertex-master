@@ -47,14 +47,15 @@ type NodeHealth struct { //nolint:govet
 }
 
 var (
-	mu                  sync.RWMutex                      //nolint:gochecknoglobals
-	nodeList            []Node                            //nolint:gochecknoglobals
-	nodeIndexByURI      = make(map[string]int)            //nolint:gochecknoglobals
-	healthByNodeIndex   []*NodeHealth                     //nolint:gochecknoglobals
-	healthMap           = make(map[string]*NodeHealth)    //nolint:gochecknoglobals
-	subscriptionSources = make(map[string]map[int64]bool) //nolint:gochecknoglobals
-	loaded              bool                              //nolint:gochecknoglobals
-	DeleteNodeCallback  func(uri string)                  //nolint:gochecknoglobals
+	mu                   sync.RWMutex                      //nolint:gochecknoglobals
+	nodeList             []Node                            //nolint:gochecknoglobals
+	nodeIndexByURI       = make(map[string]int)            //nolint:gochecknoglobals
+	healthByNodeIndex    []*NodeHealth                     //nolint:gochecknoglobals
+	healthMap            = make(map[string]*NodeHealth)    //nolint:gochecknoglobals
+	healthMayHaveOrphans bool                              //nolint:gochecknoglobals
+	subscriptionSources  = make(map[string]map[int64]bool) //nolint:gochecknoglobals
+	loaded               bool                              //nolint:gochecknoglobals
+	DeleteNodeCallback   func(uri string)                  //nolint:gochecknoglobals
 )
 
 func ensureLoaded() {
@@ -154,6 +155,7 @@ func ensureLoaded() {
 	rebuildNodeIndexUnsafe()
 	subscriptionSources = loadedSources
 	loaded = true
+	healthMayHaveOrphans = true
 	pruneHealthUnsafe()
 	for uri, health := range healthMap {
 		if decayHealthCounters(health) {
@@ -198,6 +200,7 @@ func storeNodeHealthUnsafe(uri string, health *NodeHealth) {
 	healthMap[uri] = health
 	position, exists := nodeIndexByURI[uri]
 	if !exists || position < 0 || position >= len(nodeList) || nodeList[position].RawURI != uri {
+		healthMayHaveOrphans = true
 		return
 	}
 	if len(healthByNodeIndex) != len(nodeList) {
@@ -789,8 +792,12 @@ func CheckTestControl() bool {
 
 // pruneHealthUnsafe removes orphaned health rows after nodeIndexByURI has been
 // rebuilt for the current nodeList and returns the removed entries for callers
-// that may need to roll the change back.
+// that may need to roll the change back. Normal mutations preserve the health
+// invariant, so the explicit dirty bit keeps ordinary merges O(1) here.
 func pruneHealthUnsafe() map[string]*NodeHealth {
+	if !healthMayHaveOrphans {
+		return nil
+	}
 	var removed map[string]*NodeHealth
 	estimatedOrphans := max(len(healthMap)-len(nodeIndexByURI), 1)
 	for uri, health := range healthMap {
@@ -802,6 +809,7 @@ func pruneHealthUnsafe() map[string]*NodeHealth {
 			delete(healthMap, uri)
 		}
 	}
+	healthMayHaveOrphans = false
 	return removed
 }
 
@@ -1078,6 +1086,7 @@ func MergeNodes(newNodes []Node) error {
 		for rawURI, health := range prunedHealth {
 			healthMap[rawURI] = health
 		}
+		healthMayHaveOrphans = len(prunedHealth) > 0
 		log.Printf("[Nodes] 合并节点持久化失败，已回滚内存状态: %v", err)
 		return err
 	}
@@ -1168,9 +1177,9 @@ func syncSubscriptionNodes(
 	}
 
 	previousMembership := make([]string, 0, len(desired))
-	for rawURI, sourceIDs := range subscriptionSources {
-		if sourceIDs[sourceID] {
-			previousMembership = append(previousMembership, rawURI)
+	for _, node := range nodeList {
+		if subscriptionSources[node.RawURI][sourceID] {
+			previousMembership = append(previousMembership, node.RawURI)
 		}
 	}
 	originalNodeCount := len(nodeList)
@@ -1593,8 +1602,6 @@ func DeleteNodeWithError(uri string) (bool, error) {
 func DedupNodes() int {
 	mu.Lock()
 	ensureLoaded()
-	var previousNodes []Node
-	var previousMemberships map[membershipKey]bool
 	type parsedDedupKey struct {
 		scheme   string
 		userinfo string
@@ -1608,9 +1615,12 @@ func DedupNodes() int {
 	kept := nodeList[:0]
 	removed := 0
 	var removedURIs []string
+	var removedNodes []removedNodePosition
 	var keptSourceStates map[string]subscriptionSourceState
-	var removedStates map[string]detachedNodeRuntimeState
-	for _, n := range nodeList {
+	var keptNodeStates map[string]Node
+	var membershipsAdded []membershipKey
+	var affectedSourceIDs map[int64]bool
+	for originalIndex, n := range nodeList {
 		keptIndex := 0
 		exists := false
 		if scheme, userinfo, host, port, ok := parseNodeIdentity(n.RawURI); ok {
@@ -1633,24 +1643,28 @@ func DedupNodes() int {
 		if !exists {
 			kept = append(kept, n)
 		} else {
-			if previousMemberships == nil {
-				// Before the first duplicate, in-place compaction has only
-				// written every node back to its original slot. Capture the
-				// rollback snapshot lazily so the no-op path avoids a full copy.
-				previousNodes = append([]Node(nil), nodeList...)
-				previousMemberships = flattenMemberships(subscriptionSources)
+			if keptSourceStates == nil {
 				keptSourceStates = make(map[string]subscriptionSourceState)
-				removedStates = make(map[string]detachedNodeRuntimeState)
+				keptNodeStates = make(map[string]Node)
+				affectedSourceIDs = make(map[int64]bool)
 			}
 			keptURI := kept[keptIndex].RawURI
 			if _, captured := keptSourceStates[keptURI]; !captured {
 				keptSourceStates[keptURI] = snapshotSubscriptionSourceUnsafe(keptURI)
+				keptNodeStates[keptURI] = kept[keptIndex]
 			}
 			if subscriptionSources[keptURI] == nil {
 				subscriptionSources[keptURI] = make(map[int64]bool)
 			}
 			for sourceID := range subscriptionSources[n.RawURI] {
+				if !subscriptionSources[keptURI][sourceID] {
+					membershipsAdded = append(membershipsAdded, membershipKey{
+						sourceID: sourceID,
+						rawURI:   keptURI,
+					})
+				}
 				subscriptionSources[keptURI][sourceID] = true
+				affectedSourceIDs[sourceID] = true
 			}
 			if n.SourceID == 0 {
 				kept[keptIndex].SourceID = 0
@@ -1664,9 +1678,11 @@ func DedupNodes() int {
 			removed++
 			removedURIs = append(removedURIs, n.RawURI)
 			state := detachNodeRuntimeStateUnsafe(n.RawURI)
-			if state.hadSources || state.hadHealth {
-				removedStates[n.RawURI] = state
-			}
+			removedNodes = append(removedNodes, removedNodePosition{
+				originalIndex: originalIndex,
+				node:          n,
+				runtimeState:  state,
+			})
 		}
 	}
 	if removed == 0 {
@@ -1674,15 +1690,39 @@ func DedupNodes() int {
 		return 0
 	}
 	nodeList = kept
-	if err := persistNodeSnapshotDiffUnsafe(previousNodes, previousMemberships); err != nil {
-		nodeList = previousNodes
+	changes := nodeSnapshotChanges{
+		membershipsAdded:  membershipsAdded,
+		removedNodes:      removedURIs,
+		affectedSourceIDs: affectedSourceIDs,
+	}
+	for index, node := range nodeList {
+		if previous, changed := keptNodeStates[node.RawURI]; changed &&
+			!persistedNodeFieldsEqual(previous, node) {
+			changes.updated = append(changes.updated, node)
+		}
+		if previousIndex := nodeIndexByURI[node.RawURI]; previousIndex != index {
+			changes.positionChanges = append(
+				changes.positionChanges,
+				nodeInsert{node: node, sortOrder: index},
+			)
+		}
+	}
+	if err := persistNodeSnapshotChangesUnsafe(changes); err != nil {
+		restoreRemovedNodePositionsUnsafe(removedNodes)
+		for rawURI, previous := range keptNodeStates {
+			if index, exists := nodeIndexByURI[rawURI]; exists {
+				nodeList[index] = previous
+			}
+		}
 		restoreSubscriptionSourceStatesUnsafe(keptSourceStates)
-		restoreNodeRuntimeStatesUnsafe(removedStates)
+		for _, removedNode := range removedNodes {
+			restoreNodeRuntimeStateUnsafe(removedNode.node.RawURI, removedNode.runtimeState)
+		}
 		mu.Unlock()
 		log.Printf("[Nodes] 节点去重持久化失败，已回滚内存状态: %v", err)
 		return 0
 	}
-	rebuildNodeIndexUnsafe()
+	publishRemovedNodeIndexesUnsafe(removedNodes)
 	for _, rawURI := range removedURIs {
 		globalStickyPool.Evict(rawURI)
 	}
@@ -1794,17 +1834,11 @@ func BatchUpdateNodesDisabled(uris []string, disabled bool) error {
 		restoreChanges()
 		return fmt.Errorf("批量更新节点: %w", updateErr)
 	}
-	stmt, err := tx.Prepare("UPDATE nodes SET disabled = ? WHERE raw_uri = ?")
-	if err != nil {
-		return rollback(err)
+	rawURIs := make([]string, len(changes))
+	for index := range changes {
+		rawURIs[index] = changes[index].rawURI
 	}
-	for _, change := range changes {
-		if _, err := stmt.Exec(disabled, change.rawURI); err != nil {
-			_ = stmt.Close()
-			return rollback(err)
-		}
-	}
-	if err := stmt.Close(); err != nil {
+	if err := updateNodesDisabledTx(tx, rawURIs, disabled); err != nil {
 		return rollback(err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -2263,6 +2297,9 @@ func RecordTest(uri string, ok bool, ms float64, errStr string) {
 	mu.Lock()
 	defer mu.Unlock()
 	ensureLoaded()
+	if !containsNodeForUpdateUnsafe(uri) {
+		return
+	}
 	h, exists := healthMap[uri]
 	if !exists {
 		h = &NodeHealth{} //nolint:exhaustruct
@@ -2298,6 +2335,9 @@ func RecordRateLimit(uri string, cooldownSec int) {
 	mu.Lock()
 	defer mu.Unlock()
 	ensureLoaded()
+	if !containsNodeForUpdateUnsafe(uri) {
+		return
+	}
 	h, exists := healthMap[uri]
 	if !exists {
 		h = &NodeHealth{} //nolint:exhaustruct

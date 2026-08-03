@@ -282,10 +282,24 @@ func TestChatReturns413ForChunkedLimit(t *testing.T) {
 }
 
 func TestRequestIsHTTPSHandlesForwardedProtoList(t *testing.T) {
+	t.Setenv("RENDER", "")
+	t.Setenv("VPROXY_TRUST_PROXY_HEADERS", "true")
+
 	req := httptest.NewRequest(http.MethodGet, "http://app.example/", nil)
 	req.Header.Set("X-Forwarded-Proto", " HTTPS , http")
 	if !requestIsHTTPS(req) {
 		t.Fatal("first forwarded proto value should be recognized case-insensitively")
+	}
+}
+
+func TestRequestIsHTTPSIgnoresForwardedProtoWhenUntrusted(t *testing.T) {
+	t.Setenv("RENDER", "")
+	t.Setenv("VPROXY_TRUST_PROXY_HEADERS", "")
+
+	req := httptest.NewRequest(http.MethodGet, "http://app.example/", nil)
+	req.Header.Set("X-Forwarded-Proto", "https")
+	if requestIsHTTPS(req) {
+		t.Fatal("untrusted forwarded proto must not make a plain HTTP request secure")
 	}
 }
 

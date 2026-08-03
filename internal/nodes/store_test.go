@@ -61,6 +61,7 @@ func resetState() {
 	nodeIndexByURI = make(map[string]int)
 	healthByNodeIndex = nil
 	healthMap = make(map[string]*NodeHealth)
+	healthMayHaveOrphans = false
 	subscriptionSources = make(map[string]map[int64]bool)
 	loaded = false
 	// 彻底清除物理磁盘缓存，防止测试间的数据污染
@@ -203,6 +204,8 @@ func BenchmarkPruneHealthLargePool(b *testing.B) {
 	const staleCount = 500
 	nodes := make([]Node, nodeCount)
 	health := make(map[string]*NodeHealth, nodeCount+staleCount)
+	staleURIs := make([]string, staleCount)
+	staleHealth := make([]*NodeHealth, staleCount)
 	for index := range nodes {
 		uri := fmt.Sprintf("http://prune-node-%d.invalid:8080", index)
 		nodes[index] = Node{Name: fmt.Sprintf("node-%d", index), RawURI: uri}
@@ -210,32 +213,51 @@ func BenchmarkPruneHealthLargePool(b *testing.B) {
 	}
 	for index := range staleCount {
 		uri := fmt.Sprintf("http://stale-node-%d.invalid:8080", index)
-		health[uri] = &NodeHealth{FailCount: 1} //nolint:exhaustruct
+		staleURIs[index] = uri
+		staleHealth[index] = &NodeHealth{FailCount: 1} //nolint:exhaustruct
+		health[uri] = staleHealth[index]
 	}
 
 	mu.Lock()
-	previousNodes, previousIndex, previousHealth, previousLoaded := nodeList, nodeIndexByURI, healthMap, loaded
+	previousNodes, previousIndex, previousHealth, previousLoaded, previousMayHaveOrphans :=
+		nodeList, nodeIndexByURI, healthMap, loaded, healthMayHaveOrphans
 	nodeList, healthMap, loaded = nodes, health, true
 	rebuildNodeIndexUnsafe()
+	healthMayHaveOrphans = true
 	mu.Unlock()
 	b.Cleanup(func() {
 		mu.Lock()
 		nodeList, nodeIndexByURI, healthMap, loaded = previousNodes, previousIndex, previousHealth, previousLoaded
+		healthMayHaveOrphans = previousMayHaveOrphans
 		rebuildNodeHealthIndexUnsafe()
 		mu.Unlock()
 	})
 
-	b.ReportAllocs()
-	b.ResetTimer()
-	for range b.N {
+	b.Run("clean", func(b *testing.B) {
 		mu.Lock()
-		for index := range staleCount {
-			uri := fmt.Sprintf("http://stale-node-%d.invalid:8080", index)
-			healthMap[uri] = &NodeHealth{FailCount: 1} //nolint:exhaustruct
-		}
 		pruneHealthUnsafe()
 		mu.Unlock()
-	}
+		b.ReportAllocs()
+		b.ResetTimer()
+		for range b.N {
+			mu.Lock()
+			pruneHealthUnsafe()
+			mu.Unlock()
+		}
+	})
+	b.Run("500_orphans", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for range b.N {
+			mu.Lock()
+			for index, uri := range staleURIs {
+				healthMap[uri] = staleHealth[index]
+			}
+			healthMayHaveOrphans = true
+			pruneHealthUnsafe()
+			mu.Unlock()
+		}
+	})
 }
 
 func BenchmarkSelectNodesForHealthCheckLargePool(b *testing.B) {
@@ -358,6 +380,48 @@ func BenchmarkSortNodesLargePoolAlreadySorted(b *testing.B) {
 	}
 }
 
+func BenchmarkSortNodesLargePoolReversed(b *testing.B) {
+	const nodeCount = 2000
+	db.CloseDB()
+	if err := db.InitDB(filepath.Join(b.TempDir(), "sort-reversed-benchmark.db")); err != nil {
+		b.Fatal(err)
+	}
+	resetState()
+	b.Cleanup(func() {
+		resetState()
+		db.CloseDB()
+	})
+
+	nodes := make([]Node, nodeCount)
+	for index := range nodes {
+		rawURI := fmt.Sprintf("http://sort-reversed-%d.invalid:8080", index)
+		nodes[index] = Node{
+			Type: "http", Name: fmt.Sprintf("node-%05d", index), RawURI: rawURI,
+		}
+	}
+	if err := MergeNodes(nodes); err != nil {
+		b.Fatal(err)
+	}
+	mu.Lock()
+	for index := range nodeList {
+		healthMap[nodeList[index].RawURI] = &NodeHealth{LastTestMs: float64(index + 1)}
+	}
+	rebuildNodeHealthIndexUnsafe()
+	mu.Unlock()
+
+	descending := true
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if descending {
+			SortNodesByLatencyDesc()
+		} else {
+			SortNodesByLatency()
+		}
+		descending = !descending
+	}
+}
+
 func TestPruneHealthRemovesOnlyUnknownNodes(t *testing.T) {
 	resetState()
 	defer resetState()
@@ -375,6 +439,7 @@ func TestPruneHealthRemovesOnlyUnknownNodes(t *testing.T) {
 		secondURI: {FailCount: 1},
 		staleURI:  {FailCount: 2},
 	}
+	healthMayHaveOrphans = true
 	loaded = true
 	rebuildNodeIndexUnsafe()
 	pruneHealthUnsafe()
@@ -997,6 +1062,7 @@ func TestMergeNodesPrunesHealthMap(t *testing.T) {
 
 	mu.Lock()
 	healthMap["orphan-uri"] = &NodeHealth{SuccessCount: 99} //nolint:exhaustruct
+	healthMayHaveOrphans = true
 	mu.Unlock()
 
 	if err := MergeNodes([]Node{n1}); err != nil {
@@ -1017,6 +1083,17 @@ func TestMergeNodesPrunesHealthMap(t *testing.T) {
 	health = LoadHealth()
 	if health["uri1"] == nil || health["uri1"].FailCount != 1 {
 		t.Errorf("Expected RecordTest to still work after pruning, got %v", health["uri1"])
+	}
+}
+
+func TestHealthRecordersIgnoreUnknownNodes(t *testing.T) {
+	resetState()
+	defer resetState()
+
+	RecordTest("missing", false, 10, "timeout")
+	RecordRateLimit("missing", 30)
+	if health := LoadHealth(); len(health) != 0 {
+		t.Fatalf("unknown node created health state: %#v", health)
 	}
 }
 

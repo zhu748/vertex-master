@@ -44,7 +44,12 @@ type AdminHandler struct {
 
 func (adm *AdminHandler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/admin")
-	log.Printf("[Server] [AdminAPI] 收到请求: %s %s", r.Method, path)
+	// An authenticated log-viewer poll must not mutate the file it is reading;
+	// rejected or malformed requests remain visible in the audit log.
+	quietLogPoll := path == "/log" && r.Method == http.MethodGet && requireAdmin(r)
+	if !quietLogPoll {
+		log.Printf("[Server] [AdminAPI] 收到请求: %s %s", r.Method, path)
+	}
 	requireMethod := func(methods ...string) bool {
 		for _, method := range methods {
 			if r.Method == method {
@@ -573,14 +578,22 @@ func (adm *AdminHandler) adminListBgs(w http.ResponseWriter, r *http.Request) {
 
 func (adm *AdminHandler) adminGetLog(w http.ResponseWriter, r *http.Request) {
 	logPath := filepath.Join(filepath.Dir(adm.cfg.ConfigDir()), "logs", "logs_latest.log")
-
-	if _, err := os.Stat(logPath); os.IsNotExist(err) {
+	info, statErr := os.Stat(logPath)
+	if os.IsNotExist(statErr) {
 		logPath = "logs/logs_latest.log"
+		info, statErr = os.Stat(logPath)
 	}
 
-	content, err := readAdminLogTail(logPath, maxAdminLogTailBytes, maxAdminLogTailLines)
-	if err != nil {
-		if os.IsNotExist(err) {
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("X-Vertex-Auto-Refresh-Logs", fmt.Sprintf("%t", adm.cfg.AutoRefreshLogs()))
+	if statErr != nil {
+		if os.IsNotExist(statErr) {
+			const missingETag = `"missing"`
+			w.Header().Set("ETag", missingETag)
+			if adminLogETagMatches(r.Header.Get("If-None-Match"), missingETag) {
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
 			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "content": ""})
 			return
 		}
@@ -588,7 +601,44 @@ func (adm *AdminHandler) adminGetLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	etag := adminLogETag(info)
+	w.Header().Set("ETag", etag)
+	if adminLogETagMatches(r.Header.Get("If-None-Match"), etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+
+	content, err := readAdminLogTail(logPath, maxAdminLogTailBytes, maxAdminLogTailLines)
+	if err != nil {
+		if os.IsNotExist(err) {
+			w.Header().Set("ETag", `"missing"`)
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "content": ""})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, adminErr("无法读取日志文件 (read error)"))
+		return
+	}
+	// If the active log grew while it was being read, return the version of the
+	// completed snapshot so the next poll can validate against current metadata.
+	if latestInfo, latestErr := os.Stat(logPath); latestErr == nil {
+		w.Header().Set("ETag", adminLogETag(latestInfo))
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "content": content})
+}
+
+func adminLogETag(info os.FileInfo) string {
+	return fmt.Sprintf(`"%x-%x"`, info.Size(), info.ModTime().UnixNano())
+}
+
+func adminLogETagMatches(ifNoneMatch, etag string) bool {
+	for candidate := range strings.SplitSeq(ifNoneMatch, ",") {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "*" || candidate == etag || strings.TrimPrefix(candidate, "W/") == etag {
+			return true
+		}
+	}
+	return false
 }
 
 // readAdminLogTail reads a bounded snapshot from the end of a potentially

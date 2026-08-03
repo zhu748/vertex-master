@@ -17,10 +17,43 @@ import (
 )
 
 type proxyInfo struct {
-	proxy      constant.Proxy
-	lastUsedAt time.Time
-	closed     bool
-	label      string
+	proxy       constant.Proxy
+	dialer      func(context.Context, string, string) (net.Conn, error)
+	debugDialer func(context.Context, string, string) (net.Conn, error)
+	lastUsedMu  sync.Mutex
+	lastUsedAt  time.Time
+	closed      bool
+	label       string
+}
+
+func newProxyInfo(proxy constant.Proxy, label string, lastUsedAt time.Time) *proxyInfo {
+	return &proxyInfo{
+		proxy:       proxy,
+		dialer:      makeDialer(proxy, false),
+		debugDialer: makeDialer(proxy, true),
+		lastUsedAt:  lastUsedAt,
+		label:       label,
+	} //nolint:exhaustruct
+}
+
+func (info *proxyInfo) selectDialer(debugMode bool) func(context.Context, string, string) (net.Conn, error) {
+	if debugMode {
+		return info.debugDialer
+	}
+	return info.dialer
+}
+
+func (info *proxyInfo) touch(now time.Time) {
+	info.lastUsedMu.Lock()
+	info.lastUsedAt = now
+	info.lastUsedMu.Unlock()
+}
+
+func (info *proxyInfo) lastUsed() time.Time {
+	info.lastUsedMu.Lock()
+	lastUsedAt := info.lastUsedAt
+	info.lastUsedMu.Unlock()
+	return lastUsedAt
 }
 
 var (
@@ -31,14 +64,14 @@ var (
 )
 
 func getOrStartProxyDialer(uri string, reqID string, debugMode bool) (func(ctx context.Context, network, addr string) (net.Conn, error), error) {
-	proxyMutex.Lock()
+	proxyMutex.RLock()
 	if info, ok := proxyMap[uri]; ok && !info.closed {
-		info.lastUsedAt = time.Now()
-		p := info.proxy
-		proxyMutex.Unlock()
-		return makeDialer(p, debugMode), nil
+		info.touch(time.Now())
+		dialer := info.selectDialer(debugMode)
+		proxyMutex.RUnlock()
+		return dialer, nil
 	}
-	proxyMutex.Unlock()
+	proxyMutex.RUnlock()
 
 	nodeName := nodes.GetNodeName(uri)
 	log.Printf("[Transport] 请求ID=%s 触发代理初始化: %s", reqID, nodeName)
@@ -53,24 +86,22 @@ func getOrStartProxyDialer(uri string, reqID string, debugMode bool) (func(ctx c
 		return nil, fmt.Errorf("parse proxy: %w", err)
 	}
 
-	proxy = reuseOrInstallProxy(uri, nodeName, proxy)
-	return makeDialer(proxy, debugMode), nil
+	info := reuseOrInstallProxy(uri, nodeName, proxy)
+	return info.selectDialer(debugMode), nil
 }
 
-func reuseOrInstallProxy(uri, label string, created constant.Proxy) constant.Proxy {
+func reuseOrInstallProxy(uri, label string, created constant.Proxy) *proxyInfo {
 	proxyMutex.Lock()
 	if existing, ok := proxyMap[uri]; ok && !existing.closed {
-		existing.lastUsedAt = time.Now()
-		selected := existing.proxy
+		existing.touch(time.Now())
 		proxyMutex.Unlock()
 		closeProxy(created)
-		return selected
+		return existing
 	}
-	proxyMap[uri] = &proxyInfo{
-		proxy: created, lastUsedAt: time.Now(), label: label,
-	} //nolint:exhaustruct
+	info := newProxyInfo(created, label, time.Now())
+	proxyMap[uri] = info
 	proxyMutex.Unlock()
-	return created
+	return info
 }
 
 func closeProxy(proxy constant.Proxy) {
@@ -183,7 +214,7 @@ func cleanupIdleProxies(maxIdle time.Duration) {
 	proxyMutex.Lock()
 	now := time.Now()
 	for uri, info := range proxyMap {
-		if now.Sub(info.lastUsedAt) > maxIdle {
+		if now.Sub(info.lastUsed()) > maxIdle {
 			if !info.closed {
 				info.closed = true
 				expired = append(expired, expiredProxy{uri: uri, label: info.label, proxy: info.proxy})

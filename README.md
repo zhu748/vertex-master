@@ -155,6 +155,8 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ver
 | `proxy_health_check_concurrency` | 5 | 健康巡检并发数 |
 | `proxy_health_check_timeout_seconds` | 8 | 单个代理巡检超时（秒） |
 
+自建 HTTPS 反向代理默认不会信任客户端可伪造的 `X-Forwarded-*` 请求头。只有当 Vertex 仅接收来自可信反向代理的流量时，才设置环境变量 `VPROXY_TRUST_PROXY_HEADERS=true`，以便管理会话正确识别 HTTPS 和客户端地址；Render 环境会自动启用该行为。
+
 > **提示**：默认模型清单已包含稳定版 `gemini-3.6-flash`。在模型名前加上 `fake-` 或 `假流式-` 前缀，可将非流式模型伪装成流式输出。
 
 > **预填充兼容**：通过 OpenAI Chat/Responses、Claude Messages 或 Gemini 原生接口调用 `gemini-3.6-flash` 时，服务会保留末尾纯文本 `assistant`/`model` 预填充的角色与原文，再追加一条短续写提示，使请求合法地以 `user` 结束；流式或非流式回复都会移除模型可能重复输出的前缀。工具调用、媒体、思考块和其他模型的历史行为保持不变；旧客户端传入的 `NONE`/`thinkingBudget` 也会在出站时转换为 Gemini 3.6 支持的思考级别。

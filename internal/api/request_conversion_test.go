@@ -183,11 +183,14 @@ func TestAnthropicAssistantConversionPreservesTextAndToolOrder(t *testing.T) {
 	if err != nil || len(messages) != 1 {
 		t.Fatalf("conversion failed: messages=%#v err=%v", messages, err)
 	}
-	message := messages[0].(map[string]any)
-	if message["content"] != "beforeafter" {
-		t.Fatalf("assistant text=%#v", message["content"])
+	message, ok := messages[0].(transform.CanonicalChatMessage)
+	if !ok {
+		t.Fatalf("assistant message has unexpected type %T", messages[0])
 	}
-	toolCalls := message["tool_calls"].([]any)
+	if message.Content != "beforeafter" {
+		t.Fatalf("assistant text=%#v", message.Content)
+	}
+	toolCalls := message.ToolCalls
 	if len(toolCalls) != 1 {
 		t.Fatalf("assistant tools=%#v", toolCalls)
 	}
@@ -216,8 +219,8 @@ func TestAppendAnthropicMessagePreservesExistingMessages(t *testing.T) {
 	if appended[0].(map[string]any)["content"] != prefix["content"] {
 		t.Fatalf("existing message changed: %#v", appended[0])
 	}
-	last := appended[1].(map[string]any)
-	if last["role"] != "assistant" || last["content"] != "answer" {
+	last, ok := appended[1].(transform.CanonicalChatMessage)
+	if !ok || last.Role != "assistant" || last.Content != "answer" {
 		t.Fatalf("appended message=%#v", last)
 	}
 }
@@ -382,10 +385,13 @@ func TestAnthropicToolResultPreservesMixedContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	messages := converted["messages"].([]any)
-	tool := messages[0].(map[string]any)
-	blocks, ok := tool["content"].([]any)
+	tool, ok := messages[0].(transform.CanonicalChatMessage)
 	if !ok {
-		t.Fatalf("复合 tool_result 应保留已解码数组，got %#v", tool["content"])
+		t.Fatalf("复合 tool_result 消息类型异常: %T", messages[0])
+	}
+	blocks, ok := tool.Content.([]any)
+	if !ok {
+		t.Fatalf("复合 tool_result 应保留已解码数组，got %#v", tool.Content)
 	}
 	if len(blocks) != 2 {
 		t.Fatalf("复合 tool_result 丢失内容块: %#v", blocks)
@@ -500,8 +506,8 @@ func TestAnthropicConversionIntentionallyIgnoresThinkingHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	messages := converted["messages"].([]any)
-	assistant := messages[len(messages)-1].(map[string]any)
-	if assistant["content"] != "visible" {
+	assistant, ok := messages[len(messages)-1].(transform.CanonicalChatMessage)
+	if !ok || assistant.Content != "visible" {
 		t.Fatalf("可见 assistant 上下文应保留: %#v", assistant)
 	}
 }

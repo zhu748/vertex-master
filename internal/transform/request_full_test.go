@@ -80,6 +80,61 @@ func TestDefaultRequestConverterCompactsPlainTextWithoutChangingWireJSON(t *test
 	}
 }
 
+func TestCanonicalChatMessageMatchesMapConversionWireJSON(t *testing.T) {
+	cfg := config.StaticProvider(config.DefaultConfig())
+	toolCalls := []any{map[string]any{
+		"id": "call_1", "type": "function",
+		"function": map[string]any{"name": "lookup", "arguments": `{"q":"x"}`},
+	}}
+	mapBody := map[string]any{
+		"model": "gemini-3.1-flash",
+		"messages": []any{
+			map[string]any{"role": "system", "content": "Be concise."},
+			map[string]any{"role": "user", "content": "question"},
+			map[string]any{"role": "assistant", "content": "", "tool_calls": toolCalls},
+			map[string]any{
+				"role": "tool", "tool_call_id": "call_1",
+				"content": map[string]any{"value": float64(1)},
+			},
+		},
+	}
+	typedBody := map[string]any{
+		"model": "gemini-3.1-flash",
+		"messages": []any{
+			CanonicalChatMessage{Role: "system", Content: "Be concise."},
+			&CanonicalChatMessage{Role: "user", Content: "question"},
+			CanonicalChatMessage{Role: "assistant", Content: "", ToolCalls: toolCalls},
+			&CanonicalChatMessage{
+				Role: "tool", ToolCallID: "call_1",
+				Content: map[string]any{"value": float64(1)},
+			},
+		},
+	}
+
+	mapModel, mapPayload, err := DefaultRequestConverter().Convert(mapBody, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	typedModel, typedPayload, err := DefaultRequestConverter().Convert(typedBody, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if typedModel != mapModel {
+		t.Fatalf("model mismatch: typed=%q map=%q", typedModel, mapModel)
+	}
+	mapJSON, err := json.Marshal(BuildVertexVariables(mapModel, mapPayload, cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	typedJSON, err := json.Marshal(BuildVertexVariables(typedModel, typedPayload, cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(typedJSON) != string(mapJSON) {
+		t.Fatalf("canonical message changed wire JSON:\n typed: %s\n map:   %s", typedJSON, mapJSON)
+	}
+}
+
 func TestDefaultRequestConverterCompactsTextInsideToolHistory(t *testing.T) {
 	cfg := config.StaticProvider(config.DefaultConfig())
 	body := map[string]any{
@@ -1009,36 +1064,35 @@ func TestToolCallRoundTrip_IDAnchor(t *testing.T) {
 	contents := vars["contents"].([]any)
 
 	// 找到 model 消息：两个 functionCall 都应带 base64 编码的 thoughtSignature 哨兵、不带 id。
-	var modelParts []any
-	var funcParts []any
+	var modelParts canonicalFunctionCallParts
+	var funcParts canonicalFunctionResponseParts
 	for _, c := range contents {
-		if _, ok := c.(*canonicalSingleTextContent); ok {
+		switch content := c.(type) {
+		case *canonicalSingleTextContent:
 			continue
-		}
-		cm := c.(map[string]any)
-		switch cm["role"] {
-		case "model":
-			modelParts = cm["parts"].([]any)
-		case "function":
-			funcParts = append(funcParts, cm["parts"].([]any)...)
+		case *canonicalFunctionCallContent:
+			modelParts = append(modelParts, content.Parts...)
+		case *canonicalFunctionResponseContent:
+			funcParts = append(funcParts, content.Parts...)
+		default:
+			t.Fatalf("unexpected outbound content type %T", c)
 		}
 	}
 	if len(modelParts) != 2 {
 		t.Fatalf("model parts=%d, want 2", len(modelParts))
 	}
 	wantSig := base64.StdEncoding.EncodeToString([]byte(skipThoughtSentinel))
-	for _, p := range modelParts {
-		pm := p.(map[string]any)
-		fc := pm["functionCall"].(map[string]any)
-		if _, hasID := fc["id"]; hasID {
+	for _, part := range modelParts {
+		call := part.FunctionCall
+		if call.ID != "" {
 			t.Error("functionCall 不应残留内部 id 锚点")
 		}
 		// args 应被解析为对象
-		if _, ok := fc["args"].(map[string]any); !ok {
-			t.Errorf("args 应是对象: %v", fc["args"])
+		if _, ok := call.Args.(map[string]any); !ok {
+			t.Errorf("args 应是对象: %v", call.Args)
 		}
-		if pm["thoughtSignature"] != wantSig {
-			t.Errorf("哨兵 thoughtSignature=%v, want %v", pm["thoughtSignature"], wantSig)
+		if part.ThoughtSignature != wantSig {
+			t.Errorf("哨兵 thoughtSignature=%v, want %v", part.ThoughtSignature, wantSig)
 		}
 	}
 
@@ -1046,16 +1100,16 @@ func TestToolCallRoundTrip_IDAnchor(t *testing.T) {
 	if len(funcParts) != 2 {
 		t.Fatalf("function parts=%d, want 2", len(funcParts))
 	}
-	for _, p := range funcParts {
-		fr := p.(map[string]any)["functionResponse"].(map[string]any)
-		if fr["name"] != "get_weather" {
-			t.Errorf("functionResponse.name=%v, want get_weather（id 反查）", fr["name"])
+	for _, part := range funcParts {
+		response := part.FunctionResponse
+		if response.Name != "get_weather" {
+			t.Errorf("functionResponse.name=%v, want get_weather（id 反查）", response.Name)
 		}
-		if _, hasID := fr["id"]; hasID {
+		if response.ID != "" {
 			t.Error("functionResponse 不应残留内部 id 锚点")
 		}
-		if _, ok := fr["response"].(map[string]any); !ok {
-			t.Errorf("response 应是对象: %v", fr["response"])
+		if response.Response == nil {
+			t.Errorf("response 应是对象: %v", response.Response)
 		}
 	}
 }
@@ -1081,15 +1135,12 @@ func TestToolCallNameResolution_PositionalFallback(t *testing.T) {
 	vars := BuildVertexVariables(model, gemini, config.StaticProvider(config.DefaultConfig()))
 	var names []string
 	for _, c := range vars["contents"].([]any) {
-		if _, ok := c.(*canonicalSingleTextContent); ok {
+		responseContent, ok := c.(*canonicalFunctionResponseContent)
+		if !ok {
 			continue
 		}
-		cm := c.(map[string]any)
-		if cm["role"] == "function" {
-			for _, p := range cm["parts"].([]any) {
-				fr := p.(map[string]any)["functionResponse"].(map[string]any)
-				names = append(names, fr["name"].(string))
-			}
+		for _, part := range responseContent.Parts {
+			names = append(names, part.FunctionResponse.Name)
 		}
 	}
 	if len(names) != 2 || names[0] != "fa" || names[1] != "fb" {

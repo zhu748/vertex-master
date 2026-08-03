@@ -148,19 +148,27 @@ func responsesToChatRequest(body map[string]any) (map[string]any, error) {
 		messageCapacity = len(inputItems) + 1
 	}
 	messages := make([]any, 0, messageCapacity)
+	var messageStorage []transform.CanonicalChatMessage
+	appendCanonicalMessage := func(message transform.CanonicalChatMessage) {
+		if messageStorage == nil {
+			messageStorage = make([]transform.CanonicalChatMessage, 0, messageCapacity)
+		}
+		messageStorage = append(messageStorage, message)
+		messages = append(messages, &messageStorage[len(messageStorage)-1])
+	}
 	instructions, err := responseInstructions(body["instructions"])
 	if err != nil {
 		return nil, fmt.Errorf("instructions: %w", err)
 	}
 	if instructions != "" {
-		messages = append(messages, map[string]any{"role": "system", "content": instructions})
+		appendCanonicalMessage(transform.CanonicalChatMessage{Role: "system", Content: instructions})
 	}
 	switch value := input.(type) {
 	case string:
 		if value == "" {
 			return nil, fmt.Errorf("'input' must not be empty")
 		}
-		messages = append(messages, map[string]any{"role": "user", "content": value})
+		appendCanonicalMessage(transform.CanonicalChatMessage{Role: "user", Content: value})
 	case []any:
 		if len(value) == 0 {
 			return nil, fmt.Errorf("'input' must not be empty")
@@ -175,8 +183,8 @@ func responsesToChatRequest(body map[string]any) (map[string]any, error) {
 				return
 			}
 			pendingToolCalls := allToolCalls[pendingToolCallStart:len(allToolCalls):len(allToolCalls)]
-			messages = append(messages, map[string]any{
-				"role": "assistant", "content": "", "tool_calls": pendingToolCalls,
+			appendCanonicalMessage(transform.CanonicalChatMessage{
+				Role: "assistant", Content: "", ToolCalls: pendingToolCalls,
 			})
 			pendingToolCallStart = len(allToolCalls)
 		}
@@ -232,10 +240,10 @@ func responsesToChatRequest(body map[string]any) (map[string]any, error) {
 					)
 				}
 				flushToolCalls()
-				messages = append(messages, map[string]any{
-					"role":         "tool",
-					"tool_call_id": item["call_id"],
-					"content":      normalizedIntermediateJSONValue(item["output"]),
+				appendCanonicalMessage(transform.CanonicalChatMessage{
+					Role:       "tool",
+					ToolCallID: stringValue(item["call_id"]),
+					Content:    normalizedIntermediateJSONValue(item["output"]),
 				})
 			case "message", "":
 				flushToolCalls()
@@ -258,7 +266,7 @@ func responsesToChatRequest(body map[string]any) (map[string]any, error) {
 				if err != nil {
 					return nil, fmt.Errorf("input[%d]: %w", itemIndex, err)
 				}
-				messages = append(messages, map[string]any{"role": role, "content": content})
+				appendCanonicalMessage(transform.CanonicalChatMessage{Role: role, Content: content})
 			case "reasoning":
 				// Codex 会把上一轮 reasoning item 放回 input。Gemini 不接受该
 				// Responses 专用项，但它不应打断相邻的并行 function_call 分组。

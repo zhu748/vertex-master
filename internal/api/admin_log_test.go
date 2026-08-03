@@ -1,12 +1,107 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/bsfdsagfadg/vertex/internal/config"
 )
+
+type adminLogTestConfig struct {
+	config.ConfigProvider
+	configDir string
+}
+
+func (c adminLogTestConfig) ConfigDir() string { return c.configDir }
+
+func newAdminLogTestHandler(t testing.TB, content string) (*AdminHandler, string) {
+	t.Helper()
+	root := t.TempDir()
+	logDir := filepath.Join(root, "logs")
+	if err := os.MkdirAll(logDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(logDir, "logs_latest.log")
+	if err := os.WriteFile(logPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultConfig()
+	provider := adminLogTestConfig{
+		ConfigProvider: config.StaticProvider(cfg),
+		configDir:      filepath.Join(root, "config"),
+	}
+	return &AdminHandler{handler: handler{cfg: provider}}, logPath //nolint:exhaustruct
+}
+
+func TestAdminGetLogReturnsContent(t *testing.T) {
+	adm, _ := newAdminLogTestHandler(t, "first\nsecond\n")
+	recorder := httptest.NewRecorder()
+	adm.adminGetLog(recorder, httptest.NewRequest(http.MethodGet, "/api/admin/log", nil))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d, want %d", recorder.Code, http.StatusOK)
+	}
+	var body struct {
+		OK      bool   `json:"ok"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.OK || body.Content != "first\nsecond" {
+		t.Fatalf("unexpected response: %+v", body)
+	}
+	if got := recorder.Header().Get("X-Vertex-Auto-Refresh-Logs"); got != "true" {
+		t.Fatalf("auto-refresh header=%q, want true", got)
+	}
+}
+
+func TestAdminGetLogReturnsNotModifiedUntilFileChanges(t *testing.T) {
+	adm, logPath := newAdminLogTestHandler(t, "first\n")
+	first := httptest.NewRecorder()
+	adm.adminGetLog(first, httptest.NewRequest(http.MethodGet, "/api/admin/log", nil))
+	etag := first.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("initial response is missing ETag")
+	}
+
+	unchangedRequest := httptest.NewRequest(http.MethodGet, "/api/admin/log", nil)
+	unchangedRequest.Header.Set("If-None-Match", etag)
+	unchanged := httptest.NewRecorder()
+	adm.adminGetLog(unchanged, unchangedRequest)
+	if unchanged.Code != http.StatusNotModified || unchanged.Body.Len() != 0 {
+		t.Fatalf("unchanged response: status=%d body=%q", unchanged.Code, unchanged.Body.String())
+	}
+
+	file, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString("second\n"); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	changedRequest := httptest.NewRequest(http.MethodGet, "/api/admin/log", nil)
+	changedRequest.Header.Set("If-None-Match", etag)
+	changed := httptest.NewRecorder()
+	adm.adminGetLog(changed, changedRequest)
+	if changed.Code != http.StatusOK || !strings.Contains(changed.Body.String(), "second") {
+		t.Fatalf("changed response: status=%d body=%q", changed.Code, changed.Body.String())
+	}
+	if changed.Header().Get("ETag") == etag {
+		t.Fatal("ETag did not change after appending to the log")
+	}
+}
 
 func TestReadAdminLogTailBoundsLargeFileAndKeepsLastLines(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "logs_latest.log")
@@ -193,4 +288,21 @@ func BenchmarkReadAdminLogTail(b *testing.B) {
 			}
 		}
 	})
+}
+
+func BenchmarkAdminGetLogUnchanged(b *testing.B) {
+	adm, _ := newAdminLogTestHandler(b, strings.Repeat("benchmark log line\n", maxAdminLogTailBytes/19+1))
+	initial := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/admin/log", nil)
+	adm.adminGetLog(initial, request)
+	request.Header.Set("If-None-Match", initial.Header().Get("ETag"))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		recorder := httptest.NewRecorder()
+		adm.adminGetLog(recorder, request)
+		if recorder.Code != http.StatusNotModified {
+			b.Fatalf("status=%d", recorder.Code)
+		}
+	}
 }

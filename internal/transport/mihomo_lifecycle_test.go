@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -84,7 +85,7 @@ func TestReuseOrInstallProxyKeepsFirstConcurrentInstance(t *testing.T) {
 
 	const installers = 32
 	created := make([]*lifecycleProxy, installers)
-	selected := make(chan constant.Proxy, installers)
+	selected := make(chan *proxyInfo, installers)
 	var wg sync.WaitGroup
 	for index := range installers {
 		created[index] = &lifecycleProxy{}
@@ -97,13 +98,13 @@ func TestReuseOrInstallProxyKeepsFirstConcurrentInstance(t *testing.T) {
 	wg.Wait()
 	close(selected)
 
-	var winner constant.Proxy
-	for proxy := range selected {
+	var winner *proxyInfo
+	for info := range selected {
 		if winner == nil {
-			winner = proxy
+			winner = info
 			continue
 		}
-		if proxy != winner {
+		if info != winner {
 			t.Fatal("concurrent installers returned different active proxy instances")
 		}
 	}
@@ -117,8 +118,43 @@ func TestReuseOrInstallProxyKeepsFirstConcurrentInstance(t *testing.T) {
 	proxyMutex.RLock()
 	info := proxyMap[proxyURI]
 	proxyMutex.RUnlock()
-	if info == nil || info.proxy != winner || info.closed {
+	if info == nil || info != winner || info.closed {
 		t.Fatalf("unexpected cached winner: %#v", info)
+	}
+}
+
+func TestCachedProxyLookupDoesNotRequireGlobalWriteLock(t *testing.T) {
+	const proxyURI = "test://read-locked-cache-hit"
+	proxyMutex.Lock()
+	previous := proxyMap
+	proxyMap = map[string]*proxyInfo{
+		proxyURI: newProxyInfo(&lifecycleProxy{}, "read-lock-test", time.Now()),
+	}
+	proxyMutex.Unlock()
+	t.Cleanup(func() {
+		proxyMutex.Lock()
+		proxyMap = previous
+		proxyMutex.Unlock()
+	})
+
+	// Holding a read lock must not block another cached lookup. This protects
+	// the hot path from regressing to a process-wide write lock.
+	proxyMutex.RLock()
+	result := make(chan error, 1)
+	go func() {
+		_, err := getOrStartProxyDialer(proxyURI, "read-lock-test", false)
+		result <- err
+	}()
+	select {
+	case err := <-result:
+		proxyMutex.RUnlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		proxyMutex.RUnlock()
+		<-result
+		t.Fatal("cached proxy lookup blocked behind an unrelated read lock")
 	}
 }
 
@@ -186,4 +222,37 @@ func TestProxyLifecycleClosesResourcesOutsideCacheLock(t *testing.T) {
 			}
 		})
 	}
+}
+
+func BenchmarkGetOrStartProxyDialerCached(b *testing.B) {
+	const proxyCount = 256
+	proxyURIs := make([]string, proxyCount)
+	proxies := make(map[string]*proxyInfo, proxyCount)
+	for index := range proxyCount {
+		uri := fmt.Sprintf("test://cached-dialer-benchmark/%d", index)
+		proxyURIs[index] = uri
+		proxies[uri] = newProxyInfo(&lifecycleProxy{}, "benchmark", time.Now())
+	}
+	proxyMutex.Lock()
+	previous := proxyMap
+	proxyMap = proxies
+	proxyMutex.Unlock()
+	b.Cleanup(func() {
+		proxyMutex.Lock()
+		proxyMap = previous
+		proxyMutex.Unlock()
+	})
+
+	b.ReportAllocs()
+	var seed atomic.Uint64
+	b.RunParallel(func(pb *testing.PB) {
+		index := int(seed.Add(1))
+		for pb.Next() {
+			uri := proxyURIs[index&(proxyCount-1)]
+			index += 17
+			if _, err := getOrStartProxyDialer(uri, "benchmark", false); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
 }

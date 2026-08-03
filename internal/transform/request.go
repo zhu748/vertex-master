@@ -33,6 +33,18 @@ var supportedVarFields = []struct { //nolint:gochecknoglobals
 	{camel: "generationConfig", snake: "generation_config"},
 }
 
+// CanonicalChatMessage is a validated OpenAI-compatible message emitted by
+// protocol adapters. Keeping generated messages in typed contiguous storage
+// avoids allocating two dynamic maps per tool-history turn while preserving
+// the same JSON shape for debug output and custom request inspection.
+type CanonicalChatMessage struct {
+	Role       string `json:"role"`
+	Content    any    `json:"content"`
+	ToolCalls  []any  `json:"tool_calls,omitempty"`
+	ToolCallID string `json:"tool_call_id,omitempty"`
+	Name       string `json:"name,omitempty"`
+}
+
 // ConvertChatRequest 将 OpenAI ChatCompletion 请求体转为 (model, geminiPayload)。
 func ConvertChatRequest(body map[string]any, cfg config.ConfigProvider) (string, map[string]any, error) {
 	return convertChatRequest(body, cfg, false)
@@ -84,12 +96,39 @@ func convertChatRequest(
 		if compactContents {
 			break
 		}
-		msg, ok := msgRaw.(map[string]any)
-		if !ok {
+		var role string
+		var content any
+		var rawToolCalls any
+		var hasToolCalls bool
+		var toolCallID string
+		var messageName string
+		switch msg := msgRaw.(type) {
+		case map[string]any:
+			role, _ = msg["role"].(string)
+			content = msg["content"]
+			rawToolCalls, hasToolCalls = msg["tool_calls"]
+			toolCallID, _ = msg["tool_call_id"].(string)
+			messageName, _ = msg["name"].(string)
+		case CanonicalChatMessage:
+			role = msg.Role
+			content = msg.Content
+			rawToolCalls = msg.ToolCalls
+			hasToolCalls = msg.ToolCalls != nil
+			toolCallID = msg.ToolCallID
+			messageName = msg.Name
+		case *CanonicalChatMessage:
+			if msg == nil {
+				return "", nil, fmt.Errorf("messages[%d] must be an object", messageIndex)
+			}
+			role = msg.Role
+			content = msg.Content
+			rawToolCalls = msg.ToolCalls
+			hasToolCalls = msg.ToolCalls != nil
+			toolCallID = msg.ToolCallID
+			messageName = msg.Name
+		default:
 			return "", nil, fmt.Errorf("messages[%d] must be an object", messageIndex)
 		}
-		role, _ := msg["role"].(string)
-		content := msg["content"]
 
 		switch role {
 		case "system", "developer":
@@ -182,7 +221,7 @@ func convertChatRequest(
 			if !contentConverted && contentNeedsConversion(content) {
 				return "", nil, fmt.Errorf("messages[%d] assistant content could not be converted", messageIndex)
 			}
-			if rawToolCalls, exists := msg["tool_calls"]; exists && rawToolCalls != nil {
+			if hasToolCalls && rawToolCalls != nil {
 				toolCalls, ok := rawToolCalls.([]any)
 				if !ok {
 					return "", nil, fmt.Errorf(
@@ -276,9 +315,9 @@ func convertChatRequest(
 				hasValidContents = true
 			}
 		case "tool":
-			tcID, _ := msg["tool_call_id"].(string)
-			name := firstTruthyString(msg["name"], toolIDToName.Get(tcID))
-			response := coerceFunctionResponse(msg["content"])
+			tcID := toolCallID
+			name := firstTruthyString(messageName, toolIDToName.Get(tcID))
+			response := coerceFunctionResponse(content)
 			if compactToolHistory && base64TreeCanSkipNormalization(response) {
 				part := canonicalFunctionResponsePart{
 					FunctionResponse: canonicalFunctionResponse{
@@ -343,12 +382,12 @@ func convertChatRequest(
 			contents = appendFunctionResponse(contents, map[string]any{"functionResponse": fr})
 			hasValidContents = true
 		case "function":
-			name := firstTruthyString(msg["name"])
+			name := firstTruthyString(messageName)
 			if name == "" {
 				name = "unknown"
 			}
 			contents = appendFunctionResponse(contents, map[string]any{"functionResponse": map[string]any{
-				"name": name, "response": coerceFunctionResponse(msg["content"]),
+				"name": name, "response": coerceFunctionResponse(content),
 			}})
 			hasValidContents = true
 		default:

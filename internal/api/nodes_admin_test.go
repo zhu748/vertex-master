@@ -170,6 +170,7 @@ func TestAdminNodesPageResponseMatchesGenericEncoding(t *testing.T) {
 	}}
 	typed := httptest.NewRecorder()
 	writeJSON(typed, http.StatusOK, adminNodesPageResponse{
+		ActiveNodeURI:              pageNodes[0].RawURI,
 		DisabledCount:              1,
 		EnabledCount:               1,
 		Health:                     typedHealth,
@@ -180,6 +181,7 @@ func TestAdminNodesPageResponseMatchesGenericEncoding(t *testing.T) {
 		Page:                       1,
 		PageSize:                   50,
 		PoolStats:                  poolStats,
+		ProxyURL:                   "http://proxy.example:8080",
 		RecentProxy:                recent,
 		RecentProxyHistory:         history,
 		StickyNodePriority:         true,
@@ -190,6 +192,7 @@ func TestAdminNodesPageResponseMatchesGenericEncoding(t *testing.T) {
 	})
 	generic := httptest.NewRecorder()
 	writeJSON(generic, http.StatusOK, map[string]any{
+		"active_node_uri":               pageNodes[0].RawURI,
 		"disabled_count":                1,
 		"enabled_count":                 1,
 		"health":                        health,
@@ -200,6 +203,7 @@ func TestAdminNodesPageResponseMatchesGenericEncoding(t *testing.T) {
 		"page":                          1,
 		"page_size":                     50,
 		"pool_stats":                    poolStats,
+		"proxy_url":                     "http://proxy.example:8080",
 		"recent_proxy":                  recent,
 		"recent_proxy_history":          history,
 		"sticky_node_priority":          true,
@@ -386,7 +390,10 @@ func TestAdminGetNodesPaginationAndFilters(t *testing.T) {
 		nodes.DeleteNode(secondURI)
 	})
 
-	cfg := config.StaticProvider(config.DefaultConfig())
+	appConfig := config.DefaultConfig()
+	appConfig.ActiveNodeURI = firstURI
+	appConfig.ProxyURL = "http://127.0.0.1:7890"
+	cfg := config.StaticProvider(appConfig)
 	adm := &AdminHandler{handler: handler{cfg: cfg}} //nolint:exhaustruct
 	req := httptest.NewRequest("GET",
 		"/api/admin/nodes?query="+prefix+"&page=2&page_size=1", nil)
@@ -394,17 +401,20 @@ func TestAdminGetNodesPaginationAndFilters(t *testing.T) {
 	adm.adminGetNodes(rec, req)
 
 	var page struct {
-		Nodes      []nodes.Node `json:"nodes"`
-		Total      int          `json:"total"`
-		Page       int          `json:"page"`
-		PageSize   int          `json:"page_size"`
-		TotalPages int          `json:"total_pages"`
+		ActiveNodeURI string       `json:"active_node_uri"`
+		Nodes         []nodes.Node `json:"nodes"`
+		Page          int          `json:"page"`
+		PageSize      int          `json:"page_size"`
+		ProxyURL      string       `json:"proxy_url"`
+		Total         int          `json:"total"`
+		TotalPages    int          `json:"total_pages"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
 		t.Fatal(err)
 	}
 	if page.Total != 2 || page.Page != 2 || page.PageSize != 1 ||
-		page.TotalPages != 2 || len(page.Nodes) != 1 {
+		page.TotalPages != 2 || len(page.Nodes) != 1 ||
+		page.ActiveNodeURI != firstURI || page.ProxyURL != appConfig.ProxyURL {
 		t.Fatalf("unexpected paginated response: %#v", page)
 	}
 

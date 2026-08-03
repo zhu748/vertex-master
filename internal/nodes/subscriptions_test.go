@@ -179,6 +179,44 @@ func BenchmarkSyncSubscriptionLargePoolNoChanges(b *testing.B) {
 	}
 }
 
+func BenchmarkSyncSubscriptionLargePoolInitialLoad(b *testing.B) {
+	const nodeCount = 2000
+	db.CloseDB()
+	if err := db.InitDB(filepath.Join(b.TempDir(), "subscription-initial-load-benchmark.db")); err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(db.CloseDB)
+	resetState()
+
+	item, err := SaveProxySubscription(ProxySubscription{
+		Name: "initial-load-benchmark", URL: "https://example.com/initial-load-benchmark",
+		ProxyType: "http", RefreshIntervalMinutes: 60, Enabled: true,
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	proxies := make([]Node, nodeCount)
+	for index := range proxies {
+		proxies[index] = Node{
+			Type: "http", Name: fmt.Sprintf("node-%d", index),
+			RawURI: fmt.Sprintf("http://initial-load-%d.invalid:8080", index),
+		}
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if _, err = SyncSubscriptionNodes(item.ID, proxies); err != nil {
+			b.Fatal(err)
+		}
+		b.StopTimer()
+		if _, err = SyncSubscriptionNodes(item.ID, nil); err != nil {
+			b.Fatal(err)
+		}
+		b.StartTimer()
+	}
+}
+
 func BenchmarkSyncSubscriptionLargePoolOneReplacement(b *testing.B) {
 	const nodeCount = 5000
 	db.CloseDB()
@@ -226,6 +264,91 @@ func BenchmarkSyncSubscriptionLargePoolOneReplacement(b *testing.B) {
 		next := firstSet
 		if iteration%2 != 0 {
 			next = secondSet
+		}
+		if _, err = SyncSubscriptionNodes(item.ID, next); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkSyncSubscriptionLargePoolFullReplacement(b *testing.B) {
+	const nodeCount = 2000
+	db.CloseDB()
+	if err := db.InitDB(filepath.Join(b.TempDir(), "subscription-full-replacement-benchmark.db")); err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(db.CloseDB)
+	resetState()
+
+	item, err := SaveProxySubscription(ProxySubscription{
+		Name: "full-replacement-benchmark", URL: "https://example.com/full-replacement-benchmark",
+		ProxyType: "http", RefreshIntervalMinutes: 60, Enabled: true,
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	firstSet := make([]Node, nodeCount)
+	secondSet := make([]Node, nodeCount)
+	for index := range nodeCount {
+		firstSet[index] = Node{
+			Type: "http", Name: fmt.Sprintf("first-%d", index),
+			RawURI: fmt.Sprintf("http://full-replacement-a-%d.invalid:8080", index),
+		}
+		secondSet[index] = Node{
+			Type: "http", Name: fmt.Sprintf("second-%d", index),
+			RawURI: fmt.Sprintf("http://full-replacement-b-%d.invalid:8080", index),
+		}
+	}
+	if _, err = SyncSubscriptionNodes(item.ID, firstSet); err != nil {
+		b.Fatal(err)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for iteration := range b.N {
+		next := secondSet
+		if iteration%2 != 0 {
+			next = firstSet
+		}
+		if _, err = SyncSubscriptionNodes(item.ID, next); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkSyncSubscriptionLargePoolAllMetadataUpdated(b *testing.B) {
+	const nodeCount = 2000
+	db.CloseDB()
+	if err := db.InitDB(filepath.Join(b.TempDir(), "subscription-metadata-update-benchmark.db")); err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(db.CloseDB)
+	resetState()
+
+	item, err := SaveProxySubscription(ProxySubscription{
+		Name: "metadata-update-benchmark", URL: "https://example.com/metadata-update-benchmark",
+		ProxyType: "http", RefreshIntervalMinutes: 60, Enabled: true,
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	firstSet := make([]Node, nodeCount)
+	secondSet := make([]Node, nodeCount)
+	for index := range nodeCount {
+		rawURI := fmt.Sprintf("http://metadata-update-%d.invalid:8080", index)
+		firstSet[index] = Node{Type: "http", Name: fmt.Sprintf("first-%d", index), RawURI: rawURI}
+		secondSet[index] = Node{Type: "https", Name: fmt.Sprintf("second-%d", index), RawURI: rawURI}
+	}
+	if _, err = SyncSubscriptionNodes(item.ID, firstSet); err != nil {
+		b.Fatal(err)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for iteration := range b.N {
+		next := secondSet
+		if iteration%2 != 0 {
+			next = firstSet
 		}
 		if _, err = SyncSubscriptionNodes(item.ID, next); err != nil {
 			b.Fatal(err)

@@ -84,9 +84,12 @@ func TestResponsesRequestConversionGroupsParallelFunctionCalls(t *testing.T) {
 	if len(messages) != 4 {
 		t.Fatalf("并行调用应转换为 user + assistant(2 calls) + 2 tool，got %#v", messages)
 	}
-	assistant := messages[1].(map[string]any)
-	toolCalls, _ := assistant["tool_calls"].([]any)
-	if assistant["role"] != "assistant" || len(toolCalls) != 2 {
+	assistant, ok := messages[1].(*transform.CanonicalChatMessage)
+	if !ok {
+		t.Fatalf("并行 function_call 未使用规范消息存储: %#v", messages[1])
+	}
+	toolCalls := assistant.ToolCalls
+	if assistant.Role != "assistant" || len(toolCalls) != 2 {
 		t.Fatalf("并行 function_call 未合并: %#v", assistant)
 	}
 	first, firstOK := toolCalls[0].(*transform.CanonicalOAIToolCall)
@@ -116,7 +119,11 @@ func TestResponsesFunctionCallStorageSurvivesGrowth(t *testing.T) {
 	if len(messages) != 1 {
 		t.Fatalf("messages=%d, want one grouped assistant message", len(messages))
 	}
-	toolCalls := messages[0].(map[string]any)["tool_calls"].([]any)
+	assistant, ok := messages[0].(*transform.CanonicalChatMessage)
+	if !ok {
+		t.Fatalf("grouped assistant message has unexpected type %T", messages[0])
+	}
+	toolCalls := assistant.ToolCalls
 	if len(toolCalls) != callCount {
 		t.Fatalf("tool calls=%d, want %d", len(toolCalls), callCount)
 	}
@@ -576,8 +583,8 @@ func TestAnthropicRequestConversion(t *testing.T) {
 	if len(messages) != 3 {
 		t.Fatalf("messages=%d, want 3: %#v", len(messages), messages)
 	}
-	last, _ := messages[len(messages)-1].(map[string]any)
-	if last["role"] != "tool" || last["tool_call_id"] != "toolu_1" {
+	last, ok := messages[len(messages)-1].(transform.CanonicalChatMessage)
+	if !ok || last.Role != "tool" || last.ToolCallID != "toolu_1" {
 		t.Fatalf("tool result not converted: %#v", last)
 	}
 }

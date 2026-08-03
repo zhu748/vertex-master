@@ -52,6 +52,39 @@ func BenchmarkBatchUpdateLargePoolRollback(b *testing.B) {
 	}
 }
 
+func BenchmarkBatchUpdateLargePoolSuccess(b *testing.B) {
+	const nodeCount = 2000
+	db.CloseDB()
+	if err := db.InitDB(filepath.Join(b.TempDir(), "batch-update-success-benchmark.db")); err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(db.CloseDB)
+	resetState()
+
+	proxies := make([]Node, nodeCount)
+	proxyURIs := make([]string, nodeCount)
+	for index := range proxies {
+		uri := fmt.Sprintf("http://update-success-benchmark-%d.invalid:8080", index)
+		proxies[index] = Node{
+			Type: "http", Name: fmt.Sprintf("node-%d", index), RawURI: uri,
+		}
+		proxyURIs[index] = uri
+	}
+	if err := MergeNodes(proxies); err != nil {
+		b.Fatal(err)
+	}
+
+	disabled := true
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if err := BatchUpdateNodesDisabled(proxyURIs, disabled); err != nil {
+			b.Fatal(err)
+		}
+		disabled = !disabled
+	}
+}
+
 func BenchmarkDeleteNodeLargePoolRollback(b *testing.B) {
 	const nodeCount = 5000
 	db.CloseDB()
@@ -198,6 +231,44 @@ func BenchmarkBatchDeleteLargePoolRollback(b *testing.B) {
 	}
 }
 
+func BenchmarkBatchDeleteLargePoolSuccess(b *testing.B) {
+	const nodeCount = 2000
+	db.CloseDB()
+	if err := db.InitDB(filepath.Join(b.TempDir(), "batch-delete-success-benchmark.db")); err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(db.CloseDB)
+	resetState()
+
+	proxies := make([]Node, nodeCount)
+	proxyURIs := make([]string, nodeCount)
+	for index := range proxies {
+		uri := fmt.Sprintf("http://delete-success-benchmark-%d.invalid:8080", index)
+		proxies[index] = Node{
+			Type: "http", Name: fmt.Sprintf("node-%d", index), RawURI: uri,
+		}
+		proxyURIs[index] = uri
+	}
+	if err := MergeNodes(proxies); err != nil {
+		b.Fatal(err)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for iteration := range b.N {
+		if iteration > 0 {
+			b.StopTimer()
+			if err := MergeNodes(proxies); err != nil {
+				b.Fatal(err)
+			}
+			b.StartTimer()
+		}
+		if err := BatchDeleteNodes(proxyURIs); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func BenchmarkReplaceManualLargePoolOneReplacement(b *testing.B) {
 	const subscriptionNodeCount = 4999
 	db.CloseDB()
@@ -313,6 +384,49 @@ func BenchmarkDedupLargePoolSingleDuplicateRollback(b *testing.B) {
 	}
 }
 
+func BenchmarkDedupLargePoolSingleDuplicateSuccess(b *testing.B) {
+	const nodeCount = 5000
+	db.CloseDB()
+	if err := db.InitDB(filepath.Join(b.TempDir(), "dedup-success-benchmark.db")); err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(db.CloseDB)
+	resetState()
+
+	subscription := createFailureBenchmarkSubscription(b)
+	proxies := make([]Node, nodeCount)
+	for index := range proxies {
+		proxies[index] = Node{
+			Type: "http", Name: fmt.Sprintf("node-%d", index),
+			RawURI: fmt.Sprintf("http://dedup-success-%d.invalid:8080", index),
+		}
+	}
+	proxies[len(proxies)-2] = Node{
+		Type: "vless", Name: "duplicate-a",
+		RawURI: "vless://success-benchmark-uuid@example.com:443?security=tls#a",
+	}
+	proxies[len(proxies)-1] = Node{
+		Type: "vless", Name: "duplicate-b",
+		RawURI: "vless://success-benchmark-uuid@example.com:443?security=tls#b",
+	}
+	if _, err := SyncSubscriptionNodes(subscription.ID, proxies); err != nil {
+		b.Fatal(err)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if removed := DedupNodes(); removed != 1 {
+			b.Fatalf("DedupNodes() removed=%d, want 1", removed)
+		}
+		b.StopTimer()
+		if _, err := SyncSubscriptionNodes(subscription.ID, proxies); err != nil {
+			b.Fatal(err)
+		}
+		b.StartTimer()
+	}
+}
+
 func BenchmarkDedupLargePoolNoDuplicates(b *testing.B) {
 	const nodeCount = 5000
 	db.CloseDB()
@@ -368,6 +482,7 @@ func BenchmarkMergeLargePoolRollback(b *testing.B) {
 		healthMap[node.RawURI] = &NodeHealth{SuccessCount: 1, LastSuccessAt: time.Now().Unix()}
 	}
 	healthMap["http://orphan.invalid:8080"] = &NodeHealth{FailCount: 1}
+	healthMayHaveOrphans = true
 	mu.Unlock()
 	failedURI := "http://merge-failed.invalid:8080"
 	if _, err := db.CurrentDB().Exec(`CREATE TRIGGER fail_benchmark_merge
@@ -387,6 +502,156 @@ func BenchmarkMergeLargePoolRollback(b *testing.B) {
 			b.Fatal("expected injected merge failure")
 		}
 	}
+}
+
+func BenchmarkMergeLargeBatchSuccess(b *testing.B) {
+	const nodeCount = 2000
+	db.CloseDB()
+	if err := db.InitDB(filepath.Join(b.TempDir(), "merge-large-batch-benchmark.db")); err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(db.CloseDB)
+	resetState()
+
+	proxies := make([]Node, nodeCount)
+	proxyURIs := make([]string, nodeCount)
+	for index := range proxies {
+		rawURI := fmt.Sprintf("http://merge-large-batch-%d.invalid:8080", index)
+		proxies[index] = Node{
+			Type: "http", Name: fmt.Sprintf("node-%d", index), RawURI: rawURI,
+		}
+		proxyURIs[index] = rawURI
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if err := MergeNodes(proxies); err != nil {
+			b.Fatal(err)
+		}
+		b.StopTimer()
+		if err := BatchDeleteNodes(proxyURIs); err != nil {
+			b.Fatal(err)
+		}
+		b.StartTimer()
+	}
+}
+
+func BenchmarkMergeLargeBatchManualization(b *testing.B) {
+	const nodeCount = 2000
+	db.CloseDB()
+	if err := db.InitDB(filepath.Join(b.TempDir(), "merge-large-manualization-benchmark.db")); err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(db.CloseDB)
+	resetState()
+
+	subscription := createFailureBenchmarkSubscription(b)
+	proxies := make([]Node, nodeCount)
+	for index := range proxies {
+		proxies[index] = Node{
+			Type: "http", Name: fmt.Sprintf("node-%d", index),
+			RawURI: fmt.Sprintf("http://merge-manualization-%d.invalid:8080", index),
+		}
+	}
+	if _, err := SyncSubscriptionNodes(subscription.ID, proxies); err != nil {
+		b.Fatal(err)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if err := MergeNodes(proxies); err != nil {
+			b.Fatal(err)
+		}
+		b.StopTimer()
+		if _, err := db.CurrentDB().Exec("UPDATE nodes SET source_id = ?", subscription.ID); err != nil {
+			b.Fatal(err)
+		}
+		mu.Lock()
+		for index := range nodeList {
+			nodeList[index].SourceID = subscription.ID
+		}
+		mu.Unlock()
+		b.StartTimer()
+	}
+}
+
+func BenchmarkUpdateSubscriptionCountsLargeBatch(b *testing.B) {
+	const subscriptionCount = 2000
+	db.CloseDB()
+	if err := db.InitDB(filepath.Join(b.TempDir(), "subscription-counts-benchmark.db")); err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(db.CloseDB)
+	resetState()
+
+	database := db.CurrentDB()
+	tx, err := database.Begin()
+	if err != nil {
+		b.Fatal(err)
+	}
+	stmt, err := tx.Prepare(`INSERT INTO proxy_subscriptions
+		(name, url, proxy_type, refresh_interval_minutes, enabled)
+		VALUES (?, ?, 'http', 60, 1)`)
+	if err != nil {
+		_ = tx.Rollback()
+		b.Fatal(err)
+	}
+	sourceIDs := make(map[int64]bool, subscriptionCount)
+	for index := range subscriptionCount {
+		result, insertErr := stmt.Exec(
+			fmt.Sprintf("subscription-%d", index),
+			fmt.Sprintf("https://example.com/subscription-%d", index),
+		)
+		if insertErr != nil {
+			_ = stmt.Close()
+			_ = tx.Rollback()
+			b.Fatal(insertErr)
+		}
+		sourceID, idErr := result.LastInsertId()
+		if idErr != nil {
+			_ = stmt.Close()
+			_ = tx.Rollback()
+			b.Fatal(idErr)
+		}
+		sourceIDs[sourceID] = true
+	}
+	if err = stmt.Close(); err != nil {
+		_ = tx.Rollback()
+		b.Fatal(err)
+	}
+	if err = tx.Commit(); err != nil {
+		b.Fatal(err)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		tx, err = database.Begin()
+		if err != nil {
+			b.Fatal(err)
+		}
+		if err = updateSubscriptionCountsTx(tx, sourceIDs); err != nil {
+			_ = tx.Rollback()
+			b.Fatal(err)
+		}
+		if err = tx.Commit(); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func createFailureBenchmarkSubscription(b *testing.B) ProxySubscription {
+	b.Helper()
+	item, err := SaveProxySubscription(ProxySubscription{
+		Name: "failure-benchmark", URL: "https://example.com/failure-benchmark",
+		ProxyType: "http", RefreshIntervalMinutes: 60, Enabled: true,
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	return item
 }
 
 func TestFlushHealthPersistsQueuedState(t *testing.T) {
@@ -571,6 +836,223 @@ func TestSubscriptionNodeUpdateFailureRestoresPreviousValue(t *testing.T) {
 	}
 }
 
+func TestSubscriptionNodeUpdateBatchesRollbackTogether(t *testing.T) {
+	setupFailureTestDB(t, "subscription-update-batches.db")
+	subscription := createFailureTestSubscription(t)
+	nodeCount := nodeWriteBatchSize + 1
+	initial := makeFailureTestNodes("subscription-update-batch", nodeCount)
+	if _, err := SyncSubscriptionNodes(subscription.ID, initial); err != nil {
+		t.Fatal(err)
+	}
+	updated := append([]Node(nil), initial...)
+	for index := range updated {
+		updated[index].Type = "https"
+		updated[index].Name = fmt.Sprintf("updated-%d", index)
+	}
+	failingURI := updated[len(updated)-1].RawURI
+	if _, err := db.CurrentDB().Exec(`CREATE TRIGGER fail_second_node_update_batch
+		BEFORE UPDATE OF name ON nodes WHEN OLD.raw_uri = '` + failingURI + `'
+		BEGIN SELECT RAISE(ABORT, 'injected second node update batch failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := SyncSubscriptionNodes(subscription.ID, updated); err == nil {
+		t.Fatal("expected second node update batch to fail")
+	}
+	loaded := LoadNodes()
+	if len(loaded) != nodeCount {
+		t.Fatalf("failed update changed node count: %d", len(loaded))
+	}
+	for index, node := range loaded {
+		if node.Name != initial[index].Name || node.Type != initial[index].Type {
+			t.Fatalf("failed update changed node %d: %#v", index, node)
+		}
+	}
+	var updatedCount int
+	if err := db.CurrentDB().QueryRow(
+		"SELECT COUNT(*) FROM nodes WHERE name LIKE 'updated-%' OR type = 'https'",
+	).Scan(&updatedCount); err != nil {
+		t.Fatal(err)
+	}
+	if updatedCount != 0 {
+		t.Fatalf("failed update persisted %d changed nodes", updatedCount)
+	}
+
+	if _, err := db.CurrentDB().Exec("DROP TRIGGER fail_second_node_update_batch"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SyncSubscriptionNodes(subscription.ID, updated); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CurrentDB().QueryRow(
+		"SELECT COUNT(*) FROM nodes WHERE name LIKE 'updated-%' AND type = 'https'",
+	).Scan(&updatedCount); err != nil {
+		t.Fatal(err)
+	}
+	if updatedCount != nodeCount {
+		t.Fatalf("successful update persisted %d nodes, want %d", updatedCount, nodeCount)
+	}
+}
+
+func TestSubscriptionInsertAndMembershipBatchesRollbackTogether(t *testing.T) {
+	setupFailureTestDB(t, "subscription-insert-membership-batches.db")
+	subscription := createFailureTestSubscription(t)
+	nodeCount := max(nodeWriteBatchSize, membershipWriteBatchSize) + 1
+	proxies := makeFailureTestNodes("subscription-insert-batch", nodeCount)
+	failingURI := proxies[len(proxies)-1].RawURI
+	if _, err := db.CurrentDB().Exec(`CREATE TRIGGER fail_second_membership_insert_batch
+		BEFORE INSERT ON proxy_subscription_nodes WHEN NEW.raw_uri = '` + failingURI + `'
+		BEGIN SELECT RAISE(ABORT, 'injected second membership insert batch failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := SyncSubscriptionNodes(subscription.ID, proxies); err == nil {
+		t.Fatal("expected second membership insert batch to fail")
+	}
+	if loaded := LoadNodes(); len(loaded) != 0 {
+		t.Fatalf("failed insert changed in-memory nodes: %#v", loaded)
+	}
+	assertPersistedNodeAndMembershipCounts(t, subscription.ID, 0, 0, 0)
+
+	if _, err := db.CurrentDB().Exec("DROP TRIGGER fail_second_membership_insert_batch"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SyncSubscriptionNodes(subscription.ID, proxies); err != nil {
+		t.Fatal(err)
+	}
+	assertPersistedNodeAndMembershipCounts(t, subscription.ID, nodeCount, nodeCount, nodeCount)
+}
+
+func TestSubscriptionMembershipDeleteBatchesRollbackTogether(t *testing.T) {
+	setupFailureTestDB(t, "subscription-membership-delete-batches.db")
+	subscription := createFailureTestSubscription(t)
+	nodeCount := nodeMutationBatchSize + 1
+	proxies := makeFailureTestNodes("subscription-delete-batch", nodeCount)
+	if _, err := SyncSubscriptionNodes(subscription.ID, proxies); err != nil {
+		t.Fatal(err)
+	}
+	failingURI := proxies[len(proxies)-1].RawURI
+	if _, err := db.CurrentDB().Exec(`CREATE TRIGGER fail_second_membership_delete_batch
+		BEFORE DELETE ON proxy_subscription_nodes WHEN OLD.raw_uri = '` + failingURI + `'
+		BEGIN SELECT RAISE(ABORT, 'injected second membership delete batch failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := SyncSubscriptionNodes(subscription.ID, nil); err == nil {
+		t.Fatal("expected second membership delete batch to fail")
+	}
+	if loaded := LoadNodes(); len(loaded) != nodeCount {
+		t.Fatalf("failed membership delete changed in-memory node count: %d", len(loaded))
+	}
+	assertPersistedNodeAndMembershipCounts(t, subscription.ID, nodeCount, nodeCount, nodeCount)
+
+	if _, err := db.CurrentDB().Exec("DROP TRIGGER fail_second_membership_delete_batch"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SyncSubscriptionNodes(subscription.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	assertPersistedNodeAndMembershipCounts(t, subscription.ID, 0, 0, 0)
+}
+
+func TestSubscriptionCountBatchesRollbackTogether(t *testing.T) {
+	setupFailureTestDB(t, "subscription-count-batches.db")
+	const staleCount = 7
+	subscriptionCount := nodeMutationBatchSize + 1
+	sourceIDs := make(map[int64]bool, subscriptionCount)
+	database := db.CurrentDB()
+	tx, err := database.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stmt, err := tx.Prepare(`INSERT INTO proxy_subscriptions
+		(name, url, proxy_type, refresh_interval_minutes, enabled, node_count)
+		VALUES (?, ?, 'http', 60, 1, ?)`)
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	var lastSourceID int64
+	for index := range subscriptionCount {
+		result, insertErr := stmt.Exec(
+			fmt.Sprintf("count-batch-%d", index),
+			fmt.Sprintf("https://example.com/count-batch-%d", index),
+			staleCount,
+		)
+		if insertErr != nil {
+			_ = stmt.Close()
+			_ = tx.Rollback()
+			t.Fatal(insertErr)
+		}
+		lastSourceID, err = result.LastInsertId()
+		if err != nil {
+			_ = stmt.Close()
+			_ = tx.Rollback()
+			t.Fatal(err)
+		}
+		sourceIDs[lastSourceID] = true
+	}
+	if err = stmt.Close(); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if err = tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = database.Exec(fmt.Sprintf(`CREATE TRIGGER fail_second_subscription_count_batch
+		BEFORE UPDATE OF node_count ON proxy_subscriptions WHEN OLD.id = %d
+		BEGIN SELECT RAISE(ABORT, 'injected second subscription count batch failure'); END`,
+		lastSourceID)); err != nil {
+		t.Fatal(err)
+	}
+
+	tx, err = database.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = updateSubscriptionCountsTx(tx, sourceIDs); err == nil {
+		_ = tx.Rollback()
+		t.Fatal("expected second subscription count batch to fail")
+	}
+	if rollbackErr := tx.Rollback(); rollbackErr != nil {
+		t.Fatal(rollbackErr)
+	}
+	var staleSubscriptions int
+	if err = database.QueryRow(
+		"SELECT COUNT(*) FROM proxy_subscriptions WHERE node_count = ?",
+		staleCount,
+	).Scan(&staleSubscriptions); err != nil {
+		t.Fatal(err)
+	}
+	if staleSubscriptions != subscriptionCount {
+		t.Fatalf("failed count update left %d stale subscriptions, want %d", staleSubscriptions, subscriptionCount)
+	}
+
+	if _, err = database.Exec("DROP TRIGGER fail_second_subscription_count_batch"); err != nil {
+		t.Fatal(err)
+	}
+	tx, err = database.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = updateSubscriptionCountsTx(tx, sourceIDs); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if err = tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	var updatedSubscriptions int
+	if err = database.QueryRow(
+		"SELECT COUNT(*) FROM proxy_subscriptions WHERE node_count = 0",
+	).Scan(&updatedSubscriptions); err != nil {
+		t.Fatal(err)
+	}
+	if updatedSubscriptions != subscriptionCount {
+		t.Fatalf("successful count update changed %d subscriptions, want %d", updatedSubscriptions, subscriptionCount)
+	}
+}
+
 func TestUnchangedSubscriptionRefreshCommitsMetadataAndRollsBackFailure(t *testing.T) {
 	setupFailureTestDB(t, "unchanged-refresh.db")
 	subscription := createFailureTestSubscription(t)
@@ -726,6 +1208,7 @@ func TestMergeFailureRollsBackMemory(t *testing.T) {
 	orphanURI := "http://orphan.invalid:8302"
 	mu.Lock()
 	healthMap[orphanURI] = &NodeHealth{SuccessCount: 99}
+	healthMayHaveOrphans = true
 	mu.Unlock()
 	failedURI := "http://1.0.0.1:8301"
 	if _, err := db.CurrentDB().Exec(`CREATE TRIGGER fail_node_insert
@@ -857,6 +1340,61 @@ func TestMergeManualizationFailureRollsBackMemory(t *testing.T) {
 	}
 }
 
+func TestMergeManualizationBatchesRollbackTogether(t *testing.T) {
+	setupFailureTestDB(t, "merge-manualization-batches.db")
+	subscription := createFailureTestSubscription(t)
+	nodeCount := nodeMutationBatchSize + 1
+	proxies := makeFailureTestNodes("merge-manualization-batch", nodeCount)
+	if _, err := SyncSubscriptionNodes(subscription.ID, proxies); err != nil {
+		t.Fatal(err)
+	}
+	failingURI := proxies[len(proxies)-1].RawURI
+	if _, err := db.CurrentDB().Exec(`CREATE TRIGGER fail_second_manualization_batch
+		BEFORE UPDATE OF source_id ON nodes WHEN OLD.raw_uri = '` + failingURI + `'
+		BEGIN SELECT RAISE(ABORT, 'injected second manualization batch failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := MergeNodes(proxies); err == nil {
+		t.Fatal("expected second manualization batch to fail")
+	}
+	loaded := LoadNodes()
+	if len(loaded) != nodeCount {
+		t.Fatalf("failed manualization changed node count: %d", len(loaded))
+	}
+	for index, node := range loaded {
+		if node.SourceID != subscription.ID {
+			t.Fatalf("failed manualization changed node %d source to %d", index, node.SourceID)
+		}
+	}
+	var subscriptionOwned int
+	if err := db.CurrentDB().QueryRow(
+		"SELECT COUNT(*) FROM nodes WHERE source_id = ?",
+		subscription.ID,
+	).Scan(&subscriptionOwned); err != nil {
+		t.Fatal(err)
+	}
+	if subscriptionOwned != nodeCount {
+		t.Fatalf("failed manualization persisted %d owned nodes, want %d", subscriptionOwned, nodeCount)
+	}
+
+	if _, err := db.CurrentDB().Exec("DROP TRIGGER fail_second_manualization_batch"); err != nil {
+		t.Fatal(err)
+	}
+	if err := MergeNodes(proxies); err != nil {
+		t.Fatal(err)
+	}
+	var manualCount int
+	if err := db.CurrentDB().QueryRow(
+		"SELECT COUNT(*) FROM nodes WHERE source_id = 0",
+	).Scan(&manualCount); err != nil {
+		t.Fatal(err)
+	}
+	if manualCount != nodeCount {
+		t.Fatalf("successful manualization persisted %d manual nodes, want %d", manualCount, nodeCount)
+	}
+}
+
 func TestSortNodesPersistsChangedPositionsAndRollsBackOnFailure(t *testing.T) {
 	setupFailureTestDB(t, "sort-order.db")
 	firstURI := "http://8.8.8.8:8370"
@@ -883,6 +1421,47 @@ func TestSortNodesPersistsChangedPositionsAndRollsBackOnFailure(t *testing.T) {
 	}
 	SortNodesByLatencyDesc()
 	assertNodeOrder(t, wantOrder)
+}
+
+func TestSortNodesPositionBatchesRollbackTogether(t *testing.T) {
+	setupFailureTestDB(t, "sort-order-batches.db")
+	const nodeCount = nodePositionBatchSize + 2
+	nodeItems := make([]Node, nodeCount)
+	initialOrder := make([]string, nodeCount)
+	reversedOrder := make([]string, nodeCount)
+	for index := range nodeItems {
+		rawURI := fmt.Sprintf("http://sort-batch-%d.invalid:8080", index)
+		nodeItems[index] = Node{
+			Type: "http", Name: fmt.Sprintf("node-%03d", index), RawURI: rawURI,
+		}
+		initialOrder[index] = rawURI
+		reversedOrder[nodeCount-1-index] = rawURI
+	}
+	if err := MergeNodes(nodeItems); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	for index, node := range nodeList {
+		healthMap[node.RawURI] = &NodeHealth{LastTestMs: float64(index + 1)}
+	}
+	mu.Unlock()
+
+	// A descending sort reverses every node. The last original node enters the
+	// first batch, so an original low-index node is guaranteed to reach batch 2.
+	failingURI := nodeItems[1].RawURI
+	if _, err := db.CurrentDB().Exec(`CREATE TRIGGER fail_second_sort_batch
+		BEFORE UPDATE OF sort_order ON nodes WHEN OLD.raw_uri = '` + failingURI + `'
+		BEGIN SELECT RAISE(ABORT, 'injected second sort batch failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	SortNodesByLatencyDesc()
+	assertNodeOrder(t, initialOrder)
+
+	if _, err := db.CurrentDB().Exec("DROP TRIGGER fail_second_sort_batch"); err != nil {
+		t.Fatal(err)
+	}
+	SortNodesByLatencyDesc()
+	assertNodeOrder(t, reversedOrder)
 }
 
 func TestReplaceManualNodesIsAtomicAndPreservesSubscriptionNodes(t *testing.T) {
@@ -1158,6 +1737,123 @@ func TestDedupNodesFailureRollsBackMembershipsAndMemory(t *testing.T) {
 	}
 }
 
+func TestDedupNodesIncrementalPersistenceRollsBackAndCommitsComplexChanges(t *testing.T) {
+	setupFailureTestDB(t, "dedup-incremental-complex.db")
+	firstSubscription := createFailureTestSubscription(t)
+	secondSubscription, err := SaveProxySubscription(ProxySubscription{
+		Name: "dedup-complex-second", URL: "https://example.com/dedup-complex-second",
+		ProxyType: "vless", RefreshIntervalMinutes: 60, Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstURI := "vless://incremental-uuid@example.com:443?security=tls#first"
+	secondURI := "vless://incremental-uuid@example.com:443?security=tls#second"
+	manualURI := "vless://incremental-uuid@example.com:443?security=tls#manual"
+	firstUniqueURI := "http://dedup-complex-first.invalid:8080"
+	secondUniqueURI := "http://dedup-complex-second.invalid:8080"
+	tailURI := "http://dedup-complex-tail.invalid:8080"
+	if _, err = SyncSubscriptionNodes(firstSubscription.ID, []Node{
+		{Type: "vless", Name: "first", RawURI: firstURI},
+		{Type: "http", Name: "first unique", RawURI: firstUniqueURI},
+		{Type: "vless", Name: "second", RawURI: secondURI},
+		{Type: "http", Name: "second unique", RawURI: secondUniqueURI},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = SyncSubscriptionNodes(secondSubscription.ID, []Node{
+		{Type: "vless", Name: "second shared", RawURI: secondURI},
+		{Type: "vless", Name: "manual candidate", RawURI: manualURI},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err = MergeNodes([]Node{
+		{Type: "vless", Name: "manual", RawURI: manualURI},
+		{Type: "http", Name: "tail", RawURI: tailURI},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	initialOrder := []string{
+		firstURI, firstUniqueURI, secondURI, secondUniqueURI, manualURI, tailURI,
+	}
+	assertNodeOrder(t, initialOrder)
+	mu.Lock()
+	for index, node := range nodeList {
+		healthMap[node.RawURI] = &NodeHealth{SuccessCount: index + 1}
+	}
+	rebuildNodeHealthIndexUnsafe()
+	mu.Unlock()
+	if _, err = db.CurrentDB().Exec(`CREATE TRIGGER fail_complex_dedup_delete
+		BEFORE DELETE ON nodes WHEN OLD.raw_uri = '` + secondURI + `'
+		BEGIN SELECT RAISE(ABORT, 'injected complex dedup failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+
+	if removed := DedupNodes(); removed != 0 {
+		t.Fatalf("failed complex DedupNodes() removed=%d, want 0", removed)
+	}
+	assertNodeOrder(t, initialOrder)
+	loaded := LoadNodes()
+	if loaded[0].SourceID != firstSubscription.ID || loaded[4].SourceID != 0 {
+		t.Fatalf("failed complex dedup changed ownership: %#v", loaded)
+	}
+	if health := LoadHealth(); len(health) != len(initialOrder) ||
+		health[secondURI] == nil || health[manualURI] == nil {
+		t.Fatalf("failed complex dedup changed health: %#v", health)
+	}
+	assertSubscriptionRelationCount(t, firstSubscription.ID, 4)
+	assertSubscriptionRelationCount(t, secondSubscription.ID, 2)
+
+	if _, err = db.CurrentDB().Exec("DROP TRIGGER fail_complex_dedup_delete"); err != nil {
+		t.Fatal(err)
+	}
+	if removed := DedupNodes(); removed != 2 {
+		t.Fatalf("complex DedupNodes() removed=%d, want 2", removed)
+	}
+	finalOrder := []string{firstURI, firstUniqueURI, secondUniqueURI, tailURI}
+	assertNodeOrder(t, finalOrder)
+	loaded = LoadNodes()
+	if loaded[0].SourceID != 0 {
+		t.Fatalf("manual duplicate did not preserve manual ownership: %#v", loaded[0])
+	}
+	var persistedSourceID int64
+	if err = db.CurrentDB().QueryRow(
+		"SELECT source_id FROM nodes WHERE raw_uri = ?",
+		firstURI,
+	).Scan(&persistedSourceID); err != nil {
+		t.Fatal(err)
+	}
+	if persistedSourceID != 0 {
+		t.Fatalf("persisted dedup source_id=%d, want 0", persistedSourceID)
+	}
+	for _, expectation := range []struct {
+		subscription ProxySubscription
+		count        int
+	}{
+		{subscription: firstSubscription, count: 3},
+		{subscription: secondSubscription, count: 1},
+	} {
+		subscription := expectation.subscription
+		assertSubscriptionRelationCount(t, subscription.ID, expectation.count)
+		var keptRelation int
+		if err = db.CurrentDB().QueryRow(
+			`SELECT COUNT(*) FROM proxy_subscription_nodes
+			 WHERE subscription_id = ? AND raw_uri = ?`,
+			subscription.ID,
+			firstURI,
+		).Scan(&keptRelation); err != nil {
+			t.Fatal(err)
+		}
+		if keptRelation != 1 {
+			t.Fatalf("subscription %d missing migrated relation", subscription.ID)
+		}
+	}
+	if health := LoadHealth(); len(health) != len(finalOrder) ||
+		health[secondURI] != nil || health[manualURI] != nil {
+		t.Fatalf("successful complex dedup retained removed health: %#v", health)
+	}
+}
+
 func TestDeletingSubscriptionNodesUpdatesPersistedNodeCount(t *testing.T) {
 	setupFailureTestDB(t, "node-count.db")
 	subscription := createFailureTestSubscription(t)
@@ -1388,6 +2084,118 @@ func TestBatchDeleteSparsePositionsRollsBackAndRepairsIndex(t *testing.T) {
 	}
 }
 
+func TestBatchDeleteNodesRollsBackAcrossChunks(t *testing.T) {
+	setupFailureTestDB(t, "batch-delete-chunks.db")
+	nodeCount := nodeMutationBatchSize + 1
+	proxies := make([]Node, nodeCount)
+	proxyURIs := make([]string, nodeCount)
+	for index := range proxies {
+		uri := fmt.Sprintf("http://batch-delete-chunk-%d.invalid:8080", index)
+		proxies[index] = Node{Type: "http", Name: fmt.Sprintf("node-%d", index), RawURI: uri}
+		proxyURIs[index] = uri
+	}
+	if err := MergeNodes(proxies); err != nil {
+		t.Fatal(err)
+	}
+	lastURI := proxyURIs[len(proxyURIs)-1]
+	if _, err := db.CurrentDB().Exec(`CREATE TRIGGER fail_chunked_batch_delete
+		BEFORE DELETE ON nodes WHEN OLD.raw_uri = '` + lastURI + `'
+		BEGIN SELECT RAISE(ABORT, 'injected chunked delete failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := BatchDeleteNodes(proxyURIs); err == nil {
+		t.Fatal("expected failure in the second delete chunk")
+	}
+	assertNodeOrder(t, proxyURIs)
+	var persisted int
+	if err := db.CurrentDB().QueryRow("SELECT COUNT(*) FROM nodes").Scan(&persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted != nodeCount {
+		t.Fatalf("chunked rollback retained %d nodes, want %d", persisted, nodeCount)
+	}
+
+	if _, err := db.CurrentDB().Exec("DROP TRIGGER fail_chunked_batch_delete"); err != nil {
+		t.Fatal(err)
+	}
+	targets := append(append([]string(nil), proxyURIs...), lastURI, "missing-uri")
+	if err := BatchDeleteNodes(targets); err != nil {
+		t.Fatal(err)
+	}
+	if loaded := LoadNodes(); len(loaded) != 0 {
+		t.Fatalf("chunked delete retained nodes: %#v", loaded)
+	}
+	if err := db.CurrentDB().QueryRow("SELECT COUNT(*) FROM nodes").Scan(&persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted != 0 {
+		t.Fatalf("chunked delete retained %d database rows", persisted)
+	}
+}
+
+func TestBatchUpdateNodesDisabledPersistsAcrossChunks(t *testing.T) {
+	setupFailureTestDB(t, "batch-update-chunks.db")
+	const extraNodes = 37
+	nodeCount := nodeMutationBatchSize + extraNodes
+	proxies := make([]Node, nodeCount)
+	proxyURIs := make([]string, nodeCount)
+	for index := range proxies {
+		uri := fmt.Sprintf("http://batch-update-chunk-%d.invalid:8080", index)
+		proxies[index] = Node{Type: "http", Name: fmt.Sprintf("node-%d", index), RawURI: uri}
+		proxyURIs[index] = uri
+	}
+	if err := MergeNodes(proxies); err != nil {
+		t.Fatal(err)
+	}
+	if err := BatchUpdateNodesDisabled(proxyURIs, true); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, node := range LoadNodes() {
+		if !node.Disabled {
+			t.Fatalf("node was not disabled in memory: %s", node.RawURI)
+		}
+	}
+	var persisted int
+	if err := db.CurrentDB().QueryRow("SELECT COUNT(*) FROM nodes WHERE disabled = 1").Scan(&persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted != nodeCount {
+		t.Fatalf("persisted disabled nodes = %d, want %d", persisted, nodeCount)
+	}
+}
+
+func TestBatchUpdateNodesDisabledRollsBackOnDatabaseMismatch(t *testing.T) {
+	setupFailureTestDB(t, "batch-update-mismatch.db")
+	proxies := []Node{
+		{Type: "http", Name: "one", RawURI: "http://batch-mismatch-1.invalid:8080"},
+		{Type: "http", Name: "two", RawURI: "http://batch-mismatch-2.invalid:8080"},
+		{Type: "http", Name: "three", RawURI: "http://batch-mismatch-3.invalid:8080"},
+	}
+	if err := MergeNodes(proxies); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CurrentDB().Exec("DELETE FROM nodes WHERE raw_uri = ?", proxies[1].RawURI); err != nil {
+		t.Fatal(err)
+	}
+	proxyURIs := []string{proxies[0].RawURI, proxies[1].RawURI, proxies[2].RawURI}
+	if err := BatchUpdateNodesDisabled(proxyURIs, true); err == nil {
+		t.Fatal("expected database row-count mismatch")
+	}
+	for _, node := range LoadNodes() {
+		if node.Disabled {
+			t.Fatalf("failed batch update changed memory: %#v", node)
+		}
+	}
+	var persisted int
+	if err := db.CurrentDB().QueryRow("SELECT COUNT(*) FROM nodes WHERE disabled = 1").Scan(&persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted != 0 {
+		t.Fatalf("failed batch update committed %d rows", persisted)
+	}
+}
+
 func TestBatchMutationFailuresReturnErrorsAndRollbackMemory(t *testing.T) {
 	setupFailureTestDB(t, "batch-rollback.db")
 	subscription := createFailureTestSubscription(t)
@@ -1521,6 +2329,81 @@ func assertNodeOrder(t *testing.T, want []string) {
 		if persistedURI != rawURI {
 			t.Fatalf("persisted order[%d]=%q, want %q", index, persistedURI, rawURI)
 		}
+	}
+}
+
+func makeFailureTestNodes(prefix string, count int) []Node {
+	nodes := make([]Node, count)
+	for index := range nodes {
+		nodes[index] = Node{
+			Type: "http", Name: fmt.Sprintf("node-%d", index),
+			RawURI: fmt.Sprintf("http://%s-%d.invalid:8080", prefix, index),
+		}
+	}
+	return nodes
+}
+
+func assertPersistedNodeAndMembershipCounts(
+	t *testing.T,
+	sourceID int64,
+	wantNodes int,
+	wantMemberships int,
+	wantSubscriptionCount int,
+) {
+	t.Helper()
+	var nodeCount, membershipCount, subscriptionCount int
+	if err := db.CurrentDB().QueryRow("SELECT COUNT(*) FROM nodes").Scan(&nodeCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CurrentDB().QueryRow(
+		"SELECT COUNT(*) FROM proxy_subscription_nodes WHERE subscription_id = ?",
+		sourceID,
+	).Scan(&membershipCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CurrentDB().QueryRow(
+		"SELECT node_count FROM proxy_subscriptions WHERE id = ?",
+		sourceID,
+	).Scan(&subscriptionCount); err != nil {
+		t.Fatal(err)
+	}
+	if nodeCount != wantNodes || membershipCount != wantMemberships ||
+		subscriptionCount != wantSubscriptionCount {
+		t.Fatalf(
+			"persisted counts: nodes=%d memberships=%d subscription=%d, want %d/%d/%d",
+			nodeCount,
+			membershipCount,
+			subscriptionCount,
+			wantNodes,
+			wantMemberships,
+			wantSubscriptionCount,
+		)
+	}
+}
+
+func assertSubscriptionRelationCount(t *testing.T, sourceID int64, want int) {
+	t.Helper()
+	var relationCount, nodeCount int
+	if err := db.CurrentDB().QueryRow(
+		"SELECT COUNT(*) FROM proxy_subscription_nodes WHERE subscription_id = ?",
+		sourceID,
+	).Scan(&relationCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CurrentDB().QueryRow(
+		"SELECT node_count FROM proxy_subscriptions WHERE id = ?",
+		sourceID,
+	).Scan(&nodeCount); err != nil {
+		t.Fatal(err)
+	}
+	if relationCount != want || nodeCount != want {
+		t.Fatalf(
+			"subscription %d counts: relations=%d node_count=%d, want %d",
+			sourceID,
+			relationCount,
+			nodeCount,
+			want,
+		)
 	}
 }
 

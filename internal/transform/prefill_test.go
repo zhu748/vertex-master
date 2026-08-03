@@ -217,9 +217,9 @@ func TestGemini36CompactTrailingToolCallIsNotPrefill(t *testing.T) {
 		config.StaticProvider(config.DefaultConfig()),
 	)
 	outbound := vars["contents"].([]any)
-	last := outbound[len(outbound)-1].(map[string]any)
-	if last["role"] != "model" {
-		t.Fatalf("outbound trailing tool call role=%v, want model", last["role"])
+	last, ok := outbound[len(outbound)-1].(*canonicalFunctionCallContent)
+	if !ok || last.Role != "model" {
+		t.Fatalf("outbound trailing tool call=%#v, want compact model content", outbound[len(outbound)-1])
 	}
 }
 

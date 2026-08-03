@@ -4,7 +4,7 @@ async function loadOverview() {
     API.keys.list().catch(() => ({keys:[]})),
     API.models.get().catch(() => ({models:[]})),
     API.nodes.list({ page: 1, page_size: 1 }).catch(() => ({nodes:[]})),
-    API.stats.get().catch(() => ({token_count:{}})),
+    API.stats.get().catch(() => ({token_count:{}, requests:{}})),
   ]);
   const keys = (keysD.keys || []).length;
   const models = (modelsD.models || []).length;
@@ -14,13 +14,21 @@ async function loadOverview() {
   const stickySub = `近期成功 ${spAvail} / 冷却 ${poolStats.cooling || 0}`;
   const tokenStats = statsD.token_count || {};
   const tokenSub = `命中 ${tokenStats.cache_hits || 0} · 共享 ${tokenStats.shared_waits || 0} · 上游 ${tokenStats.upstream_queries || 0}`;
+  const requestStats = statsD.requests || {};
+  const requestStatus = requestStats.status || {};
+  const requestSub = `活跃 ${requestStats.active || 0} · 错误 ${requestStats.errors || 0} · 5xx ${requestStatus.server_error || 0}`;
+  const averageLatency = Number(requestStats.average_latency_ms || 0);
+  const maximumLatency = Number(requestStats.maximum_latency_ms || 0);
+  const latencySub = `最大 ${maximumLatency.toFixed(1)} ms · panic ${requestStats.panics || 0}`;
   $('#ovCards').innerHTML =
     card('服务状态', '运行中', 'green', 'OpenAI / Gemini 兼容') +
     card('API 密钥', keys, 'gold') +
     card('模型', models, 'blue') +
     card('代理节点', nodes, '') +
     card('健康代理', poolStats.healthy || 0, 'gold', stickySub) +
-    card('Token 缓存', tokenStats.cache_entries || 0, 'blue', tokenSub);
+    card('Token 缓存', tokenStats.cache_entries || 0, 'blue', tokenSub) +
+    card('API 请求', requestStats.total || 0, 'green', requestSub) +
+    card('平均延迟', `${averageLatency.toFixed(1)} ms`, 'blue', latencySub);
 }
 
 registerActions({ loadOverview: function () { loadOverview(); } });

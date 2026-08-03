@@ -21,6 +21,8 @@ var testProgressTimer = null;
 var cachedProxySubscriptions = [];
 var nodesLoadSequence = 0;
 var proxySubscriptionsLoadSequence = 0;
+var proxySubscriptionsLoaded = false;
+var proxySubscriptionsLoadPromise = null;
 var recentProxyTimer = null;
 var recentProxyURI = '';
 
@@ -301,19 +303,29 @@ async function selectAllNodesAcrossPages() {
   }
 }
 
-async function loadNodes() {
-  var loadSequence = ++nodesLoadSequence;
+async function refreshNodeTestProgress(loadSequence) {
   try {
-    const sd = await API.settings.get();
+    const prog = await API.nodes.testProgress();
     if (loadSequence !== nodesLoadSequence) return;
-    if (typeof curSettings !== 'undefined') {
-      curSettings = sd.settings || sd;
-    }
-    const gpEl = document.getElementById('globalProxy');
-    if (gpEl && (sd.settings || sd).proxy_url !== undefined) {
-      gpEl.value = (sd.settings || sd).proxy_url;
+    if (prog && prog.running) {
+      showTestProgressUI(prog);
+      startTestProgressPolling(true);
+    } else if (!testProgressTimer) {
+      const progressEl = document.getElementById('testProgress');
+      if (progressEl) progressEl.style.display = 'none';
+      setActionBusy(document.getElementById('batchTestStartBtn'), false);
+      currentTestPaused = false;
     }
   } catch (e) { }
+}
+
+async function loadNodes(options) {
+  options = options || {};
+  var loadSequence = ++nodesLoadSequence;
+  var progressRequest = testProgressTimer
+    ? Promise.resolve()
+    : refreshNodeTestProgress(loadSequence);
+  var subscriptionsRequest = loadProxySubscriptions(!options.refreshSubscriptions);
 
   let d;
   try {
@@ -329,6 +341,10 @@ async function loadNodes() {
   }
   if (loadSequence !== nodesLoadSequence) return;
   const nodes = d.nodes || [];
+  curSettings.active_node_uri = d.active_node_uri || '';
+  curSettings.proxy_url = d.proxy_url || '';
+  const gpEl = document.getElementById('globalProxy');
+  if (gpEl) gpEl.value = curSettings.proxy_url;
   renderRecentProxy(d.recent_proxy, d.recent_proxy_history);
   startRecentProxyPolling();
   cachedNodesList = nodes;
@@ -336,20 +352,6 @@ async function loadNodes() {
   filteredNodeCount = Number(d.total) || 0;
   curNodePage = Number(d.page) || 1;
   totalNodePages = Number(d.total_pages) || 1;
-
-  try {
-    const prog = await API.nodes.testProgress();
-    if (prog && prog.running) {
-      showTestProgressUI(prog);
-      startTestProgressPolling();
-    } else if (!testProgressTimer) {
-      const progressEl = document.getElementById('testProgress');
-      if (progressEl) progressEl.style.display = 'none';
-      setActionBusy(document.getElementById('batchTestStartBtn'), false);
-      currentTestPaused = false;
-    }
-  } catch (e) { }
-  if (loadSequence !== nodesLoadSequence) return;
 
   const enabledCount = Number(d.enabled_count) || 0;
   const disabledCount = Number(d.disabled_count) || 0;
@@ -582,7 +584,7 @@ async function loadNodes() {
   if (btnLast) btnLast.disabled = curNodePage >= totalNodePages;
 
   updateSelectHeaderAndBanner();
-  await loadProxySubscriptions();
+  await Promise.all([progressRequest, subscriptionsRequest]);
 }
 
 async function addStandardProxy() {
@@ -612,7 +614,17 @@ async function addStandardProxy() {
   }
 }
 
-async function loadProxySubscriptions() {
+function loadProxySubscriptions(useCache) {
+  if (useCache && proxySubscriptionsLoaded) return Promise.resolve();
+  if (useCache && proxySubscriptionsLoadPromise) return proxySubscriptionsLoadPromise;
+  var request = fetchProxySubscriptions();
+  proxySubscriptionsLoadPromise = request;
+  return request.finally(function () {
+    if (proxySubscriptionsLoadPromise === request) proxySubscriptionsLoadPromise = null;
+  });
+}
+
+async function fetchProxySubscriptions() {
   var tbody = document.getElementById('proxySubsBody');
   if (!tbody) return;
   var loadSequence = ++proxySubscriptionsLoadSequence;
@@ -620,6 +632,7 @@ async function loadProxySubscriptions() {
     var data = await API.subscriptions.list();
     if (loadSequence !== proxySubscriptionsLoadSequence) return;
     cachedProxySubscriptions = data.subscriptions || [];
+    proxySubscriptionsLoaded = true;
     tbody.textContent = '';
     if (!cachedProxySubscriptions.length) {
       var emptyRow = document.createElement('tr');
@@ -710,6 +723,7 @@ async function loadProxySubscriptions() {
       tbody.appendChild(tr);
     });
   } catch (e) {
+    proxySubscriptionsLoaded = false;
     tbody.textContent = '';
     var row = document.createElement('tr');
     var cell = document.createElement('td');
@@ -742,7 +756,7 @@ async function saveProxySubscription() {
       refresh_now: enabled
     });
     resetProxySubscriptionForm();
-    await loadNodes();
+    await loadNodes({ refreshSubscriptions: true });
     if (result.refresh_ok === false) {
       toast('订阅已保存，但本次拉取失败：' + (result.refresh_error || '未知错误'));
     } else if (!enabled) {
@@ -821,7 +835,7 @@ async function refreshProxySubscription(id, button) {
   toast('正在拉取代理列表...');
   try {
     var result = await API.subscriptions.refresh(id);
-    await loadNodes();
+    await loadNodes({ refreshSubscriptions: true });
     toast('刷新成功，代理池现有 ' + (result.count || 0) + ' 个该订阅节点');
   } catch (e) {
     await loadProxySubscriptions();
@@ -838,7 +852,7 @@ async function deleteProxySubscription(id, button) {
   try {
     await API.subscriptions.del(id);
     resetProxySubscriptionForm();
-    await loadNodes();
+    await loadNodes({ refreshSubscriptions: true });
     toast('订阅及其节点已删除');
   } catch (e) {
     toast('删除失败: ' + e.message);
@@ -1002,14 +1016,14 @@ async function pollTestProgress() {
   } catch (e) { }
 }
 
-function startTestProgressPolling() {
+function startTestProgressPolling(skipImmediate) {
   if (testProgressTimer) return;
   testProgressTimer = setInterval(pollTestProgress, 1000);
-  pollTestProgress();
+  if (!skipImmediate) pollTestProgress();
 }
 
-async function dedupNodes() { await API.nodes.dedup(); loadNodes(); toast('去重完成'); }
-async function deleteDisabledNodes() { await API.nodes.deleteDisabled(); loadNodes(); toast('清理完成'); }
+async function dedupNodes() { await API.nodes.dedup(); await loadNodes({ refreshSubscriptions: true }); toast('去重完成'); }
+async function deleteDisabledNodes() { await API.nodes.deleteDisabled(); await loadNodes({ refreshSubscriptions: true }); toast('清理完成'); }
 async function sortNodesByLatency() { await API.nodes.sort(false); await loadNodes(); toast('已按延迟顺序重排节点'); }
 async function sortNodesByLatencyDesc() { await API.nodes.sort(true); await loadNodes(); toast('已按延迟降序重排节点'); }
 
@@ -1071,7 +1085,6 @@ async function useNode(uri, button) {
   setActionBusy(button, true, '锁定中...');
   try {
     await API.useNode(uri);
-    await loadSettings();
     await loadNodes();
     toast('已锁定使用该节点，并关闭并发池');
   } catch (e) {
@@ -1086,7 +1099,6 @@ async function unuseNode(uri, button) {
   setActionBusy(button, true, '取消中...');
   try {
     await API.useNode('');
-    await loadSettings();
     await loadNodes();
     toast('已取消锁定，并恢复并发池');
   } catch (e) {
@@ -1101,7 +1113,7 @@ async function delNode(uri, button) {
   setActionBusy(button, true, '删除中...');
   try {
     await API.nodes.delete(uri);
-    await loadNodes();
+    await loadNodes({ refreshSubscriptions: true });
     toast('已删除');
   } catch (e) {
     toast('删除失败: ' + e.message);
@@ -1166,7 +1178,7 @@ async function batchDeleteSelectedNodes() {
   try {
     await API.nodes.batchDelete(uris);
     window.selectedNodeURIs.clear();
-    await loadNodes();
+    await loadNodes({ refreshSubscriptions: true });
     toast('已成功删除 ' + uris.length + ' 个节点');
   } catch (e) { toast('操作失败: ' + e.message); }
 }
@@ -1213,4 +1225,9 @@ function importJsonNodes(replace) {
   reader.readAsText(file);
 }
 
-async function saveGlobalProxy() { await API.settings.put({ proxy_url: $('#globalProxy').value }); loadSettings(); toast('全局代理已保存'); }
+async function saveGlobalProxy() {
+  var proxyURL = $('#globalProxy').value;
+  await API.settings.put({ proxy_url: proxyURL });
+  curSettings.proxy_url = proxyURL;
+  toast('全局代理已保存');
+}

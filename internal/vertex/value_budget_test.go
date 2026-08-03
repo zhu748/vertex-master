@@ -108,11 +108,11 @@ func TestCompactContentsMatchMapBudgetAndTokenCacheKey(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, mapPayload, err := transform.ConvertChatRequest(test.body, cfg)
+			mapModel, mapPayload, err := transform.ConvertChatRequest(test.body, cfg)
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, compactPayload, err := transform.DefaultRequestConverter().Convert(test.body, cfg)
+			compactModel, compactPayload, err := transform.DefaultRequestConverter().Convert(test.body, cfg)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -160,6 +160,57 @@ func TestCompactContentsMatchMapBudgetAndTokenCacheKey(t *testing.T) {
 			}
 			if string(compactWire) != string(mapWire) {
 				t.Fatalf("compact CountTokens payload changed wire JSON:\ncompact=%s\nmap=%s",
+					compactWire,
+					mapWire,
+				)
+			}
+
+			mapVariables := transform.BuildVertexVariables(mapModel, mapPayload, cfg)
+			compactVariables := transform.BuildVertexVariables(
+				compactModel,
+				compactPayload,
+				cfg,
+			)
+			mapRemaining = 1 << 20
+			compactRemaining = mapRemaining
+			if !valueFitsBudget(mapVariables, &mapRemaining) ||
+				!valueFitsBudget(compactVariables, &compactRemaining) {
+				t.Fatal("equivalent outbound variables should fit the same budget")
+			}
+			if compactRemaining != mapRemaining {
+				t.Fatalf(
+					"outbound remaining budget: compact=%d map=%d",
+					compactRemaining,
+					mapRemaining,
+				)
+			}
+			mapContents = mapVariables["contents"].([]any)
+			compactContents = compactVariables["contents"].([]any)
+			mapKey, mapOK = makeTokenCountCacheKey("gemini-3.1-flash", mapContents)
+			compactKey, compactOK = makeTokenCountCacheKey(
+				"gemini-3.1-flash",
+				compactContents,
+			)
+			if !mapOK || !compactOK || compactKey != mapKey {
+				t.Fatalf(
+					"outbound cache key mismatch: compact_ok=%v map_ok=%v compact=%x map=%x",
+					compactOK,
+					mapOK,
+					compactKey,
+					mapKey,
+				)
+			}
+			mapWire, err = json.Marshal(mapVariables)
+			if err != nil {
+				t.Fatal(err)
+			}
+			compactWire, err = json.Marshal(compactVariables)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(compactWire) != string(mapWire) {
+				t.Fatalf(
+					"compact outbound variables changed wire JSON:\ncompact=%s\nmap=%s",
 					compactWire,
 					mapWire,
 				)

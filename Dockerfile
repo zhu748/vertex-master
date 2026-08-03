@@ -15,8 +15,7 @@ COPY internal/ ./internal/
 
 RUN CGO_ENABLED=0 go build -buildvcs=false -trimpath \
     -ldflags="-s -w -X main.version=${VPROXY_VERSION} -X main.buildCommit=${VPROXY_BUILD_COMMIT} -X main.buildTime=${VPROXY_BUILD_TIME}" \
-    -o vproxy ./cmd/vproxy \
-    && go clean -cache -modcache -testcache
+    -o vproxy ./cmd/vproxy
 
 FROM alpine:3.24
 

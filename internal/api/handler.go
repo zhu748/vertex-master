@@ -16,9 +16,10 @@ import (
 )
 
 type handler struct {
-	vc   *vertex.VertexAIClient
-	keys *APIKeyManager
-	cfg  config.ConfigProvider
+	vc       *vertex.VertexAIClient
+	keys     *APIKeyManager
+	cfg      config.ConfigProvider
+	requests *requestMetrics
 }
 
 func isRequestBodyTooLarge(err error) bool {

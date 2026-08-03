@@ -1,6 +1,6 @@
 var _testTimer = null;
 function showApp() { const lg = $('#login'), app = $('#app'); if (!lg.classList.contains('hidden')) { lg.classList.add('out'); setTimeout(() => lg.classList.add('hidden'), 420); } app.classList.remove('hidden'); requestAnimationFrame(() => app.classList.add('in')); go('overview', true); }
-function showLogin() { const lg = $('#login'), app = $('#app'); app.classList.remove('in'); setTimeout(() => app.classList.add('hidden'), 360); lg.classList.remove('hidden', 'out'); }
+function showLogin() { if (typeof leaveLogsPage === 'function') leaveLogsPage(); const lg = $('#login'), app = $('#app'); app.classList.remove('in'); setTimeout(() => app.classList.add('hidden'), 360); lg.classList.remove('hidden', 'out'); }
 async function login() { $('#loginErr').textContent = ''; try { await API.login($('#pw').value); showApp(); } catch (e) { $('#loginErr').textContent = '密码错误或登录失败'; } }
 async function logout() { try { await API.logout(); } catch (e) {} showLogin(); }
 $('#pw').addEventListener('keydown', (e) => { if (e.key === 'Enter') login(); });
@@ -29,6 +29,7 @@ function go(page, instant) {
     if (_testTimer) { clearInterval(_testTimer); _testTimer = null; }
     if (typeof stopRecentProxyPolling === 'function') stopRecentProxyPolling();
   }
+  if (curPage === 'logs' && page !== 'logs' && typeof leaveLogsPage === 'function') leaveLogsPage();
   curPage = page;
   const enter = () => {
     next.classList.add('entering');

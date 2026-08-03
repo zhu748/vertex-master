@@ -56,9 +56,7 @@ func adminClientIP(r *http.Request) string {
 		remote = host
 	}
 
-	trustForwarded := strings.TrimSpace(os.Getenv("RENDER")) != "" ||
-		strings.EqualFold(strings.TrimSpace(os.Getenv("VPROXY_TRUST_PROXY_HEADERS")), "true")
-	if !trustForwarded {
+	if !trustProxyHeaders() {
 		return remote
 	}
 	// 取 X-Forwarded-For 最右侧条目：该段由我们信任的前置代理写入，客户端无法伪造。
@@ -75,6 +73,11 @@ func adminClientIP(r *http.Request) string {
 		}
 	}
 	return remote
+}
+
+func trustProxyHeaders() bool {
+	return strings.TrimSpace(os.Getenv("RENDER")) != "" ||
+		strings.EqualFold(strings.TrimSpace(os.Getenv("VPROXY_TRUST_PROXY_HEADERS")), "true")
 }
 
 func adminLoginRetryAfter(clientIP string, now time.Time) int {
@@ -245,6 +248,9 @@ func requireAdmin(r *http.Request) bool {
 func requestIsHTTPS(r *http.Request) bool {
 	if r.TLS != nil {
 		return true
+	}
+	if !trustProxyHeaders() {
+		return false
 	}
 	forwardedProto := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0])
 	return strings.EqualFold(forwardedProto, "https")

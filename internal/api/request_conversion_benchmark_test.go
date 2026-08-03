@@ -58,7 +58,7 @@ func BenchmarkAnthropicRequestConversion(b *testing.B) {
 	}
 	body := map[string]any{
 		"model":      "claude-sonnet-4-5",
-		"max_tokens": 1024,
+		"max_tokens": float64(1024),
 		"system":     []any{map[string]any{"type": "text", "text": "system"}},
 		"messages":   messages,
 	}
@@ -70,6 +70,74 @@ func BenchmarkAnthropicRequestConversion(b *testing.B) {
 			b.Fatal("unexpected Anthropic request conversion")
 		}
 		benchmarkRequestConversionResult = converted
+	}
+}
+
+func BenchmarkAnthropicToolHistoryRequestPipeline(b *testing.B) {
+	body := anthropicToolHistoryRequestBenchmarkBody()
+	cfg := config.StaticProvider(config.DefaultConfig())
+	converter := transform.DefaultRequestConverter()
+	const modelName = "gemini-3.1-flash"
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		converted, err := anthropicToChatRequest(body)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if _, err = applyClaudePromptPolicy(
+			converted,
+			cfg,
+			"claude-sonnet-4-5",
+			modelName,
+		); err != nil {
+			b.Fatal(err)
+		}
+		converted["model"] = modelName
+		model, payload, err := converter.Convert(converted, cfg)
+		if err != nil {
+			b.Fatal(err)
+		}
+		benchmarkRequestConversionResult = transform.BuildVertexVariables(model, payload, cfg)
+	}
+}
+
+func anthropicToolHistoryRequestBenchmarkBody() map[string]any {
+	messages := make([]any, 0, 24)
+	for index := range 8 {
+		callID := "call_" + string(rune('a'+index))
+		messages = append(messages,
+			map[string]any{
+				"role": "user",
+				"content": []any{map[string]any{
+					"type": "text", "text": "question",
+				}},
+			},
+			map[string]any{
+				"role": "assistant",
+				"content": []any{map[string]any{
+					"type": "tool_use", "id": callID, "name": "lookup",
+					"input": map[string]any{"q": index},
+				}},
+			},
+			map[string]any{
+				"role": "user",
+				"content": []any{map[string]any{
+					"type": "tool_result", "tool_use_id": callID,
+					"content": map[string]any{"value": index},
+				}},
+			},
+		)
+	}
+	return map[string]any{
+		"model":      "claude-sonnet-4-5",
+		"max_tokens": float64(1024),
+		"system":     "Be concise.",
+		"messages":   messages,
+		"tools": []any{map[string]any{
+			"name": "lookup", "description": "Lookup a value",
+			"input_schema": map[string]any{"type": "object"},
+		}},
 	}
 }
 

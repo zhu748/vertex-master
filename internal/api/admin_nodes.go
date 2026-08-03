@@ -90,6 +90,7 @@ func (adm *AdminHandler) adminGetNodes(w http.ResponseWriter, r *http.Request) {
 	// Keep fields in the same lexicographic order used by encoding/json for
 	// string-keyed maps so the response remains byte-for-byte compatible.
 	writeJSON(w, http.StatusOK, adminNodesPageResponse{
+		ActiveNodeURI:              adm.cfg.ActiveNodeURI(),
 		DisabledCount:              poolStats.Disabled,
 		EnabledCount:               poolStats.Enabled,
 		Health:                     pageHealth,
@@ -100,6 +101,7 @@ func (adm *AdminHandler) adminGetNodes(w http.ResponseWriter, r *http.Request) {
 		Page:                       snapshot.Page,
 		PageSize:                   snapshot.PageSize,
 		PoolStats:                  poolStats,
+		ProxyURL:                   adm.cfg.ProxyURL(),
 		RecentProxy:                nodes.GetRecentProxyStatus(),
 		RecentProxyHistory:         nodes.GetRecentProxyHistory(10),
 		StickyNodePriority:         adm.cfg.StickyNodePriority(),
@@ -172,6 +174,7 @@ func containsFoldedASCII(value, lowerQuery string) bool {
 }
 
 type adminNodesPageResponse struct {
+	ActiveNodeURI              string                       `json:"active_node_uri"`
 	DisabledCount              int                          `json:"disabled_count"`
 	EnabledCount               int                          `json:"enabled_count"`
 	Health                     map[string]*nodes.NodeHealth `json:"health"`
@@ -182,6 +185,7 @@ type adminNodesPageResponse struct {
 	Page                       int                          `json:"page"`
 	PageSize                   int                          `json:"page_size"`
 	PoolStats                  nodes.NodePoolStats          `json:"pool_stats"`
+	ProxyURL                   string                       `json:"proxy_url"`
 	RecentProxy                nodes.RecentProxyStatus      `json:"recent_proxy"`
 	RecentProxyHistory         []nodes.RecentProxyEvent     `json:"recent_proxy_history"`
 	StickyNodePriority         bool                         `json:"sticky_node_priority"`

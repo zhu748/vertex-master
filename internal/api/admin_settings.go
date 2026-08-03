@@ -539,7 +539,7 @@ func validateAdminProxySetting(key string, value int) error {
 }
 
 func (adm *AdminHandler) adminGetStats(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, metricsBody(adm.vc))
+	writeJSON(w, http.StatusOK, metricsBody(adm.vc, adm.requests))
 }
 
 func (adm *AdminHandler) adminResetStats(w http.ResponseWriter, _ *http.Request) {

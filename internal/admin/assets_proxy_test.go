@@ -42,6 +42,93 @@ func TestProxyBatchControlsAreEmbedded(t *testing.T) {
 	}
 }
 
+func TestNodePageLoadsIndependentDataWithoutRequestWaterfall(t *testing.T) {
+	scriptBytes, err := Assets.ReadFile("assets/page-nodes.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(scriptBytes)
+	loadStart := strings.Index(script, "async function loadNodes(options)")
+	loadEnd := strings.Index(script, "async function addStandardProxy()")
+	if loadStart < 0 || loadEnd <= loadStart {
+		t.Fatal("loadNodes function boundaries are missing from page-nodes.js")
+	}
+	loadBody := script[loadStart:loadEnd]
+	for _, token := range []string{
+		"refreshNodeTestProgress(loadSequence)",
+		"loadProxySubscriptions(!options.refreshSubscriptions)",
+		"d = await API.nodes.list(",
+		"curSettings.active_node_uri = d.active_node_uri",
+		"curSettings.proxy_url = d.proxy_url",
+	} {
+		if !strings.Contains(loadBody, token) {
+			t.Errorf("concurrent node loader token %q is missing", token)
+		}
+	}
+	if strings.Contains(script, "API.settings.get()") ||
+		strings.Contains(loadBody, "await API.nodes.testProgress()") {
+		t.Fatal("node page reintroduced a settings request or sequential progress request")
+	}
+	renderIndex := strings.Index(loadBody, "tbody.appendChild(frag)")
+	auxiliaryWaitIndex := strings.LastIndex(
+		loadBody,
+		"await Promise.all([progressRequest, subscriptionsRequest])",
+	)
+	if renderIndex < 0 || auxiliaryWaitIndex < 0 || renderIndex >= auxiliaryWaitIndex {
+		t.Fatal("node table rendering must finish before waiting for auxiliary data")
+	}
+
+	for _, token := range []string{
+		"if (useCache && proxySubscriptionsLoaded) return Promise.resolve()",
+		"loadNodes({ refreshSubscriptions: true })",
+	} {
+		if !strings.Contains(script, token) {
+			t.Errorf("node page cache/refresh token %q is missing", token)
+		}
+	}
+	functionBody := func(signature string) string {
+		t.Helper()
+		start := strings.Index(script, signature)
+		if start < 0 {
+			t.Fatalf("node page function %q is missing", signature)
+		}
+		endOffset := strings.Index(script[start:], "\n}\n")
+		if endOffset < 0 {
+			t.Fatalf("node page function %q has no closing boundary", signature)
+		}
+		return script[start : start+endOffset]
+	}
+	for _, signature := range []string{
+		"async function delNode(uri, button)",
+		"async function batchDeleteSelectedNodes()",
+		"async function saveProxySubscription()",
+		"async function refreshProxySubscription(id, button)",
+		"async function deleteProxySubscription(id, button)",
+	} {
+		if !strings.Contains(functionBody(signature), "refreshSubscriptions: true") {
+			t.Errorf("%s must refresh subscription counts", signature)
+		}
+	}
+	for _, signature := range []string{
+		"async function testSingleNode(uri, button)",
+		"async function enableNode(uri, button)",
+		"async function useNode(uri, button)",
+		"async function unuseNode(uri, button)",
+	} {
+		if strings.Contains(functionBody(signature), "refreshSubscriptions: true") {
+			t.Errorf("%s must reuse the subscription cache", signature)
+		}
+	}
+	for _, token := range []string{
+		"async function dedupNodes() { await API.nodes.dedup(); await loadNodes({ refreshSubscriptions: true });",
+		"async function deleteDisabledNodes() { await API.nodes.deleteDisabled(); await loadNodes({ refreshSubscriptions: true });",
+	} {
+		if !strings.Contains(script, token) {
+			t.Errorf("subscription-count-changing action %q is not refreshing the cache", token)
+		}
+	}
+}
+
 func TestProxySettingsFieldsAreEmbedded(t *testing.T) {
 	scriptBytes, err := Assets.ReadFile("assets/page-settings.js")
 	if err != nil {

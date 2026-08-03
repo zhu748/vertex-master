@@ -1,32 +1,72 @@
 let logsRefreshTimer = null;
+let logsETag = '';
+let logsLoadPromise = null;
+let logsPreferenceSynced = false;
+let renderedLogsContent = null;
 
-async function loadLogs() {
+function logsPageVisible() {
+  const app = $('#app');
+  const page = $('#page-logs');
+  return !!app && !app.classList.contains('hidden') && !!page && !page.classList.contains('hidden');
+}
+
+function startLogsAutoRefresh() {
+  if (logsRefreshTimer || document.hidden || !logsPageVisible()) return;
+  logsRefreshTimer = setInterval(() => {
+    if (!document.hidden && logsPageVisible()) loadLogs();
+  }, 3000);
+}
+
+function stopLogsAutoRefresh() {
+  if (!logsRefreshTimer) return;
+  clearInterval(logsRefreshTimer);
+  logsRefreshTimer = null;
+}
+
+function syncLogsAutoRefresh() {
   const check = $('#autoRefreshLogsCheck');
-  if (check) {
-    try {
-      const sRes = await API.settings.get();
-      const sets = sRes.settings || sRes;
-      if (sets && sets.auto_refresh_logs !== undefined) {
-        check.checked = !!sets.auto_refresh_logs;
-      }
-    } catch (e) {}
-    if (check.checked && !logsRefreshTimer) {
-      toggleAutoRefreshLogs(true);
-    } else if (!check.checked && logsRefreshTimer) {
-      toggleAutoRefreshLogs(true);
-    }
-  }
+  if (check && check.checked) startLogsAutoRefresh();
+  else stopLogsAutoRefresh();
+}
+
+async function fetchLogs() {
   try {
-    const res = await fetch('/api/admin/log');
+    const headers = {};
+    if (logsETag) headers['If-None-Match'] = logsETag;
+    const res = await fetch('/api/admin/log', { headers, cache: 'no-store' });
+    const nextETag = res.headers.get('ETag');
+    if (nextETag) logsETag = nextETag;
+
+    if (!logsPreferenceSynced) {
+      const autoRefresh = res.headers.get('X-Vertex-Auto-Refresh-Logs');
+      const check = $('#autoRefreshLogsCheck');
+      if (check && autoRefresh !== null) {
+        check.checked = autoRefresh === 'true';
+        logsPreferenceSynced = true;
+      }
+    }
+    syncLogsAutoRefresh();
+
+    if (res.status === 304) return;
     const data = await res.json();
     if (res.ok && data.ok) {
-      renderLogs(data.content || '');
+      const content = data.content || '';
+      if (content !== renderedLogsContent) {
+        renderLogs(content);
+        renderedLogsContent = content;
+      }
     } else {
       toast('拉取日志失败', true);
     }
   } catch (e) {
     console.error(e);
   }
+}
+
+function loadLogs() {
+  if (logsLoadPromise) return logsLoadPromise;
+  logsLoadPromise = fetchLogs().finally(() => { logsLoadPromise = null; });
+  return logsLoadPromise;
 }
 
 function renderLogs(content) {
@@ -89,26 +129,27 @@ function toggleAutoRefreshLogs(silent) {
   const check = $('#autoRefreshLogsCheck');
   if (!check) return;
   if (silent !== true) {
+    logsPreferenceSynced = true;
     API.settings.put({ auto_refresh_logs: check.checked }).catch(() => {});
   }
   if (check.checked) {
-    if (!logsRefreshTimer) {
-      logsRefreshTimer = setInterval(() => {
-        const pageLogs = $('#page-logs');
-        if (pageLogs && !pageLogs.classList.contains('hidden')) {
-          loadLogs();
-        }
-      }, 3000);
-      if (silent !== true) toast('已开启自动刷新日志');
-    }
+    startLogsAutoRefresh();
+    if (silent !== true) toast('已开启自动刷新日志');
   } else {
-    if (logsRefreshTimer) {
-      clearInterval(logsRefreshTimer);
-      logsRefreshTimer = null;
-      if (silent !== true) toast('已关闭自动刷新日志');
-    }
+    stopLogsAutoRefresh();
+    if (silent !== true) toast('已关闭自动刷新日志');
   }
 }
+
+function leaveLogsPage() {
+  stopLogsAutoRefresh();
+  logsPreferenceSynced = false;
+}
+
+document.addEventListener('visibilitychange', () => {
+  syncLogsAutoRefresh();
+  if (!document.hidden && logsPageVisible()) loadLogs();
+});
 
 registerActions({
   loadLogs: function () { loadLogs(); },

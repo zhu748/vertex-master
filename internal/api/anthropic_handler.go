@@ -350,7 +350,7 @@ func anthropicTextBlocks(v any) (string, bool) {
 
 func appendAnthropicMessageToChat(result []any, role string, content any) ([]any, error) {
 	if text, ok := content.(string); ok {
-		return append(result, map[string]any{"role": role, "content": text}), nil
+		return append(result, transform.CanonicalChatMessage{Role: role, Content: text}), nil
 	}
 	blocks, ok := content.([]any)
 	if !ok {
@@ -398,20 +398,20 @@ func appendAnthropicMessageToChat(result []any, role string, content any) ([]any
 				)
 			}
 		}
-		msg := map[string]any{"role": "assistant", "content": text.String()}
+		msg := transform.CanonicalChatMessage{Role: "assistant", Content: text.String()}
 		if len(toolCalls) > 0 {
-			msg["tool_calls"] = toolCalls
+			msg.ToolCalls = toolCalls
 		}
 		return append(result, msg), nil
 	}
 	if textContent, ok := anthropicUserTextContentCanPassThrough(content); ok {
-		return append(result, map[string]any{"role": "user", "content": textContent}), nil
+		return append(result, transform.CanonicalChatMessage{Role: "user", Content: textContent}), nil
 	}
 
 	regular := []any{}
 	flushRegular := func() {
 		if len(regular) > 0 {
-			result = append(result, map[string]any{"role": "user", "content": regular})
+			result = append(result, transform.CanonicalChatMessage{Role: "user", Content: regular})
 			regular = nil
 		}
 	}
@@ -458,12 +458,13 @@ func appendAnthropicMessageToChat(result []any, role string, content any) ([]any
 				)
 			}
 		case "tool_result":
-			if stringValue(block["tool_use_id"]) == "" {
+			toolUseID := stringValue(block["tool_use_id"])
+			if toolUseID == "" {
 				return nil, fmt.Errorf("content[%d] tool_result requires tool_use_id", blockIndex)
 			}
 			flushRegular()
-			result = append(result, map[string]any{
-				"role": "tool", "tool_call_id": block["tool_use_id"], "content": anthropicToolResult(block["content"]),
+			result = append(result, transform.CanonicalChatMessage{
+				Role: "tool", ToolCallID: toolUseID, Content: anthropicToolResult(block["content"]),
 			})
 		default:
 			return nil, fmt.Errorf(

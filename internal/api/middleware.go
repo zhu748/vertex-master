@@ -15,9 +15,10 @@ import (
 )
 
 type middleware struct {
-	cfg  config.ConfigProvider
-	keys *APIKeyManager
-	gate requestConcurrencyGate
+	cfg      config.ConfigProvider
+	keys     *APIKeyManager
+	gate     requestConcurrencyGate
+	requests *requestMetrics
 }
 
 type requestConcurrencyGate struct {
@@ -58,10 +59,11 @@ type statusWriter struct {
 }
 
 func (w *statusWriter) WriteHeader(code int) {
-	if !w.wroteHeader {
-		w.status = code
-		w.wroteHeader = true
+	if w.wroteHeader {
+		return
 	}
+	w.status = code
+	w.wroteHeader = true
 	w.ResponseWriter.WriteHeader(code)
 }
 
@@ -86,6 +88,9 @@ func (m *middleware) withRecover(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if rec := recover(); rec != nil {
+				if vertex.RequestIDFromContext(r.Context()) != "" {
+					m.requests.recordPanic()
+				}
 				log.Printf("[Server] panic recovered: %v\n%s", rec, debug.Stack())
 				oaiError(w, http.StatusInternalServerError, "服务内部错误，请联系开发者 (internal error)", "server_error")
 			}
@@ -202,6 +207,7 @@ func isUpstreamWorkloadPath(path string) bool {
 func (m *middleware) withMetrics(next http.Handler) http.Handler {
 	skip := map[string]bool{
 		"/": true, "/health": true, "/healthz": true, "/readyz": true, "/api/hello": true,
+		"/favicon.ico": true,
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if skip[r.URL.Path] || isAdminPath(r.URL.Path) {
@@ -213,14 +219,24 @@ func (m *middleware) withMetrics(next http.Handler) http.Handler {
 		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 		ctx := context.WithValue(r.Context(), vertex.RequestIDKey{}, reqID)
 		cli.StartReq(reqID)
-		// The outer recovery middleware handles downstream panics. Keep request
-		// lifecycle cleanup local so unwinding cannot leave a permanent TUI
-		// entry behind.
-		defer cli.FinishReq(reqID)
 		start := time.Now()
+		m.requests.begin()
+		// Server.Handler places a recovery layer immediately inside this metrics
+		// wrapper, so panics become an observable 500 before accounting completes.
+		defer func() {
+			elapsed := time.Since(start)
+			m.requests.finish(sw.status, elapsed)
+			_ = cli.FinishReq(reqID)
+			log.Printf(
+				"[Server] %s %s - %d (%.3fs) 请求ID=%s",
+				r.Method,
+				r.URL.Path,
+				sw.status,
+				elapsed.Seconds(),
+				reqID,
+			)
+		}()
 		next.ServeHTTP(sw, r.WithContext(ctx))
-		elapsed := time.Since(start)
-		log.Printf("[Server] %s %s - %d (%.3fs) 请求ID=%s", r.Method, r.URL.Path, sw.status, elapsed.Seconds(), reqID)
 	})
 }
 

@@ -190,8 +190,7 @@ type canonicalSingleTextContent struct {
 }
 
 // canonicalFunctionCallContent keeps the JSON shape emitted by the compatibility
-// converter while avoiding three dynamic maps per function call. It is converted
-// back to the ordinary outbound map shape by filterEmptyContents.
+// converter while avoiding dynamic maps both before and after outbound cleanup.
 type canonicalFunctionCallContent struct {
 	Parts canonicalFunctionCallParts `json:"parts"`
 	Role  string                     `json:"role"`
@@ -202,7 +201,8 @@ type canonicalFunctionCallContent struct {
 type canonicalFunctionCallParts []canonicalFunctionCallPart
 
 type canonicalFunctionCallPart struct {
-	FunctionCall canonicalFunctionCall `json:"functionCall"`
+	FunctionCall     canonicalFunctionCall `json:"functionCall"`
+	ThoughtSignature string                `json:"thoughtSignature,omitempty"`
 }
 
 type canonicalFunctionCall struct {
@@ -254,11 +254,20 @@ func (parts *canonicalFunctionCallParts) CanonicalJSONItem(index int) any {
 }
 
 func (part *canonicalFunctionCallPart) CanonicalJSONFieldCount() (int, bool) {
-	return 1, part != nil
+	if part == nil {
+		return 0, false
+	}
+	if part.ThoughtSignature == "" {
+		return 1, true
+	}
+	return 2, true
 }
 
-func (part *canonicalFunctionCallPart) CanonicalJSONField(_ int) (string, any) {
-	return "functionCall", &part.FunctionCall
+func (part *canonicalFunctionCallPart) CanonicalJSONField(index int) (string, any) {
+	if index == 0 {
+		return "functionCall", &part.FunctionCall
+	}
+	return "thoughtSignature", part.ThoughtSignature
 }
 
 func (call *canonicalFunctionCall) CanonicalJSONFieldCount() (int, bool) {
@@ -1576,19 +1585,16 @@ func filterEmptyContents(contents any) any {
 
 func cleanCanonicalFunctionCallContent(
 	content *canonicalFunctionCallContent,
-) map[string]any {
-	parts := make([]any, len(content.Parts))
+) *canonicalFunctionCallContent {
+	parts := make(canonicalFunctionCallParts, len(content.Parts))
 	for index, part := range content.Parts {
-		call := part.FunctionCall
-		parts[index] = map[string]any{
-			"functionCall": map[string]any{
-				"args": call.Args,
-				"name": call.Name,
-			},
-			"thoughtSignature": encodedSkipThoughtSentinel,
-		}
+		parts[index] = part
+		parts[index].FunctionCall.ID = ""
+		parts[index].ThoughtSignature = encodedSkipThoughtSentinel
 	}
-	return map[string]any{"parts": parts, "role": "model"}
+	return &canonicalFunctionCallContent{
+		Parts: parts, Role: "model", normalized: true,
+	}
 }
 
 func cleanCanonicalFunctionResponseContent(
@@ -1596,8 +1602,8 @@ func cleanCanonicalFunctionResponseContent(
 	functionCallNames []string,
 	responseIndex *int,
 	callIDIndex *functionCallNameIndex,
-) map[string]any {
-	parts := make([]any, len(content.Parts))
+) *canonicalFunctionResponseContent {
+	parts := make(canonicalFunctionResponseParts, len(content.Parts))
 	for index, part := range content.Parts {
 		response := part.FunctionResponse
 		name := strings.TrimSpace(response.Name)
@@ -1612,15 +1618,14 @@ func cleanCanonicalFunctionResponseContent(
 		if name == "" {
 			name = "unknown"
 		}
-		parts[index] = map[string]any{
-			"functionResponse": map[string]any{
-				"name":     name,
-				"response": response.Response,
-			},
-		}
+		response.ID = ""
+		response.Name = name
+		parts[index] = canonicalFunctionResponsePart{FunctionResponse: response}
 		*responseIndex++
 	}
-	return map[string]any{"parts": parts, "role": "function"}
+	return &canonicalFunctionResponseContent{
+		Parts: parts, Role: "function", normalized: true,
+	}
 }
 
 func normalizeGeminiToolCallID(value string) string {

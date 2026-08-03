@@ -31,7 +31,8 @@ type Server struct {
 }
 
 func NewServer(vc *vertex.VertexAIClient, keys *APIKeyManager, cfg config.ConfigProvider) *Server {
-	h := handler{vc: vc, keys: keys, cfg: cfg}
+	requests := &requestMetrics{}
+	h := handler{vc: vc, keys: keys, cfg: cfg, requests: requests}
 	reqConv := transform.DefaultRequestConverter()
 	respConv := transform.DefaultResponseConverter()
 	claudePrompts := &claudePromptStore{}
@@ -45,7 +46,7 @@ func NewServer(vc *vertex.VertexAIClient, keys *APIKeyManager, cfg config.Config
 		audio:     &AudioHandler{h},
 		gemini:    &GeminiHandler{h},
 		admin:     &AdminHandler{handler: h, claudePrompts: claudePrompts}, //nolint:exhaustruct
-		mw:        &middleware{cfg: cfg, keys: keys},
+		mw:        &middleware{cfg: cfg, keys: keys, requests: requests},
 		version:   "dev",
 		commit:    "unknown",
 		buildTime: "unknown",
@@ -108,8 +109,10 @@ func (s *Server) Handler() http.Handler {
 		s.mw.withSecurityHeaders(
 			s.mw.withCORS(
 				s.mw.withMetrics(
-					s.mw.withAPIKey(
-						s.mw.withConcurrencyLimit(s.mw.withBodyLimit(mux)),
+					s.mw.withRecover(
+						s.mw.withAPIKey(
+							s.mw.withConcurrencyLimit(s.mw.withBodyLimit(mux)),
+						),
 					),
 				),
 			),
