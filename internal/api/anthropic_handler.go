@@ -211,6 +211,10 @@ func anthropicToChatRequest(body map[string]any) (map[string]any, error) {
 			switch effort {
 			case "low", "medium", "high", "xhigh", "max":
 				chat["reasoning_effort"] = effort
+			case "auto", "default":
+				// "auto" / "default" 让模型自主决定思考强度。
+				// 透传到 chat["reasoning_effort"]，由 convertChatRequest 跳过 thinkingConfig 设置。
+				chat["reasoning_effort"] = effort
 			default:
 				return nil, fmt.Errorf("unsupported output_config.effort %q", effort)
 			}

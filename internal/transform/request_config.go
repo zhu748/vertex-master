@@ -67,6 +67,8 @@ func applyModelGenerationCompatibility(model string, cfg map[string]any) {
 
 func isGemini36Model(model string) bool {
 	model = strings.ToLower(strings.TrimSpace(model))
+	// 防御性剥离假流式前缀，确保 fake-gemini-3.6-flash 也被识别为 3.6 系列。
+	model = stripFakePrefixes(model)
 	return strings.HasPrefix(model, "gemini-3.6-")
 }
 

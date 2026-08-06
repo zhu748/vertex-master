@@ -5,6 +5,23 @@ import (
 	"strings"
 )
 
+// fakeModelPrefixes 是假流式模型前缀（中文 + ASCII）。
+// 与 internal/config.fakePrefixes 保持一致；这里独立声明避免 transform 包
+// 反向依赖 config 包，同时让 thinkingKindForModel 自包含、可独立测试。
+//
+//nolint:gochecknoglobals // Read-only prefix list
+var fakeModelPrefixes = []string{"fake-", "假流式-"}
+
+// stripFakePrefixes 防御性剥离 fake- / 假流式- 前缀。
+// 正常路径下 api 层（resolveRequestedModel）已经剥离过，这里只是兜底，
+// 确保即使有代码路径绕过 api 层直接调用 transform，假流式变体也能正确归一化。
+func stripFakePrefixes(model string) string {
+	for _, p := range fakeModelPrefixes {
+		model = strings.TrimPrefix(model, p)
+	}
+	return model
+}
+
 // thinkingModelKind 描述 GenerateContent API 中不同模型接受的思考控制形态。
 // Gemini 2.5 使用 token budget；Gemini 3 使用离散 level，且部分图像模型
 // 的思考行为固定或只开放两个等级。
@@ -25,6 +42,9 @@ const (
 
 func thinkingKindForModel(model string) thinkingModelKind {
 	model = strings.ToLower(strings.TrimSpace(model))
+	// 防御性剥离假流式前缀，确保 fake-gemini-3.6-flash / 假流式-gemini-2.5-pro
+	// 等变体也能匹配到正确的模型 kind。
+	model = stripFakePrefixes(model)
 	switch {
 	case strings.HasPrefix(model, "gemini-2.5-flash-image"):
 		return thinkingModelUnsupported

@@ -550,17 +550,26 @@ func convertChatRequest(
 		if !ok {
 			return "", nil, fmt.Errorf("reasoning_effort must be a string")
 		}
-		level, ok := reasoningEffortToThinkingLevel[strings.ToLower(strings.TrimSpace(re))]
-		if !ok {
-			return "", nil, fmt.Errorf("unsupported reasoning_effort %q", re)
+		re = strings.ToLower(strings.TrimSpace(re))
+		// "auto" / "default" 表示让模型自主决定思考强度。
+		// 不设置 thinkingConfig，让 Gemini 使用其默认行为：
+		//   - Gemini 2.5 系列：动态思考（dynamic thinking）
+		//   - Gemini 3.x 系列：HIGH（官方默认档）
+		// 这样聊天软件（Cherry Studio / ChatBox 等）选 "auto" 时不会被报错，
+		// 也不会被错误地钉死在某个固定档位。
+		if re != "auto" && re != "default" {
+			level, ok := reasoningEffortToThinkingLevel[re]
+			if !ok {
+				return "", nil, fmt.Errorf("unsupported reasoning_effort %q", re)
+			}
+			gc := ensureGenCfg(geminiPayload)
+			tc, ok := gc["thinkingConfig"].(map[string]any)
+			if !ok {
+				tc = map[string]any{}
+				gc["thinkingConfig"] = tc
+			}
+			tc["thinkingLevel"] = level
 		}
-		gc := ensureGenCfg(geminiPayload)
-		tc, ok := gc["thinkingConfig"].(map[string]any)
-		if !ok {
-			tc = map[string]any{}
-			gc["thinkingConfig"] = tc
-		}
-		tc["thinkingLevel"] = level
 	}
 
 	if thinking, ok := body["thinking"].(map[string]any); ok {

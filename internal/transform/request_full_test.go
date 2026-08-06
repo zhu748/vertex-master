@@ -1402,6 +1402,135 @@ func TestClaudeThinkingBudgetUsesTargetModelControls(t *testing.T) {
 	}
 }
 
+// TestReasoningEffortAutoDefault 验证聊天软件选 "auto" / "default" 时不会报错，
+// 且不设置 thinkingConfig，让模型使用其默认思考行为（动态思考 / HIGH）。
+func TestReasoningEffortAutoDefault(t *testing.T) {
+	for _, effort := range []string{"auto", "default"} {
+		for _, model := range []string{"gemini-3.6-flash", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-3.1-pro-preview"} {
+			t.Run(model+"_"+effort, func(t *testing.T) {
+				body := map[string]any{
+					"model":            model,
+					"messages":         []any{map[string]any{"role": "user", "content": "hi"}},
+					"reasoning_effort": effort,
+				}
+				_, payload, err := ConvertChatRequest(body, config.StaticProvider(config.DefaultConfig()))
+				if err != nil {
+					t.Fatalf("reasoning_effort=%q 不应报错: %v", effort, err)
+				}
+				// convertChatRequest 不应设置 thinkingConfig（让模型用默认行为）
+				if gc, ok := payload["generationConfig"].(map[string]any); ok {
+					if tc, ok := gc["thinkingConfig"].(map[string]any); ok {
+						t.Errorf("reasoning_effort=%q 不应生成 thinkingConfig: %v", effort, tc)
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestFakePrefixThinkingNormalization 验证 fake- / 假流式- 前缀变体也能正确归一化
+// 思考强度。虽然 api 层在调用 BuildVertexVariables 前已剥离前缀，但 transform 层
+// 应当防御性自包含，即使收到带前缀的模型名也应正确处理。
+func TestFakePrefixThinkingNormalization(t *testing.T) {
+	tests := []struct {
+		name       string
+		model      string
+		effort     string
+		wantLevel  string
+		wantBudget int64
+		wantAbsent bool
+	}{
+		{name: "fake-3.6-flash high", model: "fake-gemini-3.6-flash", effort: "high", wantLevel: "HIGH"},
+		{name: "fake-3.6-flash none", model: "fake-gemini-3.6-flash", effort: "none", wantLevel: "MINIMAL"},
+		{name: "假流式-3.6-flash max", model: "假流式-gemini-3.6-flash", effort: "max", wantLevel: "HIGH"},
+		{name: "fake-2.5-pro high", model: "fake-gemini-2.5-pro", effort: "high", wantBudget: 24576},
+		{name: "假流式-2.5-flash medium", model: "假流式-gemini-2.5-flash", effort: "medium", wantBudget: 8192},
+		{name: "fake-2.5-flash-image unsupported", model: "fake-gemini-2.5-flash-image", effort: "high", wantAbsent: true},
+		{name: "假流式-3-pro-image fixed", model: "假流式-gemini-3-pro-image", effort: "low", wantAbsent: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			body := map[string]any{
+				"model":            tc.model,
+				"messages":         []any{map[string]any{"role": "user", "content": "hi"}},
+				"reasoning_effort": tc.effort,
+			}
+			model, payload, err := ConvertChatRequest(body, config.StaticProvider(config.DefaultConfig()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			vars := BuildVertexVariables(model, payload, config.StaticProvider(config.DefaultConfig()))
+			generation, hasGeneration := vars["generationConfig"].(map[string]any)
+			if !hasGeneration {
+				if tc.wantAbsent {
+					return
+				}
+				t.Fatalf("缺少 generationConfig: %v", vars)
+			}
+			thinking, hasThinking := generation["thinkingConfig"].(map[string]any)
+			if tc.wantAbsent {
+				if hasThinking {
+					t.Fatalf("不支持强度控制的模型不应收到 thinkingConfig: %v", thinking)
+				}
+				return
+			}
+			if !hasThinking {
+				t.Fatalf("缺少 thinkingConfig: %v", vars)
+			}
+			if tc.wantLevel != "" {
+				if got := thinking["thinkingLevel"]; got != tc.wantLevel {
+					t.Fatalf("thinkingLevel=%v, want %s", got, tc.wantLevel)
+				}
+				return
+			}
+			if got := thinking["thinkingBudget"]; got != tc.wantBudget {
+				t.Fatalf("thinkingBudget=%v, want %d", got, tc.wantBudget)
+			}
+		})
+	}
+}
+
+// TestFakePrefixClaudeThinkingBudget 验证 fake- 前缀变体下 Claude 协议的
+// budget_tokens 也能正确归一化到目标模型的支持形态。
+func TestFakePrefixClaudeThinkingBudget(t *testing.T) {
+	tests := []struct {
+		name       string
+		model      string
+		budget     float64
+		wantLevel  string
+		wantBudget int64
+	}{
+		{name: "fake-3.6 high", model: "fake-gemini-3.6-flash", budget: 9000, wantLevel: "HIGH"},
+		{name: "假流式-3.6 medium", model: "假流式-gemini-3.6-flash", budget: 8192, wantLevel: "MEDIUM"},
+		{name: "fake-2.5-flash preserves budget", model: "fake-gemini-2.5-flash", budget: 4000, wantBudget: 4000},
+		{name: "假流式-2.5-pro caps budget", model: "假流式-gemini-2.5-pro", budget: 99999, wantBudget: 32768},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			body := map[string]any{
+				"model":    tc.model,
+				"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+				"thinking": map[string]any{"type": "enabled", "budget_tokens": tc.budget},
+			}
+			model, payload, err := ConvertChatRequest(body, config.StaticProvider(config.DefaultConfig()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			vars := BuildVertexVariables(model, payload, config.StaticProvider(config.DefaultConfig()))
+			thinking := vars["generationConfig"].(map[string]any)["thinkingConfig"].(map[string]any)
+			if tc.wantLevel != "" {
+				if got := thinking["thinkingLevel"]; got != tc.wantLevel {
+					t.Fatalf("thinkingLevel=%v, want %s", got, tc.wantLevel)
+				}
+				return
+			}
+			if got := thinking["thinkingBudget"]; got != tc.wantBudget {
+				t.Fatalf("thinkingBudget=%v, want %d", got, tc.wantBudget)
+			}
+		})
+	}
+}
+
 func TestMediaResolution(t *testing.T) {
 	for in, want := range map[string]string{
 		"high":                    "MEDIA_RESOLUTION_HIGH",

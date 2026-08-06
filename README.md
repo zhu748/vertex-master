@@ -180,9 +180,36 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ver
 
 自建 HTTPS 反向代理默认不会信任客户端可伪造的 `X-Forwarded-*` 请求头。只有当 Vertex 仅接收来自可信反向代理的流量时，才设置环境变量 `VPROXY_TRUST_PROXY_HEADERS=true`，以便管理会话正确识别 HTTPS 和客户端地址；Render 环境会自动启用该行为。
 
-> **提示**：默认模型清单已包含稳定版 `gemini-3.6-flash`。在模型名前加上 `fake-` 或 `假流式-` 前缀，可将非流式模型伪装成流式输出。
+> **提示**：默认模型清单已包含稳定版 `gemini-3.6-flash`。在模型名前加上 `fake-` 或 `假流式-` 前缀，可将非流式模型伪装成流式输出。假流式变体同样会经过完整的思考强度归一化（fake prefix 在内部被防御性剥离）。
 
 > **预填充兼容**：通过 OpenAI Chat/Responses、Claude Messages 或 Gemini 原生接口调用 `gemini-3.6-flash` 时，服务会保留末尾纯文本 `assistant`/`model` 预填充的角色与原文，再追加一条短续写提示，使请求合法地以 `user` 结束；流式或非流式回复都会移除模型可能重复输出的前缀。工具调用、媒体、思考块和其他模型的历史行为保持不变；旧客户端传入的 `NONE`/`thinkingBudget` 也会在出站时转换为 Gemini 3.6 支持的思考级别。
+
+> **🧠 思考强度（Thinking Budget）兼容**：本项目会自动把客户端的各种"思考强度"参数统一映射到 Gemini 的 `thinkingConfig`，按模型官方上限做 clamp，并按目标模型支持的字段形态（budget vs level）归一化。具体行为见下表：
+
+| 协议路径 | 客户端字段 | 映射规则 |
+|---|---|---|
+| OpenAI Chat / Responses | `reasoning_effort` | `none/minimal/low/medium/high/max/xhigh` → 对应 `thinkingLevel`；`auto/default` → 不设置 thinkingConfig，让模型用默认行为 |
+| Anthropic Messages（Claude Code） | `thinking.budget_tokens` | 2.5 系列保留 budget 并 clamp；3.x 系列按 budget 大小映射到 LOW/MEDIUM/HIGH；`-1`（动态）→ HIGH |
+| Anthropic Messages（新 API） | `output_config.effort` | `low/medium/high/xhigh/max/auto/default` 全部接受 |
+| Gemini 原生 | `thinkingConfig.thinkingBudget` / `thinkingLevel` | 出站前按模型 kind 归一化（见下） |
+
+各 Gemini 模型的思考控制形态（出站会自动归一化到模型支持的字段）：
+
+| 模型 family | 支持字段 | 范围 / 档位 | 默认行为 |
+|---|---|---|---|
+| `gemini-2.5-pro` | thinkingBudget | 128 – 32768（无法关闭，最小 128） | 动态思考 |
+| `gemini-2.5-flash` | thinkingBudget | 0 – 24576 | 动态思考 |
+| `gemini-2.5-flash-lite` | thinkingBudget | 512 – 24576（正数下限 512） | 关闭 |
+| `gemini-2.5-flash-image` | 不支持 | 删除整个 thinkingConfig | 固定 |
+| `gemini-3.6-flash` / `3.5-flash` / `3.1-flash-lite` / `3-flash` | thinkingLevel | MINIMAL/LOW/MEDIUM/HIGH | MINIMAL |
+| `gemini-3.1-pro` | thinkingLevel | LOW/MEDIUM/HIGH（不支持 MINIMAL） | — |
+| `gemini-3.1-flash-image` / `3.1-flash-lite-image` | thinkingLevel | MINIMAL/HIGH 两档 | — |
+| `gemini-3-pro-preview` | thinkingLevel | LOW/HIGH 两档 | — |
+| `gemini-3-pro-image` | 不支持 | 删除整个 thinkingConfig | 固定 |
+
+> **Claude Code "max" 档**：Claude Code 走 Anthropic 协议时，"max" 档会发送较大的 `thinking.budget_tokens`。本项目会自动按 budget 大小映射到 HIGH（>8192 → HIGH），从而真正开启 Gemini 的最大思考强度。Gemini 3.6 系列官方明确支持 MINIMAL/LOW/MEDIUM/HIGH 四档，HIGH 即是最大档。
+
+> **聊天软件 "auto" 档**：Cherry Studio / ChatBox 等聊天软件的"自动"选项会发送 `reasoning_effort: "auto"` 或 `output_config.effort: "auto"`。本项目会跳过设置 thinkingConfig，让 Gemini 使用其官方默认思考行为（2.5 系列动态思考、3.x 系列 HIGH），不会被报错也不会被钉死在固定档位。
 
 > **Claude system 处理**：默认先精确移除 Claude Code 注入的 Claude 模型推荐、产品入口及 Fast mode 推广三行，再精确替换 Claude/Codex CLI 注入的 `IMPORTANT: Assist with authorized security testing...` 安全测试说明，二者都可在管理面板关闭。随后可以为 `/v1/messages` 和 `/v1/messages/count_tokens` 配置多条 system 精确替换或删除规则。每条规则可单独停用或限定客户端/实际模型名；模型范围默认留空并适用于所有模型，只有主动填写时才会限制。规则区分大小写、空白与换行，按列表顺序逐条执行，最后再以前置或后置的独立 system 片段注入额外提示词。顶层和中途 system 会保持先后顺序与独立片段，只有规则确实跨片段匹配时才兼容性合并。`role: user` 内的 `<system-reminder>` 仍是用户内容，不会被 system 规则改写。生成与 Token 计数的最近记录分开保存在当前进程内，可使用尚未保存的页面设置进行后端预览；被截断的记录不会用于创建精确规则，也不会写入日志或配置文件。
 
