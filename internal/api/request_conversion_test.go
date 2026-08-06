@@ -340,6 +340,16 @@ func TestResponsesConversionRejectsItemsThatWouldLoseContext(t *testing.T) {
 			},
 		},
 		{
+			name: "reasoning is not an object",
+			body: map[string]any{"input": "keep", "reasoning": "high"},
+		},
+		{
+			name: "reasoning effort is not a string",
+			body: map[string]any{
+				"input": "keep", "reasoning": map[string]any{"effort": float64(1)},
+			},
+		},
+		{
 			name: "unsupported namespace child type",
 			body: map[string]any{
 				"input": "keep",
@@ -478,6 +488,54 @@ func TestAnthropicConversionRejectsBlocksThatWouldLoseContext(t *testing.T) {
 				"tool_choice": map[string]any{
 					"type": "future_choice",
 				},
+			},
+		},
+		{
+			name: "thinking is not an object",
+			body: map[string]any{
+				"max_tokens": float64(64), "messages": []any{validUser}, "thinking": "adaptive",
+			},
+		},
+		{
+			name: "unknown thinking type",
+			body: map[string]any{
+				"max_tokens": float64(64), "messages": []any{validUser},
+				"thinking": map[string]any{"type": "future"},
+			},
+		},
+		{
+			name: "unknown effort",
+			body: map[string]any{
+				"max_tokens": float64(64), "messages": []any{validUser},
+				"output_config": map[string]any{"effort": "turbo"},
+			},
+		},
+		{
+			name: "enabled thinking without budget",
+			body: map[string]any{
+				"max_tokens": float64(4096), "messages": []any{validUser},
+				"thinking": map[string]any{"type": "enabled"},
+			},
+		},
+		{
+			name: "enabled thinking budget below minimum",
+			body: map[string]any{
+				"max_tokens": float64(4096), "messages": []any{validUser},
+				"thinking": map[string]any{"type": "enabled", "budget_tokens": float64(1023)},
+			},
+		},
+		{
+			name: "enabled thinking fractional budget",
+			body: map[string]any{
+				"max_tokens": float64(4096), "messages": []any{validUser},
+				"thinking": map[string]any{"type": "enabled", "budget_tokens": float64(1024.5)},
+			},
+		},
+		{
+			name: "unknown thinking display",
+			body: map[string]any{
+				"max_tokens": float64(4096), "messages": []any{validUser},
+				"thinking": map[string]any{"type": "adaptive", "display": "future"},
 			},
 		},
 	}

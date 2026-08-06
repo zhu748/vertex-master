@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"slices"
 	"strings"
@@ -157,9 +158,9 @@ func (h *AnthropicHandler) readAnthropicBody(w http.ResponseWriter, r *http.Requ
 }
 
 func anthropicToChatRequest(body map[string]any) (map[string]any, error) {
-	// At most nine Anthropic fields map into the internal Chat request. Bound
+	// At most ten Anthropic fields map into the internal Chat request. Bound
 	// the hint so unknown client extensions cannot cause a large duplicate map.
-	const maxChatFields = 9
+	const maxChatFields = 10
 	chat := make(map[string]any, min(len(body), maxChatFields))
 	for _, pair := range [][2]string{
 		{"max_tokens", "max_completion_tokens"}, {"temperature", "temperature"},
@@ -169,8 +170,51 @@ func anthropicToChatRequest(body map[string]any) (map[string]any, error) {
 			chat[pair[1]] = v
 		}
 	}
-	if thinking, ok := body["thinking"].(map[string]any); ok {
-		chat["thinking"] = thinking
+	if rawThinking, exists := body["thinking"]; exists && rawThinking != nil {
+		thinking, ok := rawThinking.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("thinking must be an object")
+		}
+		thinkingType := strings.ToLower(strings.TrimSpace(stringValue(thinking["type"])))
+		switch thinkingType {
+		case "enabled":
+			budget, ok := anthropicThinkingBudget(thinking["budget_tokens"])
+			if !ok || budget < 1024 {
+				return nil, fmt.Errorf("thinking.budget_tokens must be an integer >= 1024")
+			}
+			if err := validateAnthropicThinkingDisplay(thinking); err != nil {
+				return nil, err
+			}
+			chat["thinking"] = thinking
+		case "adaptive":
+			if err := validateAnthropicThinkingDisplay(thinking); err != nil {
+				return nil, err
+			}
+			chat["thinking"] = thinking
+		case "disabled":
+			chat["thinking"] = thinking
+		default:
+			return nil, fmt.Errorf("unsupported thinking.type %q", thinkingType)
+		}
+	}
+	if rawOutputConfig, exists := body["output_config"]; exists && rawOutputConfig != nil {
+		outputConfig, ok := rawOutputConfig.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("output_config must be an object")
+		}
+		if rawEffort, exists := outputConfig["effort"]; exists && rawEffort != nil {
+			effort, ok := rawEffort.(string)
+			if !ok || strings.TrimSpace(effort) == "" {
+				return nil, fmt.Errorf("output_config.effort must be a non-empty string")
+			}
+			effort = strings.ToLower(strings.TrimSpace(effort))
+			switch effort {
+			case "low", "medium", "high", "xhigh", "max":
+				chat["reasoning_effort"] = effort
+			default:
+				return nil, fmt.Errorf("unsupported output_config.effort %q", effort)
+			}
+		}
 	}
 
 	rawMessages, ok := body["messages"].([]any)
@@ -272,6 +316,40 @@ func anthropicToChatRequest(body map[string]any) (map[string]any, error) {
 		}
 	}
 	return chat, nil
+}
+
+func anthropicThinkingBudget(value any) (int64, bool) {
+	switch number := value.(type) {
+	case int:
+		return int64(number), true
+	case int64:
+		return number, true
+	case float64:
+		if math.IsNaN(number) || math.IsInf(number, 0) || math.Trunc(number) != number ||
+			number < math.MinInt64 || number >= math.MaxInt64 {
+			return 0, false
+		}
+		return int64(number), true
+	default:
+		return 0, false
+	}
+}
+
+func validateAnthropicThinkingDisplay(thinking map[string]any) error {
+	rawDisplay, exists := thinking["display"]
+	if !exists || rawDisplay == nil {
+		return nil
+	}
+	display, ok := rawDisplay.(string)
+	if !ok {
+		return fmt.Errorf("thinking.display must be a string")
+	}
+	switch strings.ToLower(strings.TrimSpace(display)) {
+	case "summarized", "omitted":
+		return nil
+	default:
+		return fmt.Errorf("unsupported thinking.display %q", display)
+	}
 }
 
 func anthropicMessageCanPassThrough(message map[string]any, role string) bool {

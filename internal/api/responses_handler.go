@@ -104,8 +104,16 @@ func responsesToChatRequest(body map[string]any) (map[string]any, error) {
 			chat[pair[1]] = v
 		}
 	}
-	if reasoning, ok := body["reasoning"].(map[string]any); ok {
-		if effort := stringValue(reasoning["effort"]); effort != "" {
+	if rawReasoning, exists := body["reasoning"]; exists && rawReasoning != nil {
+		reasoning, ok := rawReasoning.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("reasoning must be an object")
+		}
+		if rawEffort, exists := reasoning["effort"]; exists && rawEffort != nil {
+			effort, ok := rawEffort.(string)
+			if !ok || strings.TrimSpace(effort) == "" {
+				return nil, fmt.Errorf("reasoning.effort must be a non-empty string")
+			}
 			chat["reasoning_effort"] = effort
 		}
 	}

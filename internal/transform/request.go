@@ -545,28 +545,50 @@ func convertChatRequest(
 		}
 	}
 
-	if re, ok := body["reasoning_effort"].(string); ok {
-		if level, ok := reasoningEffortToThinkingLevel[strings.ToLower(strings.TrimSpace(re))]; ok {
-			gc := ensureGenCfg(geminiPayload)
-			tc, ok := gc["thinkingConfig"].(map[string]any)
-			if !ok {
-				tc = map[string]any{}
-				gc["thinkingConfig"] = tc
-			}
-			tc["thinkingLevel"] = level
+	if rawEffort, exists := body["reasoning_effort"]; exists && rawEffort != nil {
+		re, ok := rawEffort.(string)
+		if !ok {
+			return "", nil, fmt.Errorf("reasoning_effort must be a string")
 		}
+		level, ok := reasoningEffortToThinkingLevel[strings.ToLower(strings.TrimSpace(re))]
+		if !ok {
+			return "", nil, fmt.Errorf("unsupported reasoning_effort %q", re)
+		}
+		gc := ensureGenCfg(geminiPayload)
+		tc, ok := gc["thinkingConfig"].(map[string]any)
+		if !ok {
+			tc = map[string]any{}
+			gc["thinkingConfig"] = tc
+		}
+		tc["thinkingLevel"] = level
 	}
 
 	if thinking, ok := body["thinking"].(map[string]any); ok {
-		if tt, _ := thinking["type"].(string); tt == "enabled" || tt == "disabled" {
-			tc := map[string]any{"thinkingLevel": "MEDIUM"}
-			if tt == "disabled" {
-				tc["thinkingLevel"] = "NONE"
+		includeThoughts := !strings.EqualFold(
+			strings.TrimSpace(toString(thinking["display"])),
+			"omitted",
+		)
+		switch strings.ToLower(strings.TrimSpace(toString(thinking["type"]))) {
+		case "disabled":
+			ensureGenCfg(geminiPayload)["thinkingConfig"] = map[string]any{
+				"thinkingLevel": "NONE",
 			}
-			if budget, ok := thinking["budget_tokens"]; ok && budget != nil {
+		case "enabled":
+			tc := map[string]any{"includeThoughts": includeThoughts}
+			if budget, exists := thinking["budget_tokens"]; exists && budget != nil {
 				tc["thinkingBudget"] = budget
+			} else {
+				tc["thinkingLevel"] = "HIGH"
 			}
 			ensureGenCfg(geminiPayload)["thinkingConfig"] = tc
+		case "adaptive":
+			gc := ensureGenCfg(geminiPayload)
+			tc, exists := gc["thinkingConfig"].(map[string]any)
+			if !exists {
+				tc = map[string]any{"thinkingLevel": "HIGH"}
+				gc["thinkingConfig"] = tc
+			}
+			tc["includeThoughts"] = includeThoughts
 		}
 	}
 

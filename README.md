@@ -106,7 +106,30 @@ claude --model gemini-3.6-flash
 
 当前兼容 Messages 流式/非流式、系统提示、多模态输入、并行 Tool Use / Tool Result、Extended Thinking 事件、ping 保活、token 统计和 `/v1/messages/count_tokens`。其中 token 数由匿名 Vertex `CountTokens` operation 精确计算，不使用本地启发式估算；Anthropic Prompt Caching 不会产生真实缓存收益，因此建议禁用。
 
+运行中按 Enter 发送的内容属于 Claude Code 的排队/实时引导：它不能修改已经发出的 HTTP/SSE 请求，通常会在下一次工具结果回传时进入新的 `/v1/messages` 请求。本项目会保留同一用户回合中 `tool_result` 后追加的文本，并按原顺序传给 Gemini；若要立即终止当前操作并改派任务，请按 Ctrl+C 后再发送。若排队消息长期未生效，先运行 `claude --version` 并更新 Claude Code；官方曾修复过工作中忽略用户消息的问题。参考 [Claude Code Streaming Input](https://code.claude.com/docs/en/agent-sdk/streaming-vs-single-mode)、[Claude Code Changelog](https://code.claude.com/docs/en/changelog) 和 [Mid-conversation messages](https://platform.claude.com/docs/en/build-with-claude/mid-conversation-system-messages)。
+
 > 两种 CLI 的本地工具均由 CLI 自己执行，本项目只负责模型协议转换。OpenAI/Anthropic 的服务端托管工具不在支持范围内。
+
+### 思考强度转换
+
+代理会在模型别名解析后，按实际 Gemini 型号转换思考参数。Codex/OpenAI Responses 的 `reasoning.effort`（以及 Chat Completions 的 `reasoning_effort`）支持 `none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`；Claude Messages 同时兼容当前的 `thinking: {"type":"adaptive"}` + `output_config.effort`，以及旧版 `thinking: {"type":"enabled","budget_tokens":N}`。Claude 显式启用思考时会按 `display` 请求或隐藏 Gemini thought summaries；手动模式要求整数预算且至少为 `1024`。
+
+按 Google GenerateContent API 的官方能力，当前适配矩阵如下：
+
+| Gemini 模型 | 官方默认 | 官方可用控制 | 兼容协议转换 |
+|---|---|---|---|
+| 3.6 / 3.5 Flash | `medium` | `minimal/low/medium/high` | `none` 降为 `minimal`，`xhigh/max` 收敛到 `high` |
+| 3.5 / 3.1 Flash-Lite | `minimal` | `minimal/low/medium/high` | 同上 |
+| 3.1 Pro | `high` | `low/medium/high` | `none/minimal` 降为 `low` |
+| 3.1 Flash Image / Flash-Lite Image | `minimal` | `minimal/high` | `none/minimal/low` → `minimal`，其余 → `high` |
+| 3 Flash | `high` | `minimal/low/medium/high` | `none` 降为 `minimal`，`xhigh/max` 收敛到 `high` |
+| 2.5 Pro | 动态 | `thinkingBudget=128..32768` 或 `-1` | `none` → `128`；`minimal/low/medium/high+` → `1024/1024/8192/24576` |
+| 2.5 Flash | 动态 | `0..24576` 或 `-1` | `none/minimal/low/medium/high+` → `0/1024/1024/8192/24576` |
+| 2.5 Flash-Lite | 关闭 | `0`、`512..24576` 或 `-1` | 与 2.5 Flash 相同；正数预算至少为 `512` |
+| 3 Pro Image | 固定开启 | 不开放强度控制 | 移除无效强度字段，保留模型官方行为 |
+| 2.5 Flash Image | 不支持 Thinking | 无 | 移除无效思考配置 |
+
+未显式传入强度时不会强行覆盖 Gemini 的模型默认值。Claude 旧版数值预算在 Gemini 2.5 上会尽量原值保留并按官方范围截断；发往 Gemini 3 时，`≤1024`、`≤8192`、更高预算依次映射为 `low`、`medium`、`high`，再按具体模型支持的等级收敛。参考 [Google Gemini Thinking](https://ai.google.dev/gemini-api/docs/generate-content/thinking)、[Google OpenAI 兼容映射](https://ai.google.dev/gemini-api/docs/openai#thinking)、[Anthropic Effort](https://platform.claude.com/docs/en/build-with-claude/effort) 和 [Anthropic Extended Thinking](https://platform.claude.com/docs/en/build-with-claude/extended-thinking)。
 
 **完整的分平台部署教程**（包括开机自启、代理配置、手机部署、常见问题解答）见 **[部署指南](部署指南.md)**。
 

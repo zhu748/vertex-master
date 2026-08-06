@@ -457,6 +457,115 @@ func TestAnthropicGemini36DisabledThinkingUsesSupportedMinimum(t *testing.T) {
 	}
 }
 
+func TestAnthropicAdaptiveThinkingEffortReachesGemini(t *testing.T) {
+	tests := []struct {
+		name      string
+		output    map[string]any
+		thinking  map[string]any
+		wantLevel string
+	}{
+		{
+			name: "adaptive medium", output: map[string]any{"effort": "medium"},
+			thinking: map[string]any{"type": "adaptive"}, wantLevel: "MEDIUM",
+		},
+		{
+			name: "adaptive default high", thinking: map[string]any{"type": "adaptive"},
+			wantLevel: "HIGH",
+		},
+		{
+			name: "adaptive max", output: map[string]any{"effort": "max"},
+			thinking: map[string]any{"type": "adaptive"}, wantLevel: "HIGH",
+		},
+		{
+			name: "manual budget wins", output: map[string]any{"effort": "low"},
+			thinking:  map[string]any{"type": "enabled", "budget_tokens": float64(8192)},
+			wantLevel: "MEDIUM",
+		},
+		{
+			name: "adaptive omitted", output: map[string]any{"effort": "high"},
+			thinking:  map[string]any{"type": "adaptive", "display": "omitted"},
+			wantLevel: "HIGH",
+		},
+		{
+			name: "disabled wins", output: map[string]any{"effort": "max"},
+			thinking: map[string]any{"type": "disabled"}, wantLevel: "MINIMAL",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			body := map[string]any{
+				"max_tokens": float64(16000),
+				"thinking":   tc.thinking,
+				"messages": []any{
+					map[string]any{"role": "user", "content": "hello"},
+				},
+			}
+			if tc.output != nil {
+				body["output_config"] = tc.output
+			}
+			chat, err := anthropicToChatRequest(body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			chat["model"] = "gemini-3.6-flash"
+			model, payload, err := transform.ConvertChatRequest(
+				chat,
+				config.StaticProvider(config.DefaultConfig()),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			vars := transform.BuildVertexVariables(
+				model,
+				payload,
+				config.StaticProvider(config.DefaultConfig()),
+			)
+			thinking := vars["generationConfig"].(map[string]any)["thinkingConfig"].(map[string]any)
+			if got := thinking["thinkingLevel"]; got != tc.wantLevel {
+				t.Fatalf("thinkingLevel=%v, want %s", got, tc.wantLevel)
+			}
+			wantThoughts := tc.thinking["type"] != "disabled" && tc.thinking["display"] != "omitted"
+			if thinking["includeThoughts"] != wantThoughts && tc.thinking["type"] != "disabled" {
+				t.Fatalf("includeThoughts=%v, want %v: %v", thinking["includeThoughts"], wantThoughts, thinking)
+			}
+		})
+	}
+}
+
+func TestResponsesReasoningEffortUsesGemini25Budget(t *testing.T) {
+	chat, err := responsesToChatRequest(map[string]any{
+		"model": "gemini-2.5-flash",
+		"input": "hello",
+		"reasoning": map[string]any{
+			"effort": "medium",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	chat["model"] = "gemini-2.5-flash"
+	model, payload, err := transform.ConvertChatRequest(
+		chat,
+		config.StaticProvider(config.DefaultConfig()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vars := transform.BuildVertexVariables(
+		model,
+		payload,
+		config.StaticProvider(config.DefaultConfig()),
+	)
+	thinking := vars["generationConfig"].(map[string]any)["thinkingConfig"].(map[string]any)
+	if got := thinking["thinkingBudget"]; got != int64(8192) {
+		t.Fatalf("Responses reasoning.medium 应映射到 Gemini 2.5 budget 8192，got %v", got)
+	}
+	if _, exists := thinking["thinkingLevel"]; exists {
+		t.Fatalf("Gemini 2.5 不应收到 thinkingLevel: %v", thinking)
+	}
+}
+
 func TestResponsesRequestConversionSupportsCodexNamespaceAndHostedTools(t *testing.T) {
 	body := map[string]any{
 		"input": "hello",
@@ -586,6 +695,71 @@ func TestAnthropicRequestConversion(t *testing.T) {
 	last, ok := messages[len(messages)-1].(transform.CanonicalChatMessage)
 	if !ok || last.Role != "tool" || last.ToolCallID != "toolu_1" {
 		t.Fatalf("tool result not converted: %#v", last)
+	}
+}
+
+func TestAnthropicQueuedSteeringAfterToolResultReachesGemini(t *testing.T) {
+	body := map[string]any{
+		"max_tokens": float64(128),
+		"messages": []any{
+			map[string]any{
+				"role": "assistant",
+				"content": []any{map[string]any{
+					"type": "tool_use", "id": "toolu_queued", "name": "run_task",
+					"input": map[string]any{"task": "A"},
+				}},
+			},
+			map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{
+						"type": "tool_result", "tool_use_id": "toolu_queued", "content": "done",
+					},
+					map[string]any{
+						"type": "text", "text": "改为处理任务 B，不要继续任务 A。",
+					},
+				},
+			},
+		},
+	}
+	chat, err := anthropicToChatRequest(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chat["model"] = "gemini-3.6-flash"
+	model, payload, err := transform.ConvertChatRequest(
+		chat,
+		config.StaticProvider(config.DefaultConfig()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vars := transform.BuildVertexVariables(
+		model,
+		payload,
+		config.StaticProvider(config.DefaultConfig()),
+	)
+
+	wire, err := json.Marshal(vars)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var normalized map[string]any
+	if err := json.Unmarshal(wire, &normalized); err != nil {
+		t.Fatal(err)
+	}
+	contents := normalized["contents"].([]any)
+	if len(contents) != 3 {
+		t.Fatalf("运行中追加消息的完整上下文数量异常: %#v", contents)
+	}
+	functionResult := contents[1].(map[string]any)
+	queuedSteering := contents[2].(map[string]any)
+	if functionResult["role"] != "function" || queuedSteering["role"] != "user" {
+		t.Fatalf("tool_result 后的追加消息顺序错误: %#v", contents)
+	}
+	parts := queuedSteering["parts"].([]any)
+	if len(parts) != 1 || parts[0].(map[string]any)["text"] != "改为处理任务 B，不要继续任务 A。" {
+		t.Fatalf("运行中追加消息未完整传给 Gemini: %#v", queuedSteering)
 	}
 }
 

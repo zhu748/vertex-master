@@ -40,13 +40,19 @@ func TestInvalidateModelsCacheReloads(t *testing.T) {
 	InvalidateModelsCache()
 }
 
-func TestDefaultModelsIncludeGemini36Flash(t *testing.T) {
+func TestDefaultModelsTrackCurrentGeminiThinkingModels(t *testing.T) {
 	t.Setenv("VPROXY_MODELS", filepath.Join(t.TempDir(), "missing-models.json"))
 	InvalidateModelsCache()
 	t.Cleanup(InvalidateModelsCache)
 
-	if got := BaseModels(); !contains(got, "gemini-3.6-flash") {
-		t.Fatalf("默认模型清单应包含 gemini-3.6-flash，got %v", got)
+	if got := BaseModels(); !contains(got, "gemini-3.6-flash") ||
+		!contains(got, "gemini-3.5-flash-lite") ||
+		!contains(got, "gemini-3.1-flash-lite-image") {
+		t.Fatalf("默认模型清单应包含当前 Gemini thinking 模型，got %v", got)
+	} else if contains(got, "gemini-2.5-flash-lite-preview-09-2025") ||
+		contains(got, "gemini-3-pro-image-preview") ||
+		contains(got, "gemini-3.1-flash-image-preview") {
+		t.Fatalf("默认模型清单不应继续发布已关闭的预览模型，got %v", got)
 	}
 	variants := ModelsWithFakeVariants()
 	for _, want := range []string{

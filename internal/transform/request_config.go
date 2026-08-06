@@ -43,16 +43,14 @@ func generationConfigCanPassThrough(cfg map[string]any) bool {
 	return true
 }
 
-// applyModelGenerationCompatibility removes parameters deprecated by the
-// Gemini 3.6 family. The public API currently ignores these sampling fields
-// and documents that future revisions may reject them, so stripping them keeps
-// OpenAI clients with legacy defaults compatible with the new model.
+// applyModelGenerationCompatibility 在最终模型解析完成后执行模型级参数适配。
+// Gemini 3.6 会移除已弃用的采样字段；所有已知 Gemini thinking 模型会把
+// level/budget 归一为该模型在 GenerateContent API 中支持的形态。
 func applyModelGenerationCompatibility(model string, cfg map[string]any) {
-	if !isGemini36Model(model) {
-		return
-	}
-	for _, key := range []string{"temperature", "topP", "topK", "candidateCount"} {
-		delete(cfg, key)
+	if isGemini36Model(model) {
+		for _, key := range []string{"temperature", "topP", "topK", "candidateCount"} {
+			delete(cfg, key)
+		}
 	}
 	if thinking, ok := cfg["thinkingConfig"].(map[string]any); ok {
 		// BuildVertexVariables may be holding a shallow copy of generationConfig.
@@ -61,61 +59,9 @@ func applyModelGenerationCompatibility(model string, cfg map[string]any) {
 		thinking = copyMap(thinking)
 		cfg["thinkingConfig"] = thinking
 
-		level := strings.ToUpper(strings.TrimSpace(toString(thinking["thinkingLevel"])))
-		switch level {
-		case "NONE", "DISABLED", "OFF":
-			// Gemini 3.6 no longer accepts NONE. MINIMAL is the closest supported
-			// level and preserves the caller's intent to minimize hidden reasoning.
-			thinking["thinkingLevel"] = "MINIMAL"
-		case "MINIMAL", "LOW", "MEDIUM", "HIGH":
-			thinking["thinkingLevel"] = level
-		case "":
-			// thinkingBudget is deprecated for Gemini 3.6 and has no exact level
-			// equivalent. A non-positive budget means the minimum supported level;
-			// a positive budget falls back to the documented MEDIUM default.
-			if budget, exists := thinking["thinkingBudget"]; exists {
-				if nonPositiveThinkingBudget(budget) {
-					thinking["thinkingLevel"] = "MINIMAL"
-				} else {
-					thinking["thinkingLevel"] = "MEDIUM"
-				}
-			}
-		}
-		delete(thinking, "thinkingBudget")
-		if len(thinking) == 0 {
+		if !normalizeThinkingConfigForModel(model, thinking) {
 			delete(cfg, "thinkingConfig")
 		}
-	}
-}
-
-func nonPositiveThinkingBudget(value any) bool {
-	switch number := value.(type) {
-	case int:
-		return number <= 0
-	case int8:
-		return number <= 0
-	case int16:
-		return number <= 0
-	case int32:
-		return number <= 0
-	case int64:
-		return number <= 0
-	case uint:
-		return number == 0
-	case uint8:
-		return number == 0
-	case uint16:
-		return number == 0
-	case uint32:
-		return number == 0
-	case uint64:
-		return number == 0
-	case float32:
-		return number <= 0
-	case float64:
-		return number <= 0
-	default:
-		return false
 	}
 }
 

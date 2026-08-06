@@ -16,6 +16,7 @@ var reasoningEffortToThinkingLevel = map[string]string{
 	"medium":  "MEDIUM",
 	"high":    "HIGH",
 	"xhigh":   "HIGH",
+	"max":     "HIGH",
 }
 
 // audioFormatMIME 把 input_audio.format 映射到 Gemini inlineData mimeType。

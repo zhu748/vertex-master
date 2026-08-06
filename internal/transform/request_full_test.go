@@ -1219,6 +1219,18 @@ func TestConvertChatRequestRejectsInvalidControls(t *testing.T) {
 				body["response_format"] = map[string]any{"type": "future_format"}
 			},
 		},
+		{
+			name: "non-string reasoning effort",
+			update: func(body map[string]any) {
+				body["reasoning_effort"] = float64(1)
+			},
+		},
+		{
+			name: "unknown reasoning effort",
+			update: func(body map[string]any) {
+				body["reasoning_effort"] = "turbo"
+			},
+		},
 	}
 
 	for _, test := range tests {
@@ -1243,7 +1255,7 @@ func TestConvertChatRequestRejectsInvalidControls(t *testing.T) {
 func TestReasoningEffort(t *testing.T) {
 	for effort, wantLevel := range map[string]string{
 		"minimal": "MINIMAL", "low": "LOW", "medium": "MEDIUM", "high": "HIGH",
-		"none": "NONE", "xhigh": "HIGH",
+		"none": "NONE", "xhigh": "HIGH", "max": "HIGH",
 	} {
 		body := map[string]any{
 			"model":            "m",
@@ -1259,6 +1271,134 @@ func TestReasoningEffort(t *testing.T) {
 		if tc["thinkingLevel"] != wantLevel {
 			t.Errorf("reasoning_effort=%q → thinkingLevel=%v, want %v", effort, tc["thinkingLevel"], wantLevel)
 		}
+	}
+}
+
+func TestReasoningEffortUsesOfficialModelThinkingControls(t *testing.T) {
+	tests := []struct {
+		name       string
+		model      string
+		effort     string
+		wantLevel  string
+		wantBudget int64
+		wantAbsent bool
+	}{
+		{name: "3.6 none", model: "gemini-3.6-flash", effort: "none", wantLevel: "MINIMAL"},
+		{name: "3.6 max", model: "gemini-3.6-flash", effort: "max", wantLevel: "HIGH"},
+		{name: "3.1 pro minimal", model: "gemini-3.1-pro-preview", effort: "minimal", wantLevel: "LOW"},
+		{name: "3.1 pro medium", model: "gemini-3.1-pro-preview", effort: "medium", wantLevel: "MEDIUM"},
+		{name: "3.1 flash lite minimal", model: "gemini-3.1-flash-lite", effort: "minimal", wantLevel: "MINIMAL"},
+		{name: "3.1 flash image low", model: "gemini-3.1-flash-image", effort: "low", wantLevel: "MINIMAL"},
+		{name: "3.1 flash lite image medium", model: "gemini-3.1-flash-lite-image", effort: "medium", wantLevel: "HIGH"},
+		{name: "3 flash none", model: "gemini-3-flash-preview", effort: "none", wantLevel: "MINIMAL"},
+		{name: "3 pro preview medium", model: "gemini-3-pro-preview", effort: "medium", wantLevel: "HIGH"},
+		{name: "2.5 flash none", model: "gemini-2.5-flash", effort: "none", wantBudget: 0},
+		{name: "2.5 flash minimal", model: "gemini-2.5-flash", effort: "minimal", wantBudget: 1024},
+		{name: "2.5 flash medium", model: "gemini-2.5-flash", effort: "medium", wantBudget: 8192},
+		{name: "2.5 flash high", model: "gemini-2.5-flash", effort: "high", wantBudget: 24576},
+		{name: "2.5 pro none", model: "gemini-2.5-pro", effort: "none", wantBudget: 128},
+		{name: "2.5 flash lite low", model: "gemini-2.5-flash-lite", effort: "low", wantBudget: 1024},
+		{name: "2.5 flash image unsupported", model: "gemini-2.5-flash-image", effort: "high", wantAbsent: true},
+		{name: "3 pro image fixed", model: "gemini-3-pro-image", effort: "low", wantAbsent: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			body := map[string]any{
+				"model": tc.model,
+				"messages": []any{
+					map[string]any{"role": "user", "content": "hi"},
+				},
+				"reasoning_effort": tc.effort,
+			}
+			model, payload, err := ConvertChatRequest(
+				body,
+				config.StaticProvider(config.DefaultConfig()),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			vars := BuildVertexVariables(model, payload, config.StaticProvider(config.DefaultConfig()))
+			generation, hasGeneration := vars["generationConfig"].(map[string]any)
+			thinking, hasThinking := generation["thinkingConfig"].(map[string]any)
+			if tc.wantAbsent {
+				if hasGeneration && hasThinking {
+					t.Fatalf("不支持强度控制的模型不应收到 thinkingConfig: %v", thinking)
+				}
+				return
+			}
+			if !hasThinking {
+				t.Fatalf("缺少 thinkingConfig: %v", vars)
+			}
+			if tc.wantLevel != "" {
+				if got := thinking["thinkingLevel"]; got != tc.wantLevel {
+					t.Fatalf("thinkingLevel=%v, want %s", got, tc.wantLevel)
+				}
+				if _, exists := thinking["thinkingBudget"]; exists {
+					t.Fatalf("Gemini 3 不应收到 thinkingBudget: %v", thinking)
+				}
+				return
+			}
+			if got := thinking["thinkingBudget"]; got != tc.wantBudget {
+				t.Fatalf("thinkingBudget=%v, want %d", got, tc.wantBudget)
+			}
+			if _, exists := thinking["thinkingLevel"]; exists {
+				t.Fatalf("Gemini 2.5 不应收到 thinkingLevel: %v", thinking)
+			}
+		})
+	}
+}
+
+func TestClaudeThinkingBudgetUsesTargetModelControls(t *testing.T) {
+	tests := []struct {
+		name       string
+		model      string
+		budget     float64
+		wantLevel  string
+		wantBudget int64
+	}{
+		{name: "3.6 low", model: "gemini-3.6-flash", budget: 1024, wantLevel: "LOW"},
+		{name: "3.6 medium", model: "gemini-3.6-flash", budget: 8192, wantLevel: "MEDIUM"},
+		{name: "3.6 high", model: "gemini-3.6-flash", budget: 9000, wantLevel: "HIGH"},
+		{name: "3.1 image collapses medium to high", model: "gemini-3.1-flash-image", budget: 8192, wantLevel: "HIGH"},
+		{name: "3 dynamic budget", model: "gemini-3.6-flash", budget: -1, wantLevel: "HIGH"},
+		{name: "2.5 flash preserves manual budget", model: "gemini-2.5-flash", budget: 4000, wantBudget: 4000},
+		{name: "2.5 flash caps budget", model: "gemini-2.5-flash", budget: 99999, wantBudget: 24576},
+		{name: "2.5 pro cannot disable", model: "gemini-2.5-pro", budget: 0, wantBudget: 128},
+		{name: "2.5 flash lite positive minimum", model: "gemini-2.5-flash-lite", budget: 1, wantBudget: 512},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			body := map[string]any{
+				"model": tc.model,
+				"messages": []any{
+					map[string]any{"role": "user", "content": "hi"},
+				},
+				"thinking": map[string]any{"type": "enabled", "budget_tokens": tc.budget},
+			}
+			model, payload, err := ConvertChatRequest(
+				body,
+				config.StaticProvider(config.DefaultConfig()),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			vars := BuildVertexVariables(model, payload, config.StaticProvider(config.DefaultConfig()))
+			thinking := vars["generationConfig"].(map[string]any)["thinkingConfig"].(map[string]any)
+			if thinking["includeThoughts"] != true {
+				t.Fatalf("Claude thinking 请求必须启用 thought summaries: %v", thinking)
+			}
+			if tc.wantLevel != "" {
+				if got := thinking["thinkingLevel"]; got != tc.wantLevel {
+					t.Fatalf("thinkingLevel=%v, want %s", got, tc.wantLevel)
+				}
+				return
+			}
+			if got := thinking["thinkingBudget"]; got != tc.wantBudget {
+				t.Fatalf("thinkingBudget=%v, want %d", got, tc.wantBudget)
+			}
+		})
 	}
 }
 
@@ -1390,7 +1530,7 @@ func TestGemini36NormalizesUnsupportedThinkingControls(t *testing.T) {
 		{name: "none level", thinking: map[string]any{"thinkingLevel": "NONE"}, want: "MINIMAL"},
 		{name: "disabled level", thinking: map[string]any{"thinkingLevel": "disabled"}, want: "MINIMAL"},
 		{name: "zero budget", thinking: map[string]any{"thinkingBudget": float64(0)}, want: "MINIMAL"},
-		{name: "positive budget", thinking: map[string]any{"thinkingBudget": float64(1024)}, want: "MEDIUM"},
+		{name: "positive budget", thinking: map[string]any{"thinkingBudget": float64(1024)}, want: "LOW"},
 		{name: "explicit level wins", thinking: map[string]any{"thinkingLevel": "high", "thinkingBudget": float64(0)}, want: "HIGH"},
 	}
 	for _, tc := range tests {
