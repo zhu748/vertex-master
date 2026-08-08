@@ -106,7 +106,7 @@ claude --model gemini-3.6-flash
 
 当前兼容 Messages 流式/非流式、系统提示、多模态输入、并行 Tool Use / Tool Result、Extended Thinking 事件、ping 保活、token 统计和 `/v1/messages/count_tokens`。其中 token 数由匿名 Vertex `CountTokens` operation 精确计算，不使用本地启发式估算；Anthropic Prompt Caching 不会产生真实缓存收益，因此建议禁用。
 
-运行中按 Enter 发送的内容属于 Claude Code 的排队/实时引导：它不能修改已经发出的 HTTP/SSE 请求，通常会在下一次工具结果回传时进入新的 `/v1/messages` 请求。本项目会保留同一用户回合中 `tool_result` 后追加的文本，并按原顺序传给 Gemini；若要立即终止当前操作并改派任务，请按 Ctrl+C 后再发送。若排队消息长期未生效，先运行 `claude --version` 并更新 Claude Code；官方曾修复过工作中忽略用户消息的问题。参考 [Claude Code Streaming Input](https://code.claude.com/docs/en/agent-sdk/streaming-vs-single-mode)、[Claude Code Changelog](https://code.claude.com/docs/en/changelog) 和 [Mid-conversation messages](https://platform.claude.com/docs/en/build-with-claude/mid-conversation-system-messages)。
+运行中按 Enter 发送的内容属于 Claude Code 的排队/实时引导：它不能修改已经发出的 HTTP/SSE 请求，通常会在下一次工具结果回传时进入新的 `/v1/messages` 请求。Claude Code 可能把这类内容放进 `messages[]` 的中途 `system` turn；由于 Gemini 只支持请求级 `systemInstruction`，本项目会在应用完 Claude system 提示词策略后，把中途 turn 保留在原位置并作为最新用户引导发送。`tool_result` 后直接追加的文本也会按原顺序保留。若要立即终止当前操作并改派任务，请按 Ctrl+C 后再发送。若排队消息长期未生效，先运行 `claude --version` 并更新 Claude Code；官方曾修复过工作中忽略用户消息的问题。参考 [Claude Code Streaming Input](https://code.claude.com/docs/en/agent-sdk/streaming-vs-single-mode)、[Claude Code Changelog](https://code.claude.com/docs/en/changelog) 和 [Mid-conversation messages](https://platform.claude.com/docs/en/build-with-claude/mid-conversation-system-messages)。
 
 > 两种 CLI 的本地工具均由 CLI 自己执行，本项目只负责模型协议转换。OpenAI/Anthropic 的服务端托管工具不在支持范围内。
 

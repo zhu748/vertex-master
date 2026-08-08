@@ -20,6 +20,8 @@ import (
 	"github.com/bsfdsagfadg/vertex/internal/vertex"
 )
 
+const anthropicMidConversationSystemKey = "_vertex_anthropic_mid_conversation_system"
+
 // AnthropicHandler exposes the Anthropic Messages wire format while using the
 // same Gemini/Vertex execution path as the OpenAI-compatible endpoints.
 type AnthropicHandler struct {
@@ -122,6 +124,7 @@ func (h *AnthropicHandler) convertAnthropicRequest(
 	if err != nil {
 		return "", nil, err
 	}
+	lowerAnthropicMidConversationSystemTurns(chatBody)
 	chatBody["model"] = actualModel
 	model, payload, err := h.reqConv.Convert(chatBody, h.cfg)
 	if err != nil {
@@ -235,6 +238,7 @@ func anthropicToChatRequest(body map[string]any) (map[string]any, error) {
 			messages = append(messages, map[string]any{"role": "system", "content": system})
 		}
 	}
+	seenConversationTurn := false
 	for messageIndex, raw := range rawMessages {
 		message, _ := raw.(map[string]any)
 		if message == nil {
@@ -247,7 +251,11 @@ func anthropicToChatRequest(body map[string]any) (map[string]any, error) {
 				return nil, fmt.Errorf("messages[%d]: %w", messageIndex, err)
 			}
 			if content != "" {
-				messages = append(messages, map[string]any{"role": "system", "content": content})
+				systemMessage := map[string]any{"role": "system", "content": content}
+				if seenConversationTurn {
+					systemMessage[anthropicMidConversationSystemKey] = true
+				}
+				messages = append(messages, systemMessage)
 			}
 			continue
 		}
@@ -256,6 +264,7 @@ func anthropicToChatRequest(body map[string]any) (map[string]any, error) {
 		}
 		if anthropicMessageCanPassThrough(message, role) {
 			messages = append(messages, message)
+			seenConversationTurn = true
 			continue
 		}
 		var err error
@@ -263,6 +272,7 @@ func anthropicToChatRequest(body map[string]any) (map[string]any, error) {
 		if err != nil {
 			return nil, fmt.Errorf("messages[%d]: %w", messageIndex, err)
 		}
+		seenConversationTurn = true
 	}
 	if len(messages) == 0 {
 		return nil, fmt.Errorf("messages did not contain supported content")
@@ -320,6 +330,24 @@ func anthropicToChatRequest(body map[string]any) (map[string]any, error) {
 		}
 	}
 	return chat, nil
+}
+
+// lowerAnthropicMidConversationSystemTurns preserves Claude Code's queued
+// steering at its original point in the conversation. Gemini only supports a
+// request-wide systemInstruction, so hoisting a mid-conversation system turn
+// loses its recency after tool results and can make the model continue the old
+// plan. Prompt policy processing runs before this lowering step.
+func lowerAnthropicMidConversationSystemTurns(chatBody map[string]any) {
+	messages, _ := chatBody["messages"].([]any)
+	for _, rawMessage := range messages {
+		message, _ := rawMessage.(map[string]any)
+		marked, _ := message[anthropicMidConversationSystemKey].(bool)
+		if message == nil || !marked {
+			continue
+		}
+		delete(message, anthropicMidConversationSystemKey)
+		message["role"] = "user"
+	}
 }
 
 func anthropicThinkingBudget(value any) (int64, bool) {

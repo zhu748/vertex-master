@@ -763,6 +763,84 @@ func TestAnthropicQueuedSteeringAfterToolResultReachesGemini(t *testing.T) {
 	}
 }
 
+func TestAnthropicMidConversationSystemSteeringReachesGeminiInPlace(t *testing.T) {
+	const steering = "The user sent a new message while you were working:\n先暂停当前工作，再继续任务。"
+	body := map[string]any{
+		"system":     claudeSecurityPreamblePrompt,
+		"max_tokens": float64(128),
+		"messages": []any{
+			map[string]any{"role": "system", "content": "session context"},
+			map[string]any{
+				"role": "assistant",
+				"content": []any{map[string]any{
+					"type": "tool_use", "id": "toolu_mid_system", "name": "run_task",
+					"input": map[string]any{"task": "A"},
+				}},
+			},
+			map[string]any{
+				"role": "user",
+				"content": []any{map[string]any{
+					"type": "tool_result", "tool_use_id": "toolu_mid_system", "content": "done",
+				}},
+			},
+			map[string]any{"role": "system", "content": steering},
+		},
+	}
+	provider := config.StaticProvider(config.DefaultConfig())
+	handler := &AnthropicHandler{
+		handler:       handler{cfg: provider},
+		reqConv:       transform.DefaultRequestConverter(),
+		claudePrompts: &claudePromptStore{},
+	}
+	model, payload, err := handler.convertAnthropicRequest(
+		body,
+		"gemini-3.6-flash",
+		"gemini-3.6-flash",
+		"messages",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vars := transform.BuildVertexVariables(
+		model,
+		payload,
+		provider,
+	)
+	wire, err := json.Marshal(vars)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(wire, []byte(anthropicMidConversationSystemKey)) {
+		t.Fatalf("中途 system 内部标记泄漏到上游请求: %s", wire)
+	}
+	var normalized map[string]any
+	if err := json.Unmarshal(wire, &normalized); err != nil {
+		t.Fatal(err)
+	}
+
+	contents := normalized["contents"].([]any)
+	if len(contents) != 3 {
+		t.Fatalf("中途 system 引导的完整上下文数量异常: %#v", contents)
+	}
+	functionResult := contents[1].(map[string]any)
+	queuedSteering := contents[2].(map[string]any)
+	if functionResult["role"] != "function" || queuedSteering["role"] != "user" {
+		t.Fatalf("中途 system 引导未保留在 tool_result 之后: %#v", contents)
+	}
+	parts := queuedSteering["parts"].([]any)
+	if len(parts) != 1 || parts[0].(map[string]any)["text"] != steering {
+		t.Fatalf("中途 system 引导内容未完整传给 Gemini: %#v", queuedSteering)
+	}
+
+	system := normalized["systemInstruction"].(map[string]any)
+	systemParts := system["parts"].([]any)
+	if len(systemParts) != 2 ||
+		systemParts[0].(map[string]any)["text"] != claudeSecurityPreambleReplacement ||
+		systemParts[1].(map[string]any)["text"] != "session context" {
+		t.Fatalf("全局 system instruction 被意外改变: %#v", system)
+	}
+}
+
 func TestAnthropicPureTextUserContentPassesThroughToChat(t *testing.T) {
 	content := []any{
 		map[string]any{"type": "text", "text": "first"},
