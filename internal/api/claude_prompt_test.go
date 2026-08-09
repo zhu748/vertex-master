@@ -63,12 +63,27 @@ func TestClaudePromptPolicyStripsClaudeCodePromotionsByDefault(t *testing.T) {
 	if result.PromotionRemovalCount != 0 || result.EffectivePrompt != claudeCodePromotionPrompt {
 		t.Fatalf("promotion-removal opt-out was ignored: %#v", result)
 	}
+
+	fableBody := map[string]any{"messages": []any{
+		map[string]any{
+			"role":    "system",
+			"content": claudeFable5PromotionPrompt + "\n\n" + claudeCodePromotionPrompt,
+		},
+		map[string]any{"role": "user", "content": "hello"},
+	}}
+	result, err = applyClaudePromptPolicy(fableBody, config.StaticProvider(config.DefaultConfig()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.PromotionRemovalCount != 2 || result.EffectivePrompt != "" {
+		t.Fatalf("fable & code promotion blocks were not both removed: %#v", result)
+	}
 }
 
 func TestClaudePromptPolicyDoesNotPartiallyStripChangedPromotionBlock(t *testing.T) {
 	changed := strings.Replace(
 		claudeCodePromotionPrompt,
-		"available on Opus 5/4.8/4.7",
+		"available on Opus 5/4.8",
 		"available on another model",
 		1,
 	)
