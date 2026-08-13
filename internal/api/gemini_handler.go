@@ -99,7 +99,7 @@ func (g *GeminiHandler) handleGeminiGenerate(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
-	prefill := transform.AdaptGemini36Prefill(g.cfg.ResolveModelName(actualModel), body)
+	prefill := transform.AdaptGemini36OrLaterPrefill(g.cfg.ResolveModelName(actualModel), body)
 	log.Printf("[Server] [GeminiGenerate] 收到请求: 模型=%s, 真模型=%s", model, actualModel)
 
 	resp, vErr := g.vc.CompleteChat(r.Context(), actualModel, body)
@@ -129,7 +129,7 @@ func (g *GeminiHandler) handleGeminiStreamGenerate(w http.ResponseWriter, r *htt
 	if !ok {
 		return
 	}
-	transform.AdaptGemini36Prefill(g.cfg.ResolveModelName(actualModel), body)
+	transform.AdaptGemini36OrLaterPrefill(g.cfg.ResolveModelName(actualModel), body)
 	log.Printf("[Server] [GeminiStreamGenerate] 收到请求: 模型=%s, 真模型=%s, 假流式=%v", model, actualModel, useFake)
 
 	sw := newSSEWriter(w, "text/event-stream")

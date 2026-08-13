@@ -560,8 +560,8 @@ func BuildVertexVariables(model string, geminiPayload map[string]any, cfg config
 	genCfg, sharedGenCfg := buildGenerationConfig(geminiPayload)
 	// 在最终出站层执行，确保 OpenAI Chat/Responses、Anthropic 以及 Gemini
 	// 原生请求都一致遵守 drop_max_tokens。转换层仍负责校验兼容协议字段。
-	gemini36 := isGemini36Model(resolvedModel)
-	if len(genCfg) > 0 && sharedGenCfg && (cfg.DropMaxTokens() || gemini36) {
+	gemini36OrLater := isGemini36OrLaterModel(resolvedModel)
+	if len(genCfg) > 0 && sharedGenCfg && (cfg.DropMaxTokens() || gemini36OrLater) {
 		genCfg = copyMap(genCfg)
 	}
 	if cfg.DropMaxTokens() {

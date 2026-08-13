@@ -210,6 +210,15 @@ func TestClaudePromptSettingsUIIsEmbedded(t *testing.T) {
 		"rule_match_counts",
 		"set_claude_prompt_strip_claude_code_promotions",
 		"set_claude_prompt_replace_security_preamble",
+		"claude_prompt_promotion_targets",
+		"claude_prompt_security_preamble_from",
+		"claude_prompt_security_preamble_to",
+		"claude_prompt_builtin_defaults",
+		"claudeBuiltinRulesHTML",
+		"editClaudeBuiltinRules",
+		"saveClaudeBuiltinRules",
+		"disableClaudeBuiltinRule",
+		"promotion_target_match_counts",
 		"security_preamble_replacement_count",
 		"set_claude_prompt_injection_enabled",
 		"set_claude_prompt_injection_position",
@@ -219,6 +228,7 @@ func TestClaudePromptSettingsUIIsEmbedded(t *testing.T) {
 		"previewClaudePrompt",
 		"claudePromptLatestEndpoint",
 		"loadLatestClaudePrompt",
+		"startClaudePromptPolling",
 	} {
 		if !strings.Contains(script, token) {
 			t.Errorf("Claude prompt settings token %q is missing", token)

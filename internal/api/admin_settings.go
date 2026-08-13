@@ -23,6 +23,9 @@ var adminAllowedSettings = map[string]bool{
 	"claude_prompt_injection_text":               true,
 	"claude_prompt_strip_claude_code_promotions": true,
 	"claude_prompt_replace_security_preamble":    true,
+	"claude_prompt_promotion_targets":            true,
+	"claude_prompt_security_preamble_from":       true,
+	"claude_prompt_security_preamble_to":         true,
 	"claude_prompt_replacement_enabled":          true,
 	"claude_prompt_replacements":                 true,
 	"claude_prompt_replace_from":                 true,
@@ -81,7 +84,8 @@ func (adm *AdminHandler) adminGetSettings(w http.ResponseWriter, _ *http.Request
 		legacyTo = rules[0].To
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"managed_fields": environmentManagedAdminSettings(),
+		"managed_fields":                 environmentManagedAdminSettings(),
+		"claude_prompt_builtin_defaults": claudePromptBuiltinDefaults(),
 		"settings": map[string]any{
 			"max_retries":                                adm.cfg.MaxRetries(),
 			"max_spill_mb":                               adm.cfg.MaxSpillMB(),
@@ -95,6 +99,9 @@ func (adm *AdminHandler) adminGetSettings(w http.ResponseWriter, _ *http.Request
 			"claude_prompt_injection_text":               adm.cfg.ClaudePromptInjectionText(),
 			"claude_prompt_strip_claude_code_promotions": policy.StripPromotions,
 			"claude_prompt_replace_security_preamble":    policy.ReplaceSecurity,
+			"claude_prompt_promotion_targets":            policy.PromotionTargets,
+			"claude_prompt_security_preamble_from":       policy.SecurityPreambleFrom,
+			"claude_prompt_security_preamble_to":         policy.SecurityPreambleTo,
 			"claude_prompt_replacement_enabled":          adm.cfg.ClaudePromptReplacementEnabled(),
 			"claude_prompt_replacements":                 rules,
 			"claude_prompt_replace_from":                 legacyFrom,
@@ -189,7 +196,8 @@ func (adm *AdminHandler) adminPutSettings(w http.ResponseWriter, r *http.Request
 				return
 			}
 		case "claude_prompt_injection_text", "claude_prompt_replace_from",
-			"claude_prompt_replace_to":
+			"claude_prompt_replace_to", "claude_prompt_security_preamble_from",
+			"claude_prompt_security_preamble_to":
 			text, ok := v.(string)
 			if !ok {
 				writeJSON(w, http.StatusBadRequest, adminErr(k+" 必须是字符串"))
@@ -210,6 +218,14 @@ func (adm *AdminHandler) adminPutSettings(w http.ResponseWriter, r *http.Request
 				return
 			}
 			updates[k] = rules
+			continue
+		case "claude_prompt_promotion_targets":
+			targets, err := parseAdminClaudePromptPromotionTargets(v)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, adminErr(err.Error()))
+				return
+			}
+			updates[k] = targets
 			continue
 		case "proxy_url", "active_node_uri", "background_image", "font_size",
 			"font_color_type", "font_color":
@@ -238,6 +254,22 @@ func (adm *AdminHandler) adminPutSettings(w http.ResponseWriter, r *http.Request
 		updates[k] = v
 	}
 	currentClaudePolicy := adm.cfg.ClaudePromptPolicy()
+	claudePromotionTargets := append([]string(nil), currentClaudePolicy.PromotionTargets...)
+	if value, updated := updates["claude_prompt_promotion_targets"]; updated {
+		if value == nil {
+			claudePromotionTargets = nil
+		} else {
+			claudePromotionTargets = value.([]string)
+		}
+	}
+	claudeSecurityPreambleFrom := currentClaudePolicy.SecurityPreambleFrom
+	if value, updated := updates["claude_prompt_security_preamble_from"].(string); updated {
+		claudeSecurityPreambleFrom = value
+	}
+	claudeSecurityPreambleTo := currentClaudePolicy.SecurityPreambleTo
+	if value, updated := updates["claude_prompt_security_preamble_to"].(string); updated {
+		claudeSecurityPreambleTo = value
+	}
 	claudeReplacementEnabled := currentClaudePolicy.ReplacementEnabled
 	if value, ok := updates["claude_prompt_replacement_enabled"].(bool); ok {
 		claudeReplacementEnabled = value
@@ -327,6 +359,21 @@ func (adm *AdminHandler) adminPutSettings(w http.ResponseWriter, r *http.Request
 		)
 		return
 	}
+	nextClaudePolicy := currentClaudePolicy
+	nextClaudePolicy.PromotionTargets = claudePromotionTargets
+	nextClaudePolicy.SecurityPreambleFrom = claudeSecurityPreambleFrom
+	nextClaudePolicy.SecurityPreambleTo = claudeSecurityPreambleTo
+	nextClaudePolicy.ReplacementEnabled = claudeReplacementEnabled
+	nextClaudePolicy.ReplacementRules = claudeReplacementRules
+	nextClaudePolicy.InjectionEnabled = claudeInjectionEnabled
+	nextClaudePolicy.InjectionText = claudeInjectionText
+	if value, updated := updates["claude_prompt_injection_position"].(string); updated {
+		nextClaudePolicy.InjectionPosition = value
+	}
+	if err := config.ValidateClaudePromptPolicyConfig(nextClaudePolicy); err != nil {
+		writeJSON(w, http.StatusBadRequest, adminErr(err.Error()))
+		return
+	}
 	poolSize := adm.cfg.ParallelPoolSize()
 	if value, ok := updates["parallel_pool_size"].(int); ok {
 		poolSize = value
@@ -375,7 +422,10 @@ func (adm *AdminHandler) adminPutSettings(w http.ResponseWriter, r *http.Request
 		)
 		return
 	}
-	promptPolicyChanged := !reflect.DeepEqual(currentClaudeReplacementRules, claudeReplacementRules)
+	promptPolicyChanged := !reflect.DeepEqual(currentClaudeReplacementRules, claudeReplacementRules) ||
+		!reflect.DeepEqual(currentClaudePolicy.PromotionTargets, claudePromotionTargets) ||
+		currentClaudePolicy.SecurityPreambleFrom != claudeSecurityPreambleFrom ||
+		currentClaudePolicy.SecurityPreambleTo != claudeSecurityPreambleTo
 	if value, ok := updates["claude_prompt_replacement_enabled"].(bool); ok {
 		promptPolicyChanged = promptPolicyChanged || value != currentClaudePolicy.ReplacementEnabled
 	}
@@ -455,6 +505,49 @@ func parseAdminClaudePromptReplacementRules(
 		})
 	}
 	return rules, validateAdminClaudePromptReplacementRules(rules)
+}
+
+// parseAdminClaudePromptPromotionTargets accepts nil to restore the maintained
+// built-in signatures. A non-nil list is an explicit exact-delete override.
+func parseAdminClaudePromptPromotionTargets(value any) ([]string, error) {
+	if value == nil {
+		return nil, nil
+	}
+	rawTargets, ok := value.([]any)
+	if !ok {
+		return nil, fmt.Errorf("claude_prompt_promotion_targets 必须是字符串数组或 null")
+	}
+	if len(rawTargets) == 0 {
+		return nil, fmt.Errorf("Claude Code 推广提示至少需要一条精确匹配内容")
+	}
+	if len(rawTargets) > config.MaxClaudePromptPromotionTargets {
+		return nil, fmt.Errorf(
+			"Claude Code 推广提示不能超过 %d 条",
+			config.MaxClaudePromptPromotionTargets,
+		)
+	}
+	targets := make([]string, 0, len(rawTargets))
+	seen := make(map[string]struct{}, len(rawTargets))
+	totalBytes := 0
+	for index, rawTarget := range rawTargets {
+		target, ok := rawTarget.(string)
+		if !ok {
+			return nil, fmt.Errorf("第 %d 条 Claude Code 推广提示必须是字符串", index+1)
+		}
+		if target == "" {
+			return nil, fmt.Errorf("第 %d 条 Claude Code 推广提示不能为空", index+1)
+		}
+		if _, duplicate := seen[target]; duplicate {
+			return nil, fmt.Errorf("第 %d 条 Claude Code 推广提示重复", index+1)
+		}
+		seen[target] = struct{}{}
+		totalBytes += len(target)
+		if totalBytes > maxClaudePromptSettingBytes {
+			return nil, fmt.Errorf("Claude Code 推广提示文本总计不能超过 1 MiB")
+		}
+		targets = append(targets, target)
+	}
+	return targets, nil
 }
 
 func validateAdminClaudePromptReplacementRules(

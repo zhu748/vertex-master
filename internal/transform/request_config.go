@@ -1,6 +1,9 @@
 package transform
 
-import "strings"
+import (
+	"strconv"
+	"strings"
+)
 
 // ensureGenCfg 返回 geminiPayload["generationConfig"]（不存在则创建）。
 func ensureGenCfg(geminiPayload map[string]any) map[string]any {
@@ -44,10 +47,10 @@ func generationConfigCanPassThrough(cfg map[string]any) bool {
 }
 
 // applyModelGenerationCompatibility 在最终模型解析完成后执行模型级参数适配。
-// Gemini 3.6 会移除已弃用的采样字段；所有已知 Gemini thinking 模型会把
+// Gemini 3.6+ 会移除已弃用的采样字段；所有已知 Gemini thinking 模型会把
 // level/budget 归一为该模型在 GenerateContent API 中支持的形态。
 func applyModelGenerationCompatibility(model string, cfg map[string]any) {
-	if isGemini36Model(model) {
+	if isGemini36OrLaterModel(model) {
 		for _, key := range []string{"temperature", "topP", "topK", "candidateCount"} {
 			delete(cfg, key)
 		}
@@ -65,11 +68,25 @@ func applyModelGenerationCompatibility(model string, cfg map[string]any) {
 	}
 }
 
-func isGemini36Model(model string) bool {
+// isGemini36OrLaterModel covers the documented 3.6+ API generation. Google
+// applies its prefilled-turn and sampling restrictions to Gemini 3.6 Flash and
+// all future Gemini releases, so 3.7 Flash must not fall through the older
+// request path.
+func isGemini36OrLaterModel(model string) bool {
 	model = strings.ToLower(strings.TrimSpace(model))
-	// 防御性剥离假流式前缀，确保 fake-gemini-3.6-flash 也被识别为 3.6 系列。
+	// 防御性剥离假流式前缀，确保 fake-gemini-3.7-flash 也被识别为 3.6+ 系列。
 	model = stripFakePrefixes(model)
-	return strings.HasPrefix(model, "gemini-3.6-")
+	const prefix = "gemini-3."
+	if !strings.HasPrefix(model, prefix) {
+		return false
+	}
+	remainder := strings.TrimPrefix(model, prefix)
+	minorText, _, ok := strings.Cut(remainder, "-")
+	if !ok {
+		return false
+	}
+	minor, err := strconv.Atoi(minorText)
+	return err == nil && minor >= 6
 }
 
 // convertToGeminiFormat 把 generationConfig 转为 Gemini 期望格式。

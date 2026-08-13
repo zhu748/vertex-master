@@ -460,6 +460,7 @@ func TestAnthropicGemini36DisabledThinkingUsesSupportedMinimum(t *testing.T) {
 func TestAnthropicAdaptiveThinkingEffortReachesGemini(t *testing.T) {
 	tests := []struct {
 		name      string
+		model     string
 		output    map[string]any
 		thinking  map[string]any
 		wantLevel string
@@ -475,6 +476,15 @@ func TestAnthropicAdaptiveThinkingEffortReachesGemini(t *testing.T) {
 		{
 			name: "adaptive max", output: map[string]any{"effort": "max"},
 			thinking: map[string]any{"type": "adaptive"}, wantLevel: "HIGH",
+		},
+		{
+			name: "3.7 adaptive max", model: "gemini-3.7-flash",
+			output:   map[string]any{"effort": "max"},
+			thinking: map[string]any{"type": "adaptive"}, wantLevel: "HIGH",
+		},
+		{
+			name: "3.7 disabled", model: "gemini-3.7-flash",
+			thinking: map[string]any{"type": "disabled"}, wantLevel: "MINIMAL",
 		},
 		{
 			name: "manual budget wins", output: map[string]any{"effort": "low"},
@@ -508,7 +518,11 @@ func TestAnthropicAdaptiveThinkingEffortReachesGemini(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			chat["model"] = "gemini-3.6-flash"
+			modelName := tc.model
+			if modelName == "" {
+				modelName = "gemini-3.6-flash"
+			}
+			chat["model"] = modelName
 			model, payload, err := transform.ConvertChatRequest(
 				chat,
 				config.StaticProvider(config.DefaultConfig()),

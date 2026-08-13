@@ -30,8 +30,22 @@ const SETTINGS_FIELDS = [
 const CLAUDE_PROMPT_MAX_BYTES = 1024 * 1024;
 const CLAUDE_PROMPT_MAX_RULES = 32;
 const CLAUDE_PROMPT_MAX_RULE_MODELS = 16;
+const CLAUDE_PROMPT_MAX_PROMOTION_TARGETS = 16;
 let latestClaudePrompt = null;
 let claudeReplacementRules = [];
+let claudeBuiltinDefaults = {
+  promotion_targets: [],
+  security_preamble_from: '',
+  security_preamble_to: ''
+};
+let claudeBuiltinRules = {
+  promotionTargets: null,
+  securityFrom: '',
+  securityTo: ''
+};
+let claudeBuiltinRulesEditing = false;
+let claudePromptPollingTimer = 0;
+let claudePromptLatestLoadSequence = 0;
 
 function escapeSettingsHTML(value) {
   return String(value ?? '').replace(/[&<>"']/g, function (character) {
@@ -67,6 +81,164 @@ function configuredClaudeReplacementRules() {
     }];
   }
   return [];
+}
+
+function configuredClaudeBuiltinRules() {
+  const configuredTargets = curSettings.claude_prompt_promotion_targets;
+  claudeBuiltinRules = {
+    promotionTargets: Array.isArray(configuredTargets)
+      ? configuredTargets.map(target => String(target))
+      : null,
+    securityFrom: String(curSettings.claude_prompt_security_preamble_from ?? ''),
+    securityTo: String(curSettings.claude_prompt_security_preamble_to ?? '')
+  };
+}
+
+function effectiveClaudePromotionTargets() {
+  return claudeBuiltinRules.promotionTargets === null
+    ? claudeBuiltinDefaults.promotion_targets
+    : claudeBuiltinRules.promotionTargets;
+}
+
+function effectiveClaudeSecurityFrom() {
+  return claudeBuiltinRules.securityFrom || claudeBuiltinDefaults.security_preamble_from;
+}
+
+function effectiveClaudeSecurityTo() {
+  return claudeBuiltinRules.securityFrom
+    ? claudeBuiltinRules.securityTo
+    : claudeBuiltinDefaults.security_preamble_to;
+}
+
+function builtinRuleModeLabel(isCustom) {
+  return isCustom ? '已自定义' : '内置默认';
+}
+
+function builtinRuleStatus(kind) {
+  const input = kind === 'promotion'
+    ? $('#set_claude_prompt_strip_claude_code_promotions')
+    : $('#set_claude_prompt_replace_security_preamble');
+  const configuredEnabled = kind === 'promotion'
+    ? curSettings.claude_prompt_strip_claude_code_promotions !== false
+    : curSettings.claude_prompt_replace_security_preamble !== false;
+  const enabled = input ? input.checked : configuredEnabled;
+  if (!enabled) return '已关闭，后续请求不会处理';
+  if (!latestClaudePrompt) return '等待下一次 Claude 请求验证';
+  const count = kind === 'promotion'
+    ? Number(latestClaudePrompt.promotion_removal_count || 0)
+    : Number(latestClaudePrompt.security_preamble_replacement_count || 0);
+  if (count > 0) return '最近请求已生效 ×' + count;
+  return '最近请求未命中';
+}
+
+function claudeBuiltinPromotionRowsHTML() {
+  return effectiveClaudePromotionTargets().map((target, index) => `
+    <div class="claude-builtin-target-row">
+      <div class="claude-builtin-target-head">
+        <span class="pill ${claudeBuiltinRules.promotionTargets === null ? 'on' : ''}">${builtinRuleModeLabel(claudeBuiltinRules.promotionTargets !== null)} · 精确删除 ${index + 1}</span>
+      </div>
+      <textarea data-promotion-target rows="4" maxlength="1048576" class="font-mono" readonly>${escapeSettingsHTML(target)}</textarea>
+    </div>
+  `).join('');
+}
+
+function claudeBuiltinRulesBodyHTML() {
+  const customPromotion = claudeBuiltinRules.promotionTargets !== null;
+  const customSecurity = claudeBuiltinRules.securityFrom !== '';
+  return `
+    <div class="claude-builtin-item">
+      <div class="claude-builtin-item-head">
+        <div>
+          <label>移除 Claude Code 推广提示</label>
+          <div class="desc">${builtinRuleModeLabel(customPromotion)} · ${effectiveClaudePromotionTargets().length} 条精确删除目标 · <span class="claude-rule-status">${builtinRuleStatus('promotion')}</span></div>
+        </div>
+        <div class="toolbar m-0 gap-8">
+          <button type="button" class="btn ghost compact" data-click-action="editClaudeBuiltinRules">编辑</button>
+          <button type="button" class="btn danger compact" data-click-action="disableClaudeBuiltinRule" data-builtin-rule="promotion" ${builtinRuleStatus('promotion').startsWith('已关闭') ? 'disabled' : ''}>删除（关闭）</button>
+        </div>
+      </div>
+      <div class="claude-builtin-target-list">${claudeBuiltinPromotionRowsHTML()}</div>
+    </div>
+    <div class="claude-builtin-item">
+      <div class="claude-builtin-item-head">
+        <div>
+          <label>替换 Claude 安全测试提示</label>
+          <div class="desc">${builtinRuleModeLabel(customSecurity)} · 精确替换 source → replacement · <span class="claude-rule-status">${builtinRuleStatus('security')}</span></div>
+        </div>
+        <div class="toolbar m-0 gap-8">
+          <button type="button" class="btn ghost compact" data-click-action="editClaudeBuiltinRules">编辑</button>
+          <button type="button" class="btn danger compact" data-click-action="disableClaudeBuiltinRule" data-builtin-rule="security" ${builtinRuleStatus('security').startsWith('已关闭') ? 'disabled' : ''}>删除（关闭）</button>
+        </div>
+      </div>
+      <div class="grid grid-2">
+        <div class="field">
+          <label>查找内容</label>
+          <textarea rows="5" class="font-mono" readonly>${escapeSettingsHTML(effectiveClaudeSecurityFrom())}</textarea>
+        </div>
+        <div class="field">
+          <label>替换为</label>
+          <textarea rows="5" class="font-mono" readonly>${escapeSettingsHTML(effectiveClaudeSecurityTo())}</textarea>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function claudeBuiltinRulesHTML() {
+  const customPromotion = claudeBuiltinRules.promotionTargets !== null;
+  const customSecurity = claudeBuiltinRules.securityFrom !== '';
+  return `
+    <div class="claude-prompt-rule claude-builtin-rules">
+      <div class="claude-builtin-rule-head">
+        <div>
+          <div class="field-heading label-gold">内置规则内容</div>
+          <div class="desc">精确匹配，不会扫描或改写普通 user 内容。编辑会创建当前配置的自定义版本；“恢复默认”回到项目内置签名。</div>
+        </div>
+        <div class="toolbar m-0 gap-8">
+          <button type="button" class="btn ghost compact" data-click-action="editClaudeBuiltinRules">编辑</button>
+          <button type="button" class="btn ghost compact" data-click-action="restoreClaudeBuiltinRules" ${!customPromotion && !customSecurity ? 'disabled' : ''}>恢复默认</button>
+        </div>
+      </div>
+      <div id="claudeBuiltinRulesView">${claudeBuiltinRulesBodyHTML()}</div>
+    </div>
+  `;
+}
+
+function claudeBuiltinRulesEditHTML() {
+  const targets = effectiveClaudePromotionTargets();
+  return `
+    <div class="claude-builtin-edit">
+      <div class="claude-builtin-edit-head">
+        <div class="desc">编辑后需保存设置才会用于后续 Claude 请求。删除目标后，该条推广片段将不再被自动移除。</div>
+        <button type="button" class="btn ghost compact" data-click-action="addClaudeBuiltinPromotionTarget">添加精确删除目标</button>
+      </div>
+      <div id="claudeBuiltinPromotionEditRows">
+        ${targets.map((target, index) => `
+          <div class="claude-builtin-target-row" data-promotion-target-index="${index}">
+            <div class="claude-builtin-target-head">
+              <span class="pill">精确删除 ${index + 1}</span>
+              <button type="button" class="btn danger compact" data-click-action="removeClaudeBuiltinPromotionTarget" data-promotion-target-index="${index}">删除</button>
+            </div>
+            <textarea data-promotion-target rows="4" maxlength="1048576" class="font-mono">${escapeSettingsHTML(target)}</textarea>
+          </div>
+        `).join('')}
+      </div>
+      <div class="grid grid-2">
+        <div class="field">
+          <label for="set_claude_prompt_security_preamble_from">安全测试提示：查找内容</label>
+          <textarea id="set_claude_prompt_security_preamble_from" rows="6" maxlength="1048576" class="font-mono">${escapeSettingsHTML(effectiveClaudeSecurityFrom())}</textarea>
+        </div>
+        <div class="field">
+          <label for="set_claude_prompt_security_preamble_to">安全测试提示：替换为</label>
+          <textarea id="set_claude_prompt_security_preamble_to" rows="6" maxlength="1048576" class="font-mono">${escapeSettingsHTML(effectiveClaudeSecurityTo())}</textarea>
+        </div>
+      </div>
+      <div class="toolbar m-0 gap-8">
+        <button type="button" class="btn" data-click-action="saveClaudeBuiltinRulesEdit">应用编辑</button>
+        <button type="button" class="btn ghost" data-click-action="cancelClaudeBuiltinRulesEdit">取消</button>
+      </div>
+    </div>
+  `;
 }
 
 function claudeReplacementRowsHTML() {
@@ -118,6 +290,7 @@ function claudePromptSettingsHTML() {
   const replaceSecurity = curSettings.claude_prompt_replace_security_preamble !== false;
   const position = curSettings.claude_prompt_injection_position === 'prepend' ? 'prepend' : 'append';
   claudeReplacementRules = configuredClaudeReplacementRules();
+	configuredClaudeBuiltinRules();
   if (!claudeReplacementRules.length) {
     claudeReplacementRules.push({ from: '', to: '', action: 'replace', disabled: false, models: [] });
   }
@@ -133,6 +306,8 @@ function claudePromptSettingsHTML() {
           <label class="toggle"><input type="checkbox" id="set_claude_prompt_strip_claude_code_promotions" ${stripPromotions ? 'checked' : ''}><span class="track"></span></label>
         </div>
       </div>
+
+      ${claudeBuiltinRulesHTML()}
 
       <div class="claude-prompt-rule">
         <div class="field bool">
@@ -272,6 +447,128 @@ function renderClaudeReplacementRules(focusIndex) {
   }
 }
 
+function renderClaudeBuiltinRules() {
+  const section = document.querySelector('.claude-builtin-rules');
+  if (section) section.outerHTML = claudeBuiltinRulesHTML();
+}
+
+function refreshClaudeBuiltinRuleStatus() {
+  if (!claudeBuiltinRulesEditing) renderClaudeBuiltinRules();
+}
+
+function readClaudeBuiltinPromotionTargetsFromDOM() {
+  const rows = document.querySelectorAll('#claudeBuiltinPromotionEditRows [data-promotion-target]');
+  return Array.from(rows).map(row => row.value);
+}
+
+function editClaudeBuiltinRules() {
+  const container = $('#claudeBuiltinRulesView');
+  if (!container) return;
+  container.innerHTML = claudeBuiltinRulesEditHTML();
+  claudeBuiltinRulesEditing = true;
+}
+
+function cancelClaudeBuiltinRulesEdit() {
+  const container = $('#claudeBuiltinRulesView');
+  if (!container) return;
+  container.innerHTML = claudeBuiltinRulesBodyHTML();
+  claudeBuiltinRulesEditing = false;
+}
+
+function saveClaudeBuiltinRulesEdit() {
+  const targets = readClaudeBuiltinPromotionTargetsFromDOM();
+  const securityFrom = $('#set_claude_prompt_security_preamble_from')?.value || '';
+  const securityTo = $('#set_claude_prompt_security_preamble_to')?.value || '';
+  if (!targets.length || targets.some(target => target === '')) {
+    toast('Claude Code 推广提示至少保留一条非空精确删除目标');
+    return;
+  }
+  if (targets.length > CLAUDE_PROMPT_MAX_PROMOTION_TARGETS) {
+    toast('Claude Code 推广提示最多 ' + CLAUDE_PROMPT_MAX_PROMOTION_TARGETS + ' 条');
+    return;
+  }
+  if (securityFrom === '' || securityTo === '') {
+    toast('安全测试提示的查找内容和替换内容都不能为空');
+    return;
+  }
+  claudeBuiltinRules.promotionTargets = targets;
+  claudeBuiltinRules.securityFrom = securityFrom;
+  claudeBuiltinRules.securityTo = securityTo;
+  claudeBuiltinRulesEditing = false;
+  renderClaudeBuiltinRules();
+  window.hasUnsavedSettings = true;
+  toast('内置规则编辑已应用到当前页面，保存设置后生效');
+}
+
+function disableClaudeBuiltinRule(element) {
+  const rule = element.dataset.builtinRule;
+  const input = rule === 'promotion'
+    ? $('#set_claude_prompt_strip_claude_code_promotions')
+    : $('#set_claude_prompt_replace_security_preamble');
+  if (!input || !input.checked) return;
+  if (!confirm('关闭此内置规则？保存设置后，后续 Claude 请求将不再执行该处理。')) return;
+  input.checked = false;
+  window.hasUnsavedSettings = true;
+  renderClaudeBuiltinRules();
+  toast('规则已关闭；保存设置后生效');
+}
+
+function addClaudeBuiltinPromotionTarget() {
+  const targets = readClaudeBuiltinPromotionTargetsFromDOM();
+  if (targets.length >= CLAUDE_PROMPT_MAX_PROMOTION_TARGETS) {
+    toast('Claude Code 推广提示最多 ' + CLAUDE_PROMPT_MAX_PROMOTION_TARGETS + ' 条');
+    return;
+  }
+  targets.push('');
+  const container = $('#claudeBuiltinPromotionEditRows');
+  if (!container) return;
+  container.innerHTML = targets.map((target, index) => `
+    <div class="claude-builtin-target-row" data-promotion-target-index="${index}">
+      <div class="claude-builtin-target-head">
+        <span class="pill">精确删除 ${index + 1}</span>
+        <button type="button" class="btn danger compact" data-click-action="removeClaudeBuiltinPromotionTarget" data-promotion-target-index="${index}">删除</button>
+      </div>
+      <textarea data-promotion-target rows="4" maxlength="1048576" class="font-mono">${escapeSettingsHTML(target)}</textarea>
+    </div>
+  `).join('');
+  container.querySelectorAll('[data-promotion-target]')[targets.length - 1]?.focus();
+  window.hasUnsavedSettings = true;
+}
+
+function removeClaudeBuiltinPromotionTarget(element) {
+  const targets = readClaudeBuiltinPromotionTargetsFromDOM();
+  const index = Number(element.dataset.promotionTargetIndex);
+  if (!Number.isInteger(index) || index < 0 || index >= targets.length) return;
+  if (targets.length === 1) {
+    toast('至少保留一条精确删除目标；如需停用，请关闭上方开关');
+    return;
+  }
+  targets.splice(index, 1);
+  const container = $('#claudeBuiltinPromotionEditRows');
+  if (!container) return;
+  container.innerHTML = targets.map((target, rowIndex) => `
+    <div class="claude-builtin-target-row" data-promotion-target-index="${rowIndex}">
+      <div class="claude-builtin-target-head">
+        <span class="pill">精确删除 ${rowIndex + 1}</span>
+        <button type="button" class="btn danger compact" data-click-action="removeClaudeBuiltinPromotionTarget" data-promotion-target-index="${rowIndex}">删除</button>
+      </div>
+      <textarea data-promotion-target rows="4" maxlength="1048576" class="font-mono">${escapeSettingsHTML(target)}</textarea>
+    </div>
+  `).join('');
+  window.hasUnsavedSettings = true;
+}
+
+function restoreClaudeBuiltinRules() {
+  if (!confirm('恢复项目内置的 Claude Code 推广删除和安全测试提示替换内容？')) return;
+  claudeBuiltinRules.promotionTargets = null;
+  claudeBuiltinRules.securityFrom = '';
+  claudeBuiltinRules.securityTo = '';
+  claudeBuiltinRulesEditing = false;
+  renderClaudeBuiltinRules();
+  window.hasUnsavedSettings = true;
+  toast('已恢复内置规则，保存设置后生效');
+}
+
 function addClaudeReplacementRule(rule) {
   syncClaudeReplacementRulesFromDOM();
   if (claudeReplacementRules.length >= CLAUDE_PROMPT_MAX_RULES) {
@@ -313,6 +610,8 @@ async function loadLatestClaudePrompt() {
   const effective = $('#claudePromptLatestEffective');
   const meta = $('#claudePromptLatestMeta');
   if (!original || !effective || !meta) return;
+  const loadSequence = ++claudePromptLatestLoadSequence;
+  const endpoint = $('#claudePromptLatestEndpoint')?.value || 'messages';
   const buttons = [
     $('#useLatestClaudePromptBtn'),
     $('#previewClaudePromptBtn'),
@@ -320,15 +619,17 @@ async function loadLatestClaudePrompt() {
     $('#clearLatestClaudePromptBtn')
   ];
   try {
-    const endpoint = $('#claudePromptLatestEndpoint')?.value || 'messages';
     const data = await API.claudePrompt.latest(endpoint);
+    if (loadSequence !== claudePromptLatestLoadSequence) return;
     latestClaudePrompt = data.available ? data : null;
   } catch (e) {
+    if (loadSequence !== claudePromptLatestLoadSequence) return;
     latestClaudePrompt = null;
     original.value = '';
     effective.value = '';
     buttons.forEach(button => { if (button) button.disabled = true; });
     meta.textContent = '最近提示词读取失败：' + e.message;
+    refreshClaudeBuiltinRuleStatus();
     return;
   }
 
@@ -337,6 +638,7 @@ async function loadLatestClaudePrompt() {
     original.value = '';
     effective.value = '';
     meta.textContent = '尚未收到 Claude Messages 请求';
+    refreshClaudeBuiltinRuleStatus();
     return;
   }
 
@@ -352,6 +654,12 @@ async function loadLatestClaudePrompt() {
   const actions = [];
   if (latestClaudePrompt.promotion_removal_count) {
     actions.push('已移除 Claude Code 推广片段×' + latestClaudePrompt.promotion_removal_count);
+    if (Array.isArray(latestClaudePrompt.promotion_target_match_counts)) {
+      const details = latestClaudePrompt.promotion_target_match_counts
+        .map((count, index) => count ? ('删除目标 #' + (index + 1) + '×' + count) : '')
+        .filter(Boolean);
+      if (details.length) actions.push(details.join('、'));
+    }
   }
   if (latestClaudePrompt.security_preamble_replacement_count) {
     actions.push('已替换 Claude 安全测试提示×' + latestClaudePrompt.security_preamble_replacement_count);
@@ -385,6 +693,21 @@ async function loadLatestClaudePrompt() {
     received + ' · 原始 ' + (latestClaudePrompt.original_bytes || 0) +
     'B → 最终 ' + (latestClaudePrompt.effective_bytes || 0) +
     'B · ' + actions.join('，') + truncated;
+  refreshClaudeBuiltinRuleStatus();
+}
+
+function startClaudePromptPolling() {
+  if (claudePromptPollingTimer) {
+    clearInterval(claudePromptPollingTimer);
+  }
+  claudePromptPollingTimer = window.setInterval(() => {
+    if (!$('#claudePromptLatestMeta')) {
+      clearInterval(claudePromptPollingTimer);
+      claudePromptPollingTimer = 0;
+      return;
+    }
+    void loadLatestClaudePrompt();
+  }, 5000);
 }
 
 function useLatestClaudePromptAsFind() {
@@ -429,6 +752,7 @@ function currentClaudeReplacementRulesForRequest() {
 async function previewClaudePrompt() {
   if (!latestClaudePrompt) return toast('暂无最近 Claude 提示词');
   if (latestClaudePrompt.original_truncated) return toast('最近原始提示词已截断，无法精确预览');
+  if (claudeBuiltinRulesEditing) return toast('请先应用或取消内置规则编辑，再预览');
   const effective = $('#claudePromptLatestEffective');
   const meta = $('#claudePromptLatestMeta');
   try {
@@ -439,6 +763,9 @@ async function previewClaudePrompt() {
         $('#set_claude_prompt_strip_claude_code_promotions').checked,
       replace_security_preamble:
         $('#set_claude_prompt_replace_security_preamble').checked,
+      promotion_targets: claudeBuiltinRules.promotionTargets,
+      security_preamble_from: claudeBuiltinRules.securityFrom,
+      security_preamble_to: claudeBuiltinRules.securityTo,
       replacement_enabled: $('#set_claude_prompt_replacement_enabled').checked,
       replacements: currentClaudeReplacementRulesForRequest(),
       injection_enabled: $('#set_claude_prompt_injection_enabled').checked,
@@ -496,6 +823,15 @@ async function loadSettings() {
   }
   curSettings = d.settings || d;
   managedSettings = d.managed_fields || {};
+  const builtinDefaults = d.claude_prompt_builtin_defaults || {};
+  claudeBuiltinDefaults = {
+    promotion_targets: Array.isArray(builtinDefaults.promotion_targets)
+      ? builtinDefaults.promotion_targets.map(target => String(target))
+      : [],
+    security_preamble_from: String(builtinDefaults.security_preamble_from ?? ''),
+    security_preamble_to: String(builtinDefaults.security_preamble_to ?? '')
+  };
+  claudeBuiltinRulesEditing = false;
 
   const gpEl = $('#globalProxy');
   if (gpEl && curSettings.proxy_url !== undefined) {
@@ -580,9 +916,16 @@ async function loadSettings() {
 
   $('#set_claude_prompt_replacement_enabled').addEventListener('change', updateClaudePromptControls);
   $('#set_claude_prompt_injection_enabled').addEventListener('change', updateClaudePromptControls);
+  $('#set_claude_prompt_strip_claude_code_promotions').addEventListener('change', () => {
+    if (!claudeBuiltinRulesEditing) renderClaudeBuiltinRules();
+  });
+  $('#set_claude_prompt_replace_security_preamble').addEventListener('change', () => {
+    if (!claudeBuiltinRulesEditing) renderClaudeBuiltinRules();
+  });
   $('#claudePromptLatestEndpoint')?.addEventListener('change', loadLatestClaudePrompt);
   updateClaudePromptControls();
   await loadLatestClaudePrompt();
+  startClaudePromptPolling();
 
   const stickyEl = $('#set_sticky_node_priority');
   const parallelRetryEl = $('#set_parallel_pool_retry_enabled');
@@ -651,6 +994,10 @@ async function saveSettings() {
   const replacementEnabled = $('#set_claude_prompt_replacement_enabled').checked;
   const injectionEnabled = $('#set_claude_prompt_injection_enabled').checked;
   const injectionText = $('#set_claude_prompt_injection_text').value;
+  if (claudeBuiltinRulesEditing) {
+    toast('请先应用或取消内置规则编辑，再保存设置');
+    return;
+  }
   syncClaudeReplacementRulesFromDOM();
   const replacements = [];
   const seenReplacementSources = new Set();
@@ -713,12 +1060,51 @@ async function saveSettings() {
     $('#set_claude_prompt_injection_text').focus();
     return;
   }
+
+  const promotionTargets = claudeBuiltinRules.promotionTargets;
+  if (promotionTargets !== null) {
+    if (!Array.isArray(promotionTargets) || !promotionTargets.length ||
+        promotionTargets.some(target => target === '')) {
+      toast('Claude Code 推广提示至少需要一条非空精确删除目标');
+      return;
+    }
+    if (promotionTargets.length > CLAUDE_PROMPT_MAX_PROMOTION_TARGETS) {
+      toast('Claude Code 推广提示最多 ' + CLAUDE_PROMPT_MAX_PROMOTION_TARGETS + ' 条');
+      return;
+    }
+    const seenPromotionTargets = new Set();
+    let promotionBytes = 0;
+    for (const target of promotionTargets) {
+      if (seenPromotionTargets.has(target)) {
+        toast('Claude Code 推广提示包含重复的精确删除目标');
+        return;
+      }
+      seenPromotionTargets.add(target);
+      promotionBytes += settingsUTF8Bytes(target);
+    }
+    if (promotionBytes > CLAUDE_PROMPT_MAX_BYTES) {
+      toast('Claude Code 推广提示文本总计不能超过 1 MiB');
+      return;
+    }
+  }
+  if ((claudeBuiltinRules.securityFrom === '') !== (claudeBuiltinRules.securityTo === '')) {
+    toast('安全测试提示的查找内容和替换内容必须同时填写');
+    return;
+  }
+  if (settingsUTF8Bytes(claudeBuiltinRules.securityFrom) +
+      settingsUTF8Bytes(claudeBuiltinRules.securityTo) > CLAUDE_PROMPT_MAX_BYTES) {
+    toast('安全测试提示内容总计不能超过 1 MiB');
+    return;
+  }
   out.claude_prompt_replacement_enabled = replacementEnabled;
   out.claude_prompt_replacements = replacements;
   out.claude_prompt_strip_claude_code_promotions =
     $('#set_claude_prompt_strip_claude_code_promotions').checked;
   out.claude_prompt_replace_security_preamble =
     $('#set_claude_prompt_replace_security_preamble').checked;
+  out.claude_prompt_promotion_targets = promotionTargets;
+  out.claude_prompt_security_preamble_from = claudeBuiltinRules.securityFrom;
+  out.claude_prompt_security_preamble_to = claudeBuiltinRules.securityTo;
   out.claude_prompt_injection_enabled = injectionEnabled;
   out.claude_prompt_injection_position = $('#set_claude_prompt_injection_position').value;
   out.claude_prompt_injection_text = injectionText;
@@ -780,6 +1166,13 @@ registerActions({
   addClaudeReplacementRule: function () { addClaudeReplacementRule(); },
   removeClaudeReplacementRule: function (element) { removeClaudeReplacementRule(element); },
   moveClaudeReplacementRule: function (element) { moveClaudeReplacementRule(element); },
+  editClaudeBuiltinRules: function () { editClaudeBuiltinRules(); },
+  cancelClaudeBuiltinRulesEdit: function () { cancelClaudeBuiltinRulesEdit(); },
+  saveClaudeBuiltinRulesEdit: function () { saveClaudeBuiltinRulesEdit(); },
+  restoreClaudeBuiltinRules: function () { restoreClaudeBuiltinRules(); },
+  disableClaudeBuiltinRule: function (element) { disableClaudeBuiltinRule(element); },
+  addClaudeBuiltinPromotionTarget: function () { addClaudeBuiltinPromotionTarget(); },
+  removeClaudeBuiltinPromotionTarget: function (element) { removeClaudeBuiltinPromotionTarget(element); },
   refreshLatestClaudePrompt: function () { loadLatestClaudePrompt(); },
   useLatestClaudePromptAsFind: function () { useLatestClaudePromptAsFind(); },
   useLatestClaudeModelForRule: function (element) { useLatestClaudeModelForRule(element); },

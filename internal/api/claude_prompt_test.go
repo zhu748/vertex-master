@@ -146,6 +146,44 @@ func TestClaudePromptPolicyReplacesSecurityPreambleByDefault(t *testing.T) {
 	}
 }
 
+func TestClaudePromptPolicyUsesEditableBuiltinOverrides(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ClaudePromptPromotionTargets = []string{"CUSTOM_CLAUDE_PROMOTION"}
+	cfg.ClaudePromptSecurityPreambleFrom = "IMPORTANT: custom security guidance"
+	cfg.ClaudePromptSecurityPreambleTo = "IMPORTANT: replacement guidance"
+	chatBody := map[string]any{"messages": []any{
+		map[string]any{
+			"role": "system",
+			"content": claudeCodePromotionPrompt + "\nCUSTOM_CLAUDE_PROMOTION\n" +
+				"IMPORTANT: custom security guidance",
+		},
+		map[string]any{
+			"role":    "user",
+			"content": "CUSTOM_CLAUDE_PROMOTION IMPORTANT: custom security guidance",
+		},
+	}}
+
+	result, err := applyClaudePromptPolicy(chatBody, config.StaticProvider(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.PromotionRemovalCount != 1 ||
+		len(result.PromotionTargetMatchCounts) != 1 ||
+		result.PromotionTargetMatchCounts[0] != 1 ||
+		result.SecurityPreambleReplacementCount != 1 {
+		t.Fatalf("内置规则覆盖命中统计错误: %#v", result)
+	}
+	if !strings.Contains(result.EffectivePrompt, strings.TrimSpace(claudeCodePromotionPrompt)) ||
+		strings.Contains(result.EffectivePrompt, "CUSTOM_CLAUDE_PROMOTION") ||
+		!strings.Contains(result.EffectivePrompt, "IMPORTANT: replacement guidance") {
+		t.Fatalf("自定义内置规则未精确应用: %q", result.EffectivePrompt)
+	}
+	messages := chatBody["messages"].([]any)
+	if got := messages[1].(map[string]any)["content"]; got != "CUSTOM_CLAUDE_PROMOTION IMPORTANT: custom security guidance" {
+		t.Fatalf("自定义内置规则不应改写 user 内容: %q", got)
+	}
+}
+
 func TestClaudePromptPolicyReplacesBeforeAppendingInjection(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.ClaudePromptReplacementEnabled = true
@@ -573,8 +611,9 @@ func TestClaudePromptStoreBoundsUTF8Records(t *testing.T) {
 func TestClaudePromptStoreDoesNotExposeRuleMatchSlice(t *testing.T) {
 	store := &claudePromptStore{}
 	store.Record("model", "messages", claudePromptPolicyResult{
-		RuleMatchCounts: []int{2, 1},
-		RuleApplicable:  []bool{true, false},
+		RuleMatchCounts:            []int{2, 1},
+		RuleApplicable:             []bool{true, false},
+		PromotionTargetMatchCounts: []int{3},
 	})
 	record, ok := store.Latest()
 	if !ok {
@@ -582,8 +621,10 @@ func TestClaudePromptStoreDoesNotExposeRuleMatchSlice(t *testing.T) {
 	}
 	record.RuleMatchCounts[0] = 99
 	record.RuleApplicable[0] = false
+	record.PromotionTargetMatchCounts[0] = 99
 	unchanged, _ := store.Latest()
-	if unchanged.RuleMatchCounts[0] != 2 || !unchanged.RuleApplicable[0] {
+	if unchanged.RuleMatchCounts[0] != 2 || !unchanged.RuleApplicable[0] ||
+		unchanged.PromotionTargetMatchCounts[0] != 3 {
 		t.Fatalf("stored rule metadata was mutated: counts=%#v applicable=%#v",
 			unchanged.RuleMatchCounts, unchanged.RuleApplicable)
 	}
@@ -610,6 +651,7 @@ func TestAdminClaudePromptLatestLifecycle(t *testing.T) {
 		EffectivePrompt:                  "after",
 		HadSystem:                        true,
 		PromotionRemovalCount:            1,
+		PromotionTargetMatchCounts:       []int{1, 0},
 		SecurityPreambleReplacementCount: 1,
 		ReplacementCount:                 1,
 		ReplacementRules:                 1,
@@ -636,6 +678,10 @@ func TestAdminClaudePromptLatestLifecycle(t *testing.T) {
 	matchCounts, _ := response["rule_match_counts"].([]any)
 	if len(matchCounts) != 1 || matchCounts[0] != float64(1) {
 		t.Fatalf("latest response lost per-rule match counts: %#v", response)
+	}
+	promotionCounts, _ := response["promotion_target_match_counts"].([]any)
+	if len(promotionCounts) != 2 || promotionCounts[0] != float64(1) || promotionCounts[1] != float64(0) {
+		t.Fatalf("latest response lost promotion-target match counts: %#v", response)
 	}
 	store.Record("count-model", "count_tokens", claudePromptPolicyResult{OriginalPrompt: "count prompt"})
 	countGet := httptest.NewRecorder()
@@ -956,6 +1002,48 @@ func TestAdminClaudePromptPreviewReportsDefaultPromotionRemoval(t *testing.T) {
 		response["security_preamble_replacement_count"] != float64(0) ||
 		response["replacement_count"] != float64(0) {
 		t.Fatalf("unexpected promotion-removal preview: %#v", response)
+	}
+}
+
+func TestAdminClaudePromptPreviewUsesEditableBuiltinRules(t *testing.T) {
+	adm := &AdminHandler{
+		handler: handler{cfg: config.StaticProvider(config.DefaultConfig())},
+	} //nolint:exhaustruct
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/api/admin/claude-prompt/preview",
+		strings.NewReader(`{
+			"original_prompt":"custom-promotion IMPORTANT: custom security",
+			"strip_claude_code_promotions":true,
+			"promotion_targets":["custom-promotion"],
+			"replace_security_preamble":true,
+			"security_preamble_from":"IMPORTANT: custom security",
+			"security_preamble_to":"IMPORTANT: replaced security",
+			"replacement_enabled":false,
+			"replacements":[],
+			"injection_enabled":false,
+			"injection_position":"append",
+			"injection_text":""
+		}`),
+	)
+
+	adm.adminClaudePromptPreview(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("preview status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response["effective_prompt"] != "IMPORTANT: replaced security" ||
+		response["promotion_removal_count"] != float64(1) ||
+		response["security_preamble_replacement_count"] != float64(1) {
+		t.Fatalf("editable builtin preview is wrong: %#v", response)
+	}
+	promotionCounts, _ := response["promotion_target_match_counts"].([]any)
+	if len(promotionCounts) != 1 || promotionCounts[0] != float64(1) {
+		t.Fatalf("editable builtin preview lacks target count: %#v", response)
 	}
 }
 

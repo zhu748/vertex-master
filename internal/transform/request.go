@@ -73,7 +73,7 @@ func convertChatRequest(
 	compactContents := false
 	if compactTextHistory {
 		resolvedModel = cfg.ResolveModelName(model)
-		if !isGemini36Model(resolvedModel) {
+		if !isGemini36OrLaterModel(resolvedModel) {
 			contents, systemParts, compactContents = compactSingleTextContents(messagesRaw)
 		}
 	}
@@ -88,7 +88,7 @@ func convertChatRequest(
 	// read-only full slice without allocating one parts array per message.
 	var packedCompactFunctionCallParts canonicalFunctionCallParts
 	var packedCompactFunctionResponseParts canonicalFunctionResponseParts
-	compactMixedText := compactTextHistory && !isGemini36Model(resolvedModel)
+	compactMixedText := compactTextHistory && !isGemini36OrLaterModel(resolvedModel)
 	compactToolHistory := compactTextHistory
 
 	hasValidContents := compactContents
@@ -402,7 +402,7 @@ func convertChatRequest(
 	}
 
 	assistantPrefill := ""
-	if isGemini36Model(resolvedModel) {
+	if isGemini36OrLaterModel(resolvedModel) {
 		contents, assistantPrefill = convertTrailingAssistantPrefill(contents)
 	}
 

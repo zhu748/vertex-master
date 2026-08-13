@@ -118,6 +118,7 @@ claude --model gemini-3.6-flash
 
 | Gemini 模型 | 官方默认 | 官方可用控制 | 兼容协议转换 |
 |---|---|---|---|
+| 3.7 Flash（前瞻适配） | 官方尚未单列 | 按 3.6+ Flash 兼容：`minimal/low/medium/high` | `none` 降为 `minimal`，`xhigh/max` 收敛到 `high` |
 | 3.6 / 3.5 Flash | `medium` | `minimal/low/medium/high` | `none` 降为 `minimal`，`xhigh/max` 收敛到 `high` |
 | 3.5 / 3.1 Flash-Lite | `minimal` | `minimal/low/medium/high` | 同上 |
 | 3.1 Pro | `high` | `low/medium/high` | `none/minimal` 降为 `low` |
@@ -129,7 +130,11 @@ claude --model gemini-3.6-flash
 | 3 Pro Image | 固定开启 | 不开放强度控制 | 移除无效强度字段，保留模型官方行为 |
 | 2.5 Flash Image | 不支持 Thinking | 无 | 移除无效思考配置 |
 
-未显式传入强度时不会强行覆盖 Gemini 的模型默认值。Claude 旧版数值预算在 Gemini 2.5 上会尽量原值保留并按官方范围截断；发往 Gemini 3 时，`≤1024`、`≤8192`、更高预算依次映射为 `low`、`medium`、`high`，再按具体模型支持的等级收敛。参考 [Google Gemini Thinking](https://ai.google.dev/gemini-api/docs/generate-content/thinking)、[Google OpenAI 兼容映射](https://ai.google.dev/gemini-api/docs/openai#thinking)、[Anthropic Effort](https://platform.claude.com/docs/en/build-with-claude/effort) 和 [Anthropic Extended Thinking](https://platform.claude.com/docs/en/build-with-claude/extended-thinking)。
+未显式传入强度时不会强行覆盖 Gemini 的模型默认值。Claude 旧版数值预算在 Gemini 2.5 上会尽量原值保留并按官方范围截断；发往 Gemini 3 时，`≤1024`、`≤8192`、更高预算依次映射为 `low`、`medium`、`high`，再按具体模型支持的等级收敛。
+
+> **Gemini 3.7 Flash 说明（截至 2026-08-14）**：Google 官方模型和 Thinking 文档尚未发布该型号的独立能力表；本项目按 Google 对 3.6 Flash 及未来模型的 API 兼容说明，采用 Flash 四档 `MINIMAL/LOW/MEDIUM/HIGH` 的前瞻映射。`MINIMAL` 不等同于“完全关闭思考”。如要在当前网络和匿名上游配额下复测四档，可运行：`$env:VERTEX_LIVE_THINKING_TEST = '1'; go test ./internal/vertex -run '^TestLiveGemini37FlashThinkingLevels$' -v -count=1`。若上游明确返回 `INVALID_ARGUMENT`，请以其实际错误和新发布的官方表为准。
+
+参考 [Google Gemini Thinking](https://ai.google.dev/gemini-api/docs/generate-content/thinking)、[Google OpenAI 兼容映射](https://ai.google.dev/gemini-api/docs/openai#thinking)、[Google 3.6+ 模型迁移说明](https://ai.google.dev/gemini-api/docs/latest-model)、[Anthropic Effort](https://platform.claude.com/docs/en/build-with-claude/effort) 和 [Anthropic Extended Thinking](https://platform.claude.com/docs/en/build-with-claude/extended-thinking)。
 
 **完整的分平台部署教程**（包括开机自启、代理配置、手机部署、常见问题解答）见 **[部署指南](部署指南.md)**。
 
@@ -164,6 +169,9 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ver
 | `claude_prompt_injection_text` | 空 | 要注入的 system 提示词 |
 | `claude_prompt_strip_claude_code_promotions` | true | 精确移除 Claude Code 注入的模型、产品入口及 Fast mode 推广片段 |
 | `claude_prompt_replace_security_preamble` | true | 精确替换 Claude/Codex CLI 注入的 `IMPORTANT: Assist with authorized security testing...` 安全测试说明 |
+| `claude_prompt_promotion_targets` | `null` | 默认维护的 Claude Code 推广精确匹配列表；填入非空数组可覆盖，`null` 恢复内置列表 |
+| `claude_prompt_security_preamble_from` | 空 | 默认维护的安全测试提示原文；与下一项同时填写时覆盖内置替换 |
+| `claude_prompt_security_preamble_to` | 空 | 对应的安全测试提示替换文本；留空且上一项留空时恢复内置替换 |
 | `claude_prompt_replacement_enabled` | false | 是否在发送上游前，对 Claude 真正的 system/developer 提示词执行有序字面量替换 |
 | `claude_prompt_replacements` | `[]` | 最多 32 条 `{from,to,disabled,models}` 规则；面板可明确选择替换或删除，删除仍兼容保存为 `to: ""` |
 | `proxy_url` | 空 | 出站代理地址 (如 `http://127.0.0.1:7890`) |
@@ -180,9 +188,9 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ver
 
 自建 HTTPS 反向代理默认不会信任客户端可伪造的 `X-Forwarded-*` 请求头。只有当 Vertex 仅接收来自可信反向代理的流量时，才设置环境变量 `VPROXY_TRUST_PROXY_HEADERS=true`，以便管理会话正确识别 HTTPS 和客户端地址；Render 环境会自动启用该行为。
 
-> **提示**：默认模型清单已包含稳定版 `gemini-3.6-flash`。在模型名前加上 `fake-` 或 `假流式-` 前缀，可将非流式模型伪装成流式输出。假流式变体同样会经过完整的思考强度归一化（fake prefix 在内部被防御性剥离）。
+> **提示**：默认模型清单已包含 `gemini-3.6-flash` 与前瞻适配的 `gemini-3.7-flash`。在模型名前加上 `fake-` 或 `假流式-` 前缀，可将非流式模型伪装成流式输出。假流式变体同样会经过完整的思考强度归一化（fake prefix 在内部被防御性剥离）。3.7 的官方独立能力表尚未发布，详见上方思考强度说明。
 
-> **预填充兼容**：通过 OpenAI Chat/Responses、Claude Messages 或 Gemini 原生接口调用 `gemini-3.6-flash` 时，服务会保留末尾纯文本 `assistant`/`model` 预填充的角色与原文，再追加一条短续写提示，使请求合法地以 `user` 结束；流式或非流式回复都会移除模型可能重复输出的前缀。工具调用、媒体、思考块和其他模型的历史行为保持不变；旧客户端传入的 `NONE`/`thinkingBudget` 也会在出站时转换为 Gemini 3.6 支持的思考级别。
+> **预填充兼容**：通过 OpenAI Chat/Responses、Claude Messages 或 Gemini 原生接口调用 `gemini-3.6-flash`、`gemini-3.7-flash`（以及后续 3.6+ 系列）时，服务会保留末尾纯文本 `assistant`/`model` 预填充的角色与原文，再追加一条短续写提示，使请求合法地以 `user` 结束；流式或非流式回复都会移除模型可能重复输出的前缀。工具调用、媒体、思考块和其他模型的历史行为保持不变；旧客户端传入的 `NONE`/`thinkingBudget` 也会在出站时转换为该模型支持的思考级别。
 
 > **🧠 思考强度（Thinking Budget）兼容**：本项目会自动把客户端的各种"思考强度"参数统一映射到 Gemini 的 `thinkingConfig`，按模型官方上限做 clamp，并按目标模型支持的字段形态（budget vs level）归一化。具体行为见下表：
 
@@ -201,17 +209,17 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ver
 | `gemini-2.5-flash` | thinkingBudget | 0 – 24576 | 动态思考 |
 | `gemini-2.5-flash-lite` | thinkingBudget | 512 – 24576（正数下限 512） | 关闭 |
 | `gemini-2.5-flash-image` | 不支持 | 删除整个 thinkingConfig | 固定 |
-| `gemini-3.6-flash` / `3.5-flash` / `3.1-flash-lite` / `3-flash` | thinkingLevel | MINIMAL/LOW/MEDIUM/HIGH | MINIMAL |
+| `gemini-3.7-flash`（前瞻适配）/ `3.6-flash` / `3.5-flash` / `3.1-flash-lite` / `3-flash` | thinkingLevel | MINIMAL/LOW/MEDIUM/HIGH | 3.7 待官方发布；其余见官方表 |
 | `gemini-3.1-pro` | thinkingLevel | LOW/MEDIUM/HIGH（不支持 MINIMAL） | — |
 | `gemini-3.1-flash-image` / `3.1-flash-lite-image` | thinkingLevel | MINIMAL/HIGH 两档 | — |
 | `gemini-3-pro-preview` | thinkingLevel | LOW/HIGH 两档 | — |
 | `gemini-3-pro-image` | 不支持 | 删除整个 thinkingConfig | 固定 |
 
-> **Claude Code "max" 档**：Claude Code 走 Anthropic 协议时，"max" 档会发送较大的 `thinking.budget_tokens`。本项目会自动按 budget 大小映射到 HIGH（>8192 → HIGH），从而真正开启 Gemini 的最大思考强度。Gemini 3.6 系列官方明确支持 MINIMAL/LOW/MEDIUM/HIGH 四档，HIGH 即是最大档。
+> **Claude Code "max" 档**：Claude Code 走 Anthropic 协议时，"max" 档会发送较大的 `thinking.budget_tokens`。本项目会自动按 budget 大小映射到 HIGH（>8192 → HIGH），从而真正开启 Gemini 的最大思考强度。Gemini 3.6 系列官方明确支持 MINIMAL/LOW/MEDIUM/HIGH 四档，HIGH 即是最大档；3.7 当前沿用此映射，等待官方独立规格确认。
 
 > **聊天软件 "auto" 档**：Cherry Studio / ChatBox 等聊天软件的"自动"选项会发送 `reasoning_effort: "auto"` 或 `output_config.effort: "auto"`。本项目会跳过设置 thinkingConfig，让 Gemini 使用其官方默认思考行为（2.5 系列动态思考、3.x 系列 HIGH），不会被报错也不会被钉死在固定档位。
 
-> **Claude system 处理**：默认先精确移除 Claude Code 注入的 Claude 模型推荐、产品入口及 Fast mode 推广三行，再精确替换 Claude/Codex CLI 注入的 `IMPORTANT: Assist with authorized security testing...` 安全测试说明，二者都可在管理面板关闭。随后可以为 `/v1/messages` 和 `/v1/messages/count_tokens` 配置多条 system 精确替换或删除规则。每条规则可单独停用或限定客户端/实际模型名；模型范围默认留空并适用于所有模型，只有主动填写时才会限制。规则区分大小写、空白与换行，按列表顺序逐条执行，最后再以前置或后置的独立 system 片段注入额外提示词。顶层和中途 system 会保持先后顺序与独立片段，只有规则确实跨片段匹配时才兼容性合并。`role: user` 内的 `<system-reminder>` 仍是用户内容，不会被 system 规则改写。生成与 Token 计数的最近记录分开保存在当前进程内，可使用尚未保存的页面设置进行后端预览；被截断的记录不会用于创建精确规则，也不会写入日志或配置文件。
+> **Claude system 处理**：默认先精确移除 Claude Code 注入的 Claude 模型推荐、产品入口及 Fast mode 推广三行，再精确替换 Claude/Codex CLI 注入的 `IMPORTANT: Assist with authorized security testing...` 安全测试说明，二者都可在管理面板关闭。设置页的“内置规则内容”会展示每一段精确原文及替换结果，可单独编辑、恢复维护的默认值或关闭规则；Claude 请求后，最近记录会在设置页打开期间最多每 5 秒更新，并显示每条推广片段和安全提示的实际命中数。随后可以为 `/v1/messages` 和 `/v1/messages/count_tokens` 配置多条 system 精确替换或删除规则。每条规则可单独停用或限定客户端/实际模型名；模型范围默认留空并适用于所有模型，只有主动填写时才会限制。规则区分大小写、空白与换行，按列表顺序逐条执行，最后再以前置或后置的独立 system 片段注入额外提示词。顶层和中途 system 会保持先后顺序与独立片段，只有规则确实跨片段匹配时才兼容性合并。`role: user` 内的 `<system-reminder>` 仍是用户内容，不会被 system 规则改写。生成与 Token 计数的最近记录分开保存在当前进程内，可使用尚未保存的页面设置进行后端预览；被截断的记录不会用于创建精确规则，也不会写入日志或配置文件。
 
 详细配置说明请参阅 [部署指南](部署指南.md#配置怎么改)。
 

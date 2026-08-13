@@ -42,7 +42,7 @@ const (
 
 func thinkingKindForModel(model string) thinkingModelKind {
 	model = strings.ToLower(strings.TrimSpace(model))
-	// 防御性剥离假流式前缀，确保 fake-gemini-3.6-flash / 假流式-gemini-2.5-pro
+	// 防御性剥离假流式前缀，确保 fake-gemini-3.7-flash / 假流式-gemini-2.5-pro
 	// 等变体也能匹配到正确的模型 kind。
 	model = stripFakePrefixes(model)
 	switch {
@@ -63,7 +63,8 @@ func thinkingKindForModel(model string) thinkingModelKind {
 		return thinkingModelLevelsNoMinimal
 	case strings.HasPrefix(model, "gemini-3-pro-preview"):
 		return thinkingModelLevelsLowHigh
-	case strings.HasPrefix(model, "gemini-3.6-flash"),
+	case strings.HasPrefix(model, "gemini-3.7-flash"),
+		strings.HasPrefix(model, "gemini-3.6-flash"),
 		strings.HasPrefix(model, "gemini-3.5-flash-lite"),
 		strings.HasPrefix(model, "gemini-3.5-flash"),
 		strings.HasPrefix(model, "gemini-3.1-flash-lite"),

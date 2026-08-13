@@ -46,6 +46,7 @@ func TestDefaultModelsTrackCurrentGeminiThinkingModels(t *testing.T) {
 	t.Cleanup(InvalidateModelsCache)
 
 	if got := BaseModels(); !contains(got, "gemini-3.6-flash") ||
+		!contains(got, "gemini-3.7-flash") ||
 		!contains(got, "gemini-3.5-flash-lite") ||
 		!contains(got, "gemini-3.1-flash-lite-image") {
 		t.Fatalf("默认模型清单应包含当前 Gemini thinking 模型，got %v", got)
@@ -57,6 +58,7 @@ func TestDefaultModelsTrackCurrentGeminiThinkingModels(t *testing.T) {
 	variants := ModelsWithFakeVariants()
 	for _, want := range []string{
 		"gemini-3.6-flash", "假流式-gemini-3.6-flash", "fake-gemini-3.6-flash",
+		"gemini-3.7-flash", "假流式-gemini-3.7-flash", "fake-gemini-3.7-flash",
 	} {
 		if !contains(variants, want) {
 			t.Fatalf("模型 API 清单应包含 %s，got %v", want, variants)

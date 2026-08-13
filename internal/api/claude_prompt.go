@@ -49,6 +49,7 @@ type claudePromptPolicyResult struct {
 	EffectivePrompt                  string
 	HadSystem                        bool
 	PromotionRemovalCount            int
+	PromotionTargetMatchCounts       []int
 	SecurityPreambleReplacementCount int
 	ReplacementCount                 int
 	ReplacementRules                 int
@@ -144,7 +145,9 @@ func applyClaudePromptPolicy(
 	collapsedSegments := false
 	workBytes := 0
 	if policy.StripPromotions {
-		for _, promotionTarget := range claudeCodePromotionTargets {
+		promotionTargets := claudePromotionTargetsForPolicy(policy)
+		result.PromotionTargetMatchCounts = make([]int, len(promotionTargets))
+		for targetIndex, promotionTarget := range promotionTargets {
 			scanBytes, _, _ := claudeSystemPromptSegmentsLength(effectiveSegments)
 			nextWorkBytes, withinWorkLimit := addClaudeReplacementWork(workBytes, scanBytes)
 			if !withinWorkLimit {
@@ -170,6 +173,7 @@ func applyClaudePromptPolicy(
 				if matches > 0 {
 					effectiveSegments[segmentIndex] = replaced
 					result.PromotionRemovalCount += matches
+					result.PromotionTargetMatchCounts[targetIndex] += matches
 				}
 			}
 		}
@@ -181,6 +185,8 @@ func applyClaudePromptPolicy(
 		}
 	}
 	if policy.ReplaceSecurity {
+		securityPreambleFrom, securityPreambleTo :=
+			claudeSecurityPreambleForPolicy(policy)
 		scanBytes := len(effective)
 		nextWorkBytes, withinWorkLimit := addClaudeReplacementWork(workBytes, scanBytes)
 		if !withinWorkLimit {
@@ -193,8 +199,8 @@ func applyClaudePromptPolicy(
 		for segmentIndex, segment := range effectiveSegments {
 			replaced, matches, err := replaceAllClaudeLiteralWithinLimit(
 				segment,
-				claudeSecurityPreamblePrompt,
-				claudeSecurityPreambleReplacement,
+				securityPreambleFrom,
+				securityPreambleTo,
 				limit,
 			)
 			if err != nil {
@@ -387,6 +393,28 @@ func applyClaudePromptPolicy(
 		policy.InjectionPosition,
 	)
 	return result, nil
+}
+
+func claudePromotionTargetsForPolicy(policy config.ClaudePromptPolicyConfig) []string {
+	if policy.PromotionTargets != nil {
+		return policy.PromotionTargets
+	}
+	return claudeCodePromotionTargets
+}
+
+func claudeSecurityPreambleForPolicy(policy config.ClaudePromptPolicyConfig) (string, string) {
+	if policy.SecurityPreambleFrom != "" {
+		return policy.SecurityPreambleFrom, policy.SecurityPreambleTo
+	}
+	return claudeSecurityPreamblePrompt, claudeSecurityPreambleReplacement
+}
+
+func claudePromptBuiltinDefaults() map[string]any {
+	return map[string]any{
+		"promotion_targets":      append([]string(nil), claudeCodePromotionTargets...),
+		"security_preamble_from": claudeSecurityPreamblePrompt,
+		"security_preamble_to":   claudeSecurityPreambleReplacement,
+	}
 }
 
 func joinClaudeSystemPromptSegments(segments []string) string {
@@ -659,6 +687,7 @@ type claudePromptRecord struct {
 	ReceivedAt                       time.Time
 	HadSystem                        bool
 	PromotionRemovalCount            int
+	PromotionTargetMatchCounts       []int
 	SecurityPreambleReplacementCount int
 	ReplacementCount                 int
 	ReplacementRules                 int
@@ -690,6 +719,7 @@ func (s *claudePromptStore) Record(
 	effective, effectiveTruncated := truncateClaudePromptRecord(result.EffectivePrompt)
 	ruleMatchCounts := append([]int(nil), result.RuleMatchCounts...)
 	ruleApplicable := append([]bool(nil), result.RuleApplicable...)
+	promotionTargetMatchCounts := append([]int(nil), result.PromotionTargetMatchCounts...)
 	s.slot(endpoint).Store(&claudePromptRecord{
 		OriginalPrompt:                   original,
 		EffectivePrompt:                  effective,
@@ -698,6 +728,7 @@ func (s *claudePromptStore) Record(
 		ReceivedAt:                       time.Now().UTC(),
 		HadSystem:                        result.HadSystem,
 		PromotionRemovalCount:            result.PromotionRemovalCount,
+		PromotionTargetMatchCounts:       promotionTargetMatchCounts,
 		SecurityPreambleReplacementCount: result.SecurityPreambleReplacementCount,
 		ReplacementCount:                 result.ReplacementCount,
 		ReplacementRules:                 result.ReplacementRules,
@@ -728,6 +759,10 @@ func (s *claudePromptStore) Latest(endpoints ...string) (claudePromptRecord, boo
 	copyOfRecord := *record
 	copyOfRecord.RuleMatchCounts = append([]int(nil), record.RuleMatchCounts...)
 	copyOfRecord.RuleApplicable = append([]bool(nil), record.RuleApplicable...)
+	copyOfRecord.PromotionTargetMatchCounts = append(
+		[]int(nil),
+		record.PromotionTargetMatchCounts...,
+	)
 	return copyOfRecord, true
 }
 
@@ -765,15 +800,18 @@ func truncateClaudePromptRecord(value string) (string, bool) {
 }
 
 type claudePromptPreviewRequest struct {
-	OriginalPrompt     string                               `json:"original_prompt"`
-	Model              string                               `json:"model"`
-	StripPromotions    *bool                                `json:"strip_claude_code_promotions"`
-	ReplaceSecurity    *bool                                `json:"replace_security_preamble"`
-	ReplacementEnabled bool                                 `json:"replacement_enabled"`
-	Replacements       []config.ClaudePromptReplacementRule `json:"replacements"`
-	InjectionEnabled   bool                                 `json:"injection_enabled"`
-	InjectionPosition  string                               `json:"injection_position"`
-	InjectionText      string                               `json:"injection_text"`
+	OriginalPrompt       string                               `json:"original_prompt"`
+	Model                string                               `json:"model"`
+	StripPromotions      *bool                                `json:"strip_claude_code_promotions"`
+	ReplaceSecurity      *bool                                `json:"replace_security_preamble"`
+	PromotionTargets     []string                             `json:"promotion_targets"`
+	SecurityPreambleFrom string                               `json:"security_preamble_from"`
+	SecurityPreambleTo   string                               `json:"security_preamble_to"`
+	ReplacementEnabled   bool                                 `json:"replacement_enabled"`
+	Replacements         []config.ClaudePromptReplacementRule `json:"replacements"`
+	InjectionEnabled     bool                                 `json:"injection_enabled"`
+	InjectionPosition    string                               `json:"injection_position"`
+	InjectionText        string                               `json:"injection_text"`
 }
 
 func (adm *AdminHandler) adminClaudePromptPreview(w http.ResponseWriter, r *http.Request) {
@@ -813,6 +851,9 @@ func (adm *AdminHandler) adminClaudePromptPreview(w http.ResponseWriter, r *http
 	if body.ReplaceSecurity != nil {
 		previewConfig.ClaudePromptReplaceSecurity = *body.ReplaceSecurity
 	}
+	previewConfig.ClaudePromptPromotionTargets = body.PromotionTargets
+	previewConfig.ClaudePromptSecurityPreambleFrom = body.SecurityPreambleFrom
+	previewConfig.ClaudePromptSecurityPreambleTo = body.SecurityPreambleTo
 	previewConfig.ClaudePromptReplacementEnabled = body.ReplacementEnabled
 	previewConfig.ClaudePromptReplacements = body.Replacements
 	previewConfig.ClaudePromptInjectionEnabled = body.InjectionEnabled
@@ -848,6 +889,7 @@ func (adm *AdminHandler) adminClaudePromptPreview(w http.ResponseWriter, r *http
 	writeJSON(w, http.StatusOK, map[string]any{
 		"effective_prompt":                    result.EffectivePrompt,
 		"promotion_removal_count":             result.PromotionRemovalCount,
+		"promotion_target_match_counts":       result.PromotionTargetMatchCounts,
 		"security_preamble_replacement_count": result.SecurityPreambleReplacementCount,
 		"replacement_count":                   result.ReplacementCount,
 		"replacement_rules":                   result.ReplacementRules,
@@ -886,6 +928,7 @@ func (adm *AdminHandler) adminClaudePromptLatest(w http.ResponseWriter, r *http.
 			"received_at":                         record.ReceivedAt.Format(time.RFC3339Nano),
 			"had_system":                          record.HadSystem,
 			"promotion_removal_count":             record.PromotionRemovalCount,
+			"promotion_target_match_counts":       record.PromotionTargetMatchCounts,
 			"security_preamble_replacement_count": record.SecurityPreambleReplacementCount,
 			"replacement_count":                   record.ReplacementCount,
 			"replacement_rules":                   record.ReplacementRules,

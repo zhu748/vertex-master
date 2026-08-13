@@ -27,6 +27,8 @@ const (
 	MaxClaudePromptReplacementRules = 32
 	// MaxClaudePromptRuleModels bounds model filters attached to one rule.
 	MaxClaudePromptRuleModels = 16
+	// MaxClaudePromptPromotionTargets bounds exact built-in promotion signatures.
+	MaxClaudePromptPromotionTargets = 16
 )
 
 type AppConfig struct { //nolint:govet
@@ -46,13 +48,19 @@ type AppConfig struct { //nolint:govet
 	RequestTimeout            int               `json:"request_timeout"`
 
 	// Claude Messages 顶层及中途 system 提示词处理
-	ClaudePromptInjectionEnabled   bool                          `json:"claude_prompt_injection_enabled"`
-	ClaudePromptInjectionPosition  string                        `json:"claude_prompt_injection_position"`
-	ClaudePromptInjectionText      string                        `json:"claude_prompt_injection_text"`
-	ClaudePromptStripPromotions    bool                          `json:"claude_prompt_strip_claude_code_promotions"`
-	ClaudePromptReplaceSecurity    bool                          `json:"claude_prompt_replace_security_preamble"`
-	ClaudePromptReplacementEnabled bool                          `json:"claude_prompt_replacement_enabled"`
-	ClaudePromptReplacements       []ClaudePromptReplacementRule `json:"claude_prompt_replacements"`
+	ClaudePromptInjectionEnabled  bool   `json:"claude_prompt_injection_enabled"`
+	ClaudePromptInjectionPosition string `json:"claude_prompt_injection_position"`
+	ClaudePromptInjectionText     string `json:"claude_prompt_injection_text"`
+	ClaudePromptStripPromotions   bool   `json:"claude_prompt_strip_claude_code_promotions"`
+	ClaudePromptReplaceSecurity   bool   `json:"claude_prompt_replace_security_preamble"`
+	// Optional overrides for the two built-in Claude Code prompt rules. A nil
+	// promotion target slice and empty security values keep the maintained
+	// built-in signatures active, so older config files retain safe defaults.
+	ClaudePromptPromotionTargets     []string                      `json:"claude_prompt_promotion_targets"`
+	ClaudePromptSecurityPreambleFrom string                        `json:"claude_prompt_security_preamble_from"`
+	ClaudePromptSecurityPreambleTo   string                        `json:"claude_prompt_security_preamble_to"`
+	ClaudePromptReplacementEnabled   bool                          `json:"claude_prompt_replacement_enabled"`
+	ClaudePromptReplacements         []ClaudePromptReplacementRule `json:"claude_prompt_replacements"`
 	// Deprecated single-rule fields are retained for config-file compatibility.
 	ClaudePromptReplaceFrom string `json:"claude_prompt_replace_from"`
 	ClaudePromptReplaceTo   string `json:"claude_prompt_replace_to"`
@@ -101,20 +109,24 @@ type ClaudePromptReplacementRule struct {
 // related values together prevents a live config reload from mixing fields
 // from different revisions while a request is being converted.
 type ClaudePromptPolicyConfig struct {
-	InjectionEnabled   bool
-	InjectionPosition  string
-	InjectionText      string
-	StripPromotions    bool
-	ReplaceSecurity    bool
-	ReplacementEnabled bool
-	ReplacementRules   []ClaudePromptReplacementRule
-	MaxRequestMB       int
-	validationErr      error
+	InjectionEnabled     bool
+	InjectionPosition    string
+	InjectionText        string
+	StripPromotions      bool
+	ReplaceSecurity      bool
+	PromotionTargets     []string
+	SecurityPreambleFrom string
+	SecurityPreambleTo   string
+	ReplacementEnabled   bool
+	ReplacementRules     []ClaudePromptReplacementRule
+	MaxRequestMB         int
+	validationErr        error
 }
 
 func (c AppConfig) ClaudePromptPolicy() ClaudePromptPolicyConfig {
 	policy := c.ClaudePromptPolicySnapshot()
 	policy.ReplacementRules = cloneClaudePromptReplacementRules(policy.ReplacementRules)
+	policy.PromotionTargets = append([]string(nil), policy.PromotionTargets...)
 	return policy
 }
 
@@ -123,14 +135,17 @@ func (c AppConfig) ClaudePromptPolicy() ClaudePromptPolicyConfig {
 // nested Models slices. Use ClaudePromptPolicy when a detached copy is needed.
 func (c AppConfig) ClaudePromptPolicySnapshot() ClaudePromptPolicyConfig {
 	policy := ClaudePromptPolicyConfig{
-		InjectionEnabled:   c.ClaudePromptInjectionEnabled,
-		InjectionPosition:  normalizeClaudePromptInjectionPosition(c.ClaudePromptInjectionPosition),
-		InjectionText:      c.ClaudePromptInjectionText,
-		StripPromotions:    c.ClaudePromptStripPromotions,
-		ReplaceSecurity:    c.ClaudePromptReplaceSecurity,
-		ReplacementEnabled: c.ClaudePromptReplacementEnabled,
-		ReplacementRules:   c.effectiveClaudePromptReplacementRulesSnapshot(),
-		MaxRequestMB:       c.MaxRequestMB,
+		InjectionEnabled:     c.ClaudePromptInjectionEnabled,
+		InjectionPosition:    normalizeClaudePromptInjectionPosition(c.ClaudePromptInjectionPosition),
+		InjectionText:        c.ClaudePromptInjectionText,
+		StripPromotions:      c.ClaudePromptStripPromotions,
+		ReplaceSecurity:      c.ClaudePromptReplaceSecurity,
+		PromotionTargets:     c.ClaudePromptPromotionTargets,
+		SecurityPreambleFrom: c.ClaudePromptSecurityPreambleFrom,
+		SecurityPreambleTo:   c.ClaudePromptSecurityPreambleTo,
+		ReplacementEnabled:   c.ClaudePromptReplacementEnabled,
+		ReplacementRules:     c.effectiveClaudePromptReplacementRulesSnapshot(),
+		MaxRequestMB:         c.MaxRequestMB,
 	}
 	policy.validationErr = ValidateClaudePromptPolicyConfig(policy)
 	return policy
@@ -176,6 +191,41 @@ func cloneClaudePromptReplacementRules(
 
 // ValidateClaudePromptPolicyConfig validates a complete prompt policy.
 func ValidateClaudePromptPolicyConfig(policy ClaudePromptPolicyConfig) error {
+	if policy.PromotionTargets != nil {
+		if len(policy.PromotionTargets) == 0 {
+			return fmt.Errorf("configured Claude promotion targets are empty")
+		}
+		if len(policy.PromotionTargets) > MaxClaudePromptPromotionTargets {
+			return fmt.Errorf(
+				"configured Claude promotion targets exceed the limit of %d",
+				MaxClaudePromptPromotionTargets,
+			)
+		}
+		seenPromotionTargets := make(map[string]struct{}, len(policy.PromotionTargets))
+		totalPromotionBytes := 0
+		for index, target := range policy.PromotionTargets {
+			if target == "" {
+				return fmt.Errorf("configured Claude promotion target %d is empty", index+1)
+			}
+			if _, duplicate := seenPromotionTargets[target]; duplicate {
+				return fmt.Errorf("configured Claude promotion target %d is duplicated", index+1)
+			}
+			seenPromotionTargets[target] = struct{}{}
+			totalPromotionBytes += len(target)
+			if totalPromotionBytes > MaxClaudePromptSettingBytes {
+				return fmt.Errorf("configured Claude promotion targets exceed 1 MiB")
+			}
+		}
+	}
+	if policy.SecurityPreambleFrom != "" || policy.SecurityPreambleTo != "" {
+		if policy.SecurityPreambleFrom == "" || policy.SecurityPreambleTo == "" {
+			return fmt.Errorf("configured Claude security preamble source and replacement must both be set")
+		}
+		if len(policy.SecurityPreambleFrom)+len(policy.SecurityPreambleTo) >
+			MaxClaudePromptSettingBytes {
+			return fmt.Errorf("configured Claude security preamble exceeds 1 MiB")
+		}
+	}
 	if policy.ReplacementEnabled {
 		if err := ValidateClaudePromptReplacementRules(policy.ReplacementRules); err != nil {
 			return err

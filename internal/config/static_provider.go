@@ -43,6 +43,7 @@ func (s staticConfig) ClaudePromptReplacementRules() []ClaudePromptReplacementRu
 func (s staticConfig) ClaudePromptPolicy() ClaudePromptPolicyConfig {
 	policy := s.claudePromptPolicy
 	policy.ReplacementRules = cloneClaudePromptReplacementRules(policy.ReplacementRules)
+	policy.PromotionTargets = append([]string(nil), policy.PromotionTargets...)
 	return policy
 }
 func (s staticConfig) ClaudePromptPolicySnapshot() ClaudePromptPolicyConfig {

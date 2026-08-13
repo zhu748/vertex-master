@@ -252,6 +252,63 @@ td code { background: rgba(0, 0, 0, .3); padding: 2px 9px; border-radius: 8px; f
 .claude-prompt-rule .grid > .field {
   margin-bottom: 0;
 }
+.claude-builtin-rules {
+  border-color: color-mix(in srgb, var(--gold) 34%, var(--stroke));
+  background: linear-gradient(135deg, rgba(215, 174, 88, .08), rgba(255, 255, 255, .018));
+}
+.claude-builtin-rule-head,
+.claude-builtin-item-head,
+.claude-builtin-edit-head,
+.claude-builtin-target-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.claude-builtin-rule-head {
+  margin-bottom: 12px;
+}
+.claude-builtin-item {
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, .10);
+  border-radius: 11px;
+  background: rgba(0, 0, 0, .11);
+}
+.claude-builtin-item + .claude-builtin-item {
+  margin-top: 12px;
+}
+.claude-builtin-item-head {
+  margin-bottom: 10px;
+}
+.claude-builtin-item-head .toolbar,
+.claude-builtin-rule-head .toolbar {
+  flex: 0 0 auto;
+}
+.claude-builtin-target-list,
+#claudeBuiltinPromotionEditRows {
+  display: grid;
+  gap: 9px;
+}
+.claude-builtin-target-row {
+  padding: 9px;
+  border-left: 2px solid rgba(215, 174, 88, .58);
+  background: rgba(0, 0, 0, .13);
+}
+.claude-builtin-target-head {
+  align-items: center;
+  margin-bottom: 7px;
+}
+.claude-builtin-target-row textarea {
+  min-height: 92px;
+}
+.claude-builtin-edit-head {
+  align-items: center;
+  margin-bottom: 12px;
+}
+.claude-rule-status {
+  color: var(--gold);
+  font-weight: 600;
+}
 .claude-rule-fields {
   transition: opacity .2s var(--ease);
 }
@@ -692,6 +749,9 @@ td code { background: rgba(0, 0, 0, .3); padding: 2px 9px; border-radius: 8px; f
   .claude-prompt-latest-head .btn { flex: 1 1 calc(50% - 8px); }
   .claude-replacement-toolbar { align-items: flex-start; flex-direction: column; }
   .claude-replacement-row-head { align-items: flex-start; }
+  .claude-builtin-rule-head,
+  .claude-builtin-item-head,
+  .claude-builtin-edit-head { flex-direction: column; }
   #page-nodes .toolbar > input,
   #page-nodes .toolbar > select {
     flex: 1 1 100%;

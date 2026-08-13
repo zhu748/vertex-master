@@ -19,17 +19,18 @@ const assistantPrefillContinueNudge = "Continue the immediately preceding assist
 
 const lowerHexDigits = "0123456789abcdef"
 
-// AdaptGemini36Prefill applies the trailing model-turn compatibility rewrite
-// to a native Gemini payload. model must be the resolved upstream model name.
-// The returned prefix is also stored as internal metadata for response filters.
-func AdaptGemini36Prefill(model string, payload map[string]any) string {
+// AdaptGemini36OrLaterPrefill applies the trailing model-turn compatibility
+// rewrite to a native Gemini 3.6+ payload. model must be the resolved upstream
+// model name. The returned prefix is also stored as internal metadata for
+// response filters.
+func AdaptGemini36OrLaterPrefill(model string, payload map[string]any) string {
 	if payload == nil {
 		return ""
 	}
 	// Native clients control arbitrary JSON keys. Never trust caller-supplied
 	// internal metadata, otherwise a crafted request could strip valid output.
 	delete(payload, assistantPrefillMetadataKey)
-	if !isGemini36Model(model) {
+	if !isGemini36OrLaterModel(model) {
 		return ""
 	}
 	contents, ok := payload["contents"].([]any)
@@ -45,8 +46,15 @@ func AdaptGemini36Prefill(model string, payload map[string]any) string {
 	return prefix
 }
 
+// AdaptGemini36Prefill is retained for internal callers compiled against the
+// earlier helper name. The behavior now intentionally covers Gemini 3.6 and
+// every later compatible model, including Gemini 3.7 Flash.
+func AdaptGemini36Prefill(model string, payload map[string]any) string {
+	return AdaptGemini36OrLaterPrefill(model, payload)
+}
+
 // convertTrailingAssistantPrefill preserves a valid plain-text assistant
-// prefill and appends a final user continuation nudge. Gemini 3.6 rejects
+// prefill and appends a final user continuation nudge. Gemini 3.6+ rejects
 // requests ending in a non-empty model turn, while clients such as SillyTavern
 // use exactly that shape for Continue Prefill. Invalid model-only/consecutive
 // model shapes use a data-encoded user fallback.
@@ -98,7 +106,7 @@ func convertTrailingAssistantPrefill(contents []any) ([]any, string) {
 	}
 
 	// Preserve the assistant role whenever the prefix follows a valid prompt
-	// turn. Gemini 3.6 only rejects a request that *ends* in a non-empty model
+	// turn. Gemini 3.6+ only rejects a request that *ends* in a non-empty model
 	// turn; appending a short user nudge makes the request legal without turning
 	// character text into the nearest user instruction. This is the common
 	// SillyTavern Continue Prefill shape.

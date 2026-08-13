@@ -262,6 +262,67 @@ func TestAdminPutSettingsAcceptsValidProxySettings(t *testing.T) {
 	}
 }
 
+func TestAdminPutSettingsEditsBuiltinClaudePromptRules(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("VPROXY_CONFIG", path)
+	config.InvalidateCache()
+	t.Cleanup(config.InvalidateCache)
+	adm := newAdminSettingsTestHandler()
+
+	put := func(body string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		adm.adminPutSettings(
+			recorder,
+			httptest.NewRequest(http.MethodPut, "/api/admin/settings", bytes.NewBufferString(body)),
+		)
+		return recorder
+	}
+
+	custom := put(`{"settings":{
+		"claude_prompt_promotion_targets":["custom-promotion-a","custom-promotion-b"],
+		"claude_prompt_security_preamble_from":"IMPORTANT: custom source",
+		"claude_prompt_security_preamble_to":"IMPORTANT: custom replacement"
+	}}`)
+	if custom.Code != http.StatusOK {
+		t.Fatalf("自定义内置规则应被接受，status=%d body=%s", custom.Code, custom.Body.String())
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	targets, _ := raw["claude_prompt_promotion_targets"].([]any)
+	if len(targets) != 2 || targets[0] != "custom-promotion-a" ||
+		raw["claude_prompt_security_preamble_from"] != "IMPORTANT: custom source" ||
+		raw["claude_prompt_security_preamble_to"] != "IMPORTANT: custom replacement" {
+		t.Fatalf("内置规则编辑没有正确写盘: %#v", raw)
+	}
+
+	restored := put(`{"settings":{
+		"claude_prompt_promotion_targets":null,
+		"claude_prompt_security_preamble_from":"",
+		"claude_prompt_security_preamble_to":""
+	}}`)
+	if restored.Code != http.StatusOK {
+		t.Fatalf("恢复内置规则应被接受，status=%d body=%s", restored.Code, restored.Body.String())
+	}
+	data, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if raw["claude_prompt_promotion_targets"] != nil ||
+		raw["claude_prompt_security_preamble_from"] != "" ||
+		raw["claude_prompt_security_preamble_to"] != "" {
+		t.Fatalf("恢复内置规则没有正确写盘: %#v", raw)
+	}
+}
+
 func TestAdminPutSettingsClearsStaleLegacyClaudePromptRule(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	t.Setenv("VPROXY_CONFIG", path)
@@ -559,8 +620,9 @@ func TestAdminSettingsExposeAndRejectEnvironmentManagedFields(t *testing.T) {
 		t.Fatalf("get settings status=%d body=%s", getRec.Code, getRec.Body.String())
 	}
 	var response struct {
-		ManagedFields map[string]string `json:"managed_fields"`
-		Settings      map[string]any    `json:"settings"`
+		ManagedFields               map[string]string `json:"managed_fields"`
+		Settings                    map[string]any    `json:"settings"`
+		ClaudePromptBuiltinDefaults map[string]any    `json:"claude_prompt_builtin_defaults"`
 	}
 	if err := json.Unmarshal(getRec.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
@@ -577,6 +639,11 @@ func TestAdminSettingsExposeAndRejectEnvironmentManagedFields(t *testing.T) {
 	}
 	if rules, ok := response.Settings["claude_prompt_replacements"].([]any); !ok || len(rules) != 0 {
 		t.Fatalf("default Claude prompt rules missing from admin response: %#v", response.Settings)
+	}
+	if targets, ok := response.ClaudePromptBuiltinDefaults["promotion_targets"].([]any); !ok || len(targets) == 0 ||
+		response.ClaudePromptBuiltinDefaults["security_preamble_from"] == "" ||
+		response.ClaudePromptBuiltinDefaults["security_preamble_to"] == "" {
+		t.Fatalf("内置 Claude 规则默认内容缺失: %#v", response.ClaudePromptBuiltinDefaults)
 	}
 
 	putRec := httptest.NewRecorder()

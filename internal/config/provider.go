@@ -109,6 +109,7 @@ func (d dynamicConfig) ClaudePromptReplacementRules() []ClaudePromptReplacementR
 func (d dynamicConfig) ClaudePromptPolicy() ClaudePromptPolicyConfig {
 	policy := loadCacheEntry().claudePromptPolicy
 	policy.ReplacementRules = cloneClaudePromptReplacementRules(policy.ReplacementRules)
+	policy.PromotionTargets = append([]string(nil), policy.PromotionTargets...)
 	return policy
 }
 func (d dynamicConfig) ClaudePromptPolicySnapshot() ClaudePromptPolicyConfig {
