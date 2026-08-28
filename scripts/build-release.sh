@@ -30,6 +30,10 @@ build() {
   local stage="$OUT/$pkg"
   echo "==> 编译 $goos/$goarch"
 
+  # go build 不会创建 -o 的父目录。先准备完整的暂存目录，避免所有
+  # 本地发布目标在首次构建时以 "no such file or directory" 失败。
+  mkdir -p "$stage/config"
+
   if [ "$goos" = "android" ]; then
     # 启用 CGO 并设置目标为 Android (arm64 架构)
     # 指定 NDK 编译器（此处使用 API 28 以兼容 Android 9+）
@@ -65,7 +69,6 @@ build() {
       go build -trimpath -ldflags="$LDFLAGS" -o "$stage/$bin" ./cmd/vproxy
   fi
 
-  mkdir -p "$stage/config"
   cp config/config.example.json   "$stage/config/"
   cp config/api_keys.example.txt  "$stage/config/"
   cp config/models.json           "$stage/config/"

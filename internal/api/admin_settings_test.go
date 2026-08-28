@@ -664,6 +664,94 @@ func TestAdminSettingsExposeAndRejectEnvironmentManagedFields(t *testing.T) {
 	}
 }
 
+func TestAdminKeepAliveSettingsSaveAndReload(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("VPROXY_CONFIG", path)
+	config.InvalidateCache()
+	t.Cleanup(config.InvalidateCache)
+
+	reloads := 0
+	adm := newAdminSettingsTestHandler()
+	adm.keepAliveReload = func() { reloads++ }
+	rec := httptest.NewRecorder()
+	adm.adminPutSettings(
+		rec,
+		httptest.NewRequest(
+			http.MethodPut,
+			"/api/admin/settings",
+			bytes.NewBufferString(`{"settings":{"keepalive_url":"  https://example.com/keepalive  ","keepalive_interval":75}}`),
+		),
+	)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("save keepalive settings status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if reloads != 1 {
+		t.Fatalf("keepalive reloads=%d, want 1", reloads)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if raw["keepalive_url"] != "https://example.com/keepalive" || raw["keepalive_interval"] != float64(75) {
+		t.Fatalf("saved keepalive settings = %#v", raw)
+	}
+}
+
+func TestAdminKeepAliveSettingsRejectInvalidValues(t *testing.T) {
+	for _, body := range []string{
+		`{"settings":{"keepalive_url":"ftp://example.com/ping"}}`,
+		`{"settings":{"keepalive_interval":4}}`,
+		`{"settings":{"keepalive_interval":86401}}`,
+	} {
+		rec := httptest.NewRecorder()
+		newAdminSettingsTestHandler().adminPutSettings(
+			rec,
+			httptest.NewRequest(http.MethodPut, "/api/admin/settings", bytes.NewBufferString(body)),
+		)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("body=%s status=%d response=%s", body, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestAdminKeepAliveCompatibilityEnvironmentIsManaged(t *testing.T) {
+	for _, key := range []string{
+		"VPROXY_KEEPALIVE_URL",
+		"VPROXY_KEEPALIVE_INTERVAL_SECONDS",
+		"VPROXY_KEEPALIVE_INTERVAL",
+	} {
+		unsetEnvironmentForTest(t, key)
+	}
+	t.Setenv("KEEPALIVE_URL", "https://example.com/keepalive")
+	t.Setenv("KEEPALIVE_INTERVAL", "120")
+	managed := environmentManagedAdminSettings()
+	if managed["keepalive_url"] != "KEEPALIVE_URL" {
+		t.Fatalf("keepalive URL managed by %q", managed["keepalive_url"])
+	}
+	if managed["keepalive_interval"] != "KEEPALIVE_INTERVAL" {
+		t.Fatalf("keepalive interval managed by %q", managed["keepalive_interval"])
+	}
+}
+
+func unsetEnvironmentForTest(t *testing.T, key string) {
+	t.Helper()
+	value, present := os.LookupEnv(key)
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if present {
+			_ = os.Setenv(key, value)
+		} else {
+			_ = os.Unsetenv(key)
+		}
+	})
+}
+
 func newAdminSettingsTestHandler() *AdminHandler {
 	cfg := config.DefaultConfig()
 	return &AdminHandler{handler: handler{cfg: config.StaticProvider(cfg)}} //nolint:exhaustruct

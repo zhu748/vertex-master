@@ -182,9 +182,15 @@ func clampThinkingBudget(kind thinkingModelKind, budget int64) int64 {
 			return 0
 		}
 		return min(max(budget, int64(512)), int64(24576))
-	default:
+	case thinkingModelBudgetFlash:
 		return min(max(budget, int64(0)), int64(24576))
+	case thinkingModelUnknown, thinkingModelLevelsAll, thinkingModelLevelsNoMinimal,
+		thinkingModelLevelsMinimalHigh, thinkingModelLevelsLowHigh, thinkingModelFixed,
+		thinkingModelUnsupported:
+		// 防御性保留：当前调用方只会传入三种 budget kind。
+		return budget
 	}
+	return budget
 }
 
 func thinkingLevelForBudget(budget int64) (string, bool) {
@@ -220,12 +226,17 @@ func supportedThinkingLevel(kind thinkingModelKind, level string) string {
 			return "LOW"
 		}
 		return "HIGH"
-	default:
+	case thinkingModelLevelsAll:
 		if level == "NONE" {
 			return "MINIMAL"
 		}
 		return level
+	case thinkingModelUnknown, thinkingModelBudgetPro, thinkingModelBudgetFlash,
+		thinkingModelBudgetFlashLite, thinkingModelFixed, thinkingModelUnsupported:
+		// 防御性保留：当前调用方只会传入四种 level kind。
+		return level
 	}
+	return level
 }
 
 func integerThinkingBudget(value any) (int64, bool) {

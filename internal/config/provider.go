@@ -16,6 +16,8 @@ type ConfigProvider interface {
 	MaxConcurrentRequests() int
 	MaxSpillMB() int
 	RequestTimeout() int
+	KeepAliveURL() string
+	KeepAliveIntervalSeconds() int
 
 	ClaudePromptInjectionEnabled() bool
 	ClaudePromptInjectionPosition() string
@@ -91,6 +93,10 @@ func (d dynamicConfig) MaxRequestMB() int          { return Load().MaxRequestMB 
 func (d dynamicConfig) MaxConcurrentRequests() int { return Load().MaxConcurrentRequests }
 func (d dynamicConfig) MaxSpillMB() int            { return Load().MaxSpillMB }
 func (d dynamicConfig) RequestTimeout() int        { return Load().RequestTimeout }
+func (d dynamicConfig) KeepAliveURL() string       { return Load().KeepAliveURL }
+func (d dynamicConfig) KeepAliveIntervalSeconds() int {
+	return Load().KeepAliveIntervalSeconds
+}
 func (d dynamicConfig) ClaudePromptInjectionEnabled() bool {
 	return Load().ClaudePromptInjectionEnabled
 }

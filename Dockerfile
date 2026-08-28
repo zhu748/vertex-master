@@ -1,4 +1,4 @@
-FROM golang:1.26-alpine AS builder
+FROM golang:1.26.6-alpine AS builder
 
 ARG VPROXY_VERSION=dev
 ARG VPROXY_BUILD_COMMIT=unknown
@@ -19,7 +19,7 @@ RUN CGO_ENABLED=0 go build -buildvcs=false -trimpath \
 
 FROM alpine:3.24
 
-RUN apk add --no-cache ca-certificates tzdata bash
+RUN apk add --no-cache ca-certificates tzdata
 
 WORKDIR /app
 

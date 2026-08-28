@@ -185,8 +185,12 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ver
 | `proxy_health_check_batch_size` | 50 | 每轮健康巡检最多测试的代理数 |
 | `proxy_health_check_concurrency` | 5 | 健康巡检并发数 |
 | `proxy_health_check_timeout_seconds` | 8 | 单个代理巡检超时（秒） |
+| `keepalive_url` | 空 | 部署保活的 HTTP(S) 地址；留空关闭，保存后立即热重载 |
+| `keepalive_interval` | 60 | 保活 GET 请求间隔（秒），范围 5–86400 |
 
 自建 HTTPS 反向代理默认不会信任客户端可伪造的 `X-Forwarded-*` 请求头。只有当 Vertex 仅接收来自可信反向代理的流量时，才设置环境变量 `VPROXY_TRUST_PROXY_HEADERS=true`，以便管理会话正确识别 HTTPS 和客户端地址；Render 环境会自动启用该行为。
+
+保活也可完全通过环境变量配置。推荐使用 `VPROXY_KEEPALIVE_URL` 与 `VPROXY_KEEPALIVE_INTERVAL_SECONDS`；为兼容 gcli2api，项目同时接受 `KEEPALIVE_URL` 与 `KEEPALIVE_INTERVAL`（以及 `VPROXY_KEEPALIVE_INTERVAL`）。同一项同时设置时，`VPROXY_*` 形式优先；URL 环境变量存在时，管理面板会将对应字段标为环境托管。可将 URL 设为当前实例的 `/keepalive`，例如 `https://example.onrender.com/keepalive`。
 
 > **提示**：默认模型清单已包含 `gemini-3.6-flash` 与前瞻适配的 `gemini-3.7-flash`。在模型名前加上 `fake-` 或 `假流式-` 前缀，可将非流式模型伪装成流式输出。假流式变体同样会经过完整的思考强度归一化（fake prefix 在内部被防御性剥离）。3.7 的官方独立能力表尚未发布，详见上方思考强度说明。
 

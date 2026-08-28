@@ -40,6 +40,7 @@ type AdminHandler struct {
 	backgroundUploadMu       sync.Mutex
 	lastBackgroundUploadNano int64
 	claudePrompts            *claudePromptStore
+	keepAliveReload          func()
 }
 
 func (adm *AdminHandler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {

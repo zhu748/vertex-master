@@ -24,6 +24,7 @@ import (
 	"github.com/bsfdsagfadg/vertex/internal/cli"
 	"github.com/bsfdsagfadg/vertex/internal/config"
 	"github.com/bsfdsagfadg/vertex/internal/db"
+	"github.com/bsfdsagfadg/vertex/internal/keepalive"
 	"github.com/bsfdsagfadg/vertex/internal/logger"
 	"github.com/bsfdsagfadg/vertex/internal/nodes"
 	"github.com/bsfdsagfadg/vertex/internal/spool"
@@ -46,7 +47,8 @@ var (
 var rulesText string
 
 const (
-	shutdownGrace = 25 * time.Second
+	shutdownGrace        = 25 * time.Second
+	maxRequestHeaderSize = 64 << 10
 )
 
 func rulesAgreedPath() string {
@@ -207,9 +209,12 @@ func main() {
 	vc := vertex.NewVertexAIClient(cfg)
 	stopProxySubscriptionScheduler := api.StartProxySubscriptionScheduler(vc, cfg)
 	stopProxyHealthScheduler := api.StartProxyHealthScheduler(vc, cfg)
+	keepAliveService := keepalive.New(cfg)
+	keepAliveService.Start()
 
 	srv := api.NewServer(vc, keys, cfg)
 	srv.SetBuildInfo(version, buildCommit, buildTime)
+	srv.SetKeepAliveReload(keepAliveService.Restart)
 	//nolint:exhaustruct
 	httpServer := &http.Server{
 		Addr:              "0.0.0.0:" + strconv.Itoa(cfg.PortAPI()),
@@ -217,6 +222,7 @@ func main() {
 		ReadHeaderTimeout: 15 * time.Second,
 		ReadTimeout:       180 * time.Second,
 		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    maxRequestHeaderSize,
 	}
 
 	shutdownDone := make(chan struct{})
@@ -228,6 +234,7 @@ func main() {
 				config.InvalidateCache()
 				config.InvalidateModelsCache()
 				spool.SetMaxSpillBytes(int64(cfg.MaxSpillMB()) << 20)
+				keepAliveService.Restart()
 				log.Printf("[vproxy] 收到 SIGHUP：已清配置/模型缓存，下次读取即热重载")
 				continue
 			}
@@ -241,6 +248,7 @@ func main() {
 			}
 			cancel()
 			stopProxyHealthScheduler()
+			keepAliveService.Stop()
 			stopProxySubscriptionScheduler()
 			stopAdminSessionCleanup()
 			stopProxyGC()

@@ -40,6 +40,8 @@ var adminAllowedSettings = map[string]bool{
 	"proxy_health_check_batch_size":       true,
 	"proxy_health_check_concurrency":      true,
 	"proxy_health_check_timeout_seconds":  true,
+	"keepalive_url":                       true,
+	"keepalive_interval":                  true,
 	"active_node_uri":                     true,
 	"sticky_node_priority":                true,
 	"parallel_pool_retry_enabled":         true,
@@ -53,22 +55,32 @@ var adminAllowedSettings = map[string]bool{
 }
 
 //nolint:gochecknoglobals // Stable mapping used to explain Render-managed settings to the UI.
-var adminSettingEnvironmentVariables = map[string]string{
-	"admin_password":                      "VPROXY_ADMIN_PASSWORD",
-	"max_concurrent_requests":             "VPROXY_MAX_CONCURRENT_REQUESTS",
-	"proxy_failover_max_attempts":         "VPROXY_PROXY_FAILOVER_MAX_ATTEMPTS",
-	"proxy_health_check_enabled":          "VPROXY_PROXY_HEALTH_CHECK_ENABLED",
-	"proxy_health_check_interval_minutes": "VPROXY_PROXY_HEALTH_CHECK_INTERVAL_MINUTES",
-	"proxy_health_check_batch_size":       "VPROXY_PROXY_HEALTH_CHECK_BATCH_SIZE",
-	"proxy_health_check_concurrency":      "VPROXY_PROXY_HEALTH_CHECK_CONCURRENCY",
-	"proxy_health_check_timeout_seconds":  "VPROXY_PROXY_HEALTH_CHECK_TIMEOUT_SECONDS",
+var adminSettingEnvironmentVariables = map[string][]string{
+	"admin_password":                      {"VPROXY_ADMIN_PASSWORD"},
+	"max_concurrent_requests":             {"VPROXY_MAX_CONCURRENT_REQUESTS"},
+	"proxy_failover_max_attempts":         {"VPROXY_PROXY_FAILOVER_MAX_ATTEMPTS"},
+	"proxy_health_check_enabled":          {"VPROXY_PROXY_HEALTH_CHECK_ENABLED"},
+	"proxy_health_check_interval_minutes": {"VPROXY_PROXY_HEALTH_CHECK_INTERVAL_MINUTES"},
+	"proxy_health_check_batch_size":       {"VPROXY_PROXY_HEALTH_CHECK_BATCH_SIZE"},
+	"proxy_health_check_concurrency":      {"VPROXY_PROXY_HEALTH_CHECK_CONCURRENCY"},
+	"proxy_health_check_timeout_seconds":  {"VPROXY_PROXY_HEALTH_CHECK_TIMEOUT_SECONDS"},
+	"keepalive_url":                       {"VPROXY_KEEPALIVE_URL", "KEEPALIVE_URL"},
+	"keepalive_interval": {
+		"VPROXY_KEEPALIVE_INTERVAL_SECONDS",
+		"VPROXY_KEEPALIVE_INTERVAL",
+		"KEEPALIVE_INTERVAL",
+	},
 }
 
 func environmentManagedAdminSettings() map[string]string {
 	managed := make(map[string]string)
-	for setting, environmentVariable := range adminSettingEnvironmentVariables {
-		if strings.TrimSpace(os.Getenv(environmentVariable)) != "" {
-			managed[setting] = environmentVariable
+	for setting, environmentVariables := range adminSettingEnvironmentVariables {
+		for _, environmentVariable := range environmentVariables {
+			if _, present := os.LookupEnv(environmentVariable); present &&
+				(setting == "keepalive_url" || strings.TrimSpace(os.Getenv(environmentVariable)) != "") {
+				managed[setting] = environmentVariable
+				break
+			}
 		}
 	}
 	return managed
@@ -116,6 +128,8 @@ func (adm *AdminHandler) adminGetSettings(w http.ResponseWriter, _ *http.Request
 			"proxy_health_check_batch_size":       adm.cfg.ProxyHealthCheckBatchSize(),
 			"proxy_health_check_concurrency":      adm.cfg.ProxyHealthCheckConcurrency(),
 			"proxy_health_check_timeout_seconds":  adm.cfg.ProxyHealthCheckTimeoutSeconds(),
+			"keepalive_url":                       adm.cfg.KeepAliveURL(),
+			"keepalive_interval":                  adm.cfg.KeepAliveIntervalSeconds(),
 			"sticky_node_priority":                adm.cfg.StickyNodePriority(),
 			"parallel_pool_retry_enabled":         adm.cfg.ParallelPoolRetryEnabled(),
 			"background_image":                    adm.cfg.BackgroundImage(),
@@ -162,7 +176,8 @@ func (adm *AdminHandler) adminPutSettings(w http.ResponseWriter, r *http.Request
 		case "max_retries", "max_spill_mb", "max_request_mb", "max_concurrent_requests", "max_n", "parallel_pool_size",
 			"parallel_pool_delay_ms", "request_timeout", "proxy_failover_max_attempts",
 			"proxy_health_check_interval_minutes", "proxy_health_check_batch_size",
-			"proxy_health_check_concurrency", "proxy_health_check_timeout_seconds":
+			"proxy_health_check_concurrency", "proxy_health_check_timeout_seconds",
+			"keepalive_interval":
 			val, ok := adminSettingInt(v)
 			if !ok {
 				writeJSON(w, http.StatusBadRequest, adminErr(k+" 必须是整数"))
@@ -226,6 +241,19 @@ func (adm *AdminHandler) adminPutSettings(w http.ResponseWriter, r *http.Request
 				return
 			}
 			updates[k] = targets
+			continue
+		case "keepalive_url":
+			value, ok := v.(string)
+			if !ok {
+				writeJSON(w, http.StatusBadRequest, adminErr(k+" 必须是字符串"))
+				return
+			}
+			value = strings.TrimSpace(value)
+			if err := config.ValidateKeepAliveURL(value); err != nil {
+				writeJSON(w, http.StatusBadRequest, adminErr(err.Error()))
+				return
+			}
+			updates[k] = value
 			continue
 		case "proxy_url", "active_node_uri", "background_image", "font_size",
 			"font_color_type", "font_color":
@@ -454,6 +482,13 @@ func (adm *AdminHandler) adminPutSettings(w http.ResponseWriter, r *http.Request
 	if promptPolicyChanged {
 		adm.claudePrompts.Clear("all")
 	}
+	if adm.keepAliveReload != nil {
+		_, urlChanged := updates["keepalive_url"]
+		_, intervalChanged := updates["keepalive_interval"]
+		if urlChanged || intervalChanged {
+			adm.keepAliveReload()
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -518,11 +553,11 @@ func parseAdminClaudePromptPromotionTargets(value any) ([]string, error) {
 		return nil, fmt.Errorf("claude_prompt_promotion_targets 必须是字符串数组或 null")
 	}
 	if len(rawTargets) == 0 {
-		return nil, fmt.Errorf("Claude Code 推广提示至少需要一条精确匹配内容")
+		return nil, fmt.Errorf("至少需要一条 Claude Code 推广提示精确匹配内容")
 	}
 	if len(rawTargets) > config.MaxClaudePromptPromotionTargets {
 		return nil, fmt.Errorf(
-			"Claude Code 推广提示不能超过 %d 条",
+			"内置 Claude Code 推广提示不能超过 %d 条",
 			config.MaxClaudePromptPromotionTargets,
 		)
 	}
@@ -543,7 +578,7 @@ func parseAdminClaudePromptPromotionTargets(value any) ([]string, error) {
 		seen[target] = struct{}{}
 		totalBytes += len(target)
 		if totalBytes > maxClaudePromptSettingBytes {
-			return nil, fmt.Errorf("Claude Code 推广提示文本总计不能超过 1 MiB")
+			return nil, fmt.Errorf("内置 Claude Code 推广提示文本总计不能超过 1 MiB")
 		}
 		targets = append(targets, target)
 	}
@@ -620,6 +655,7 @@ func validateAdminProxySetting(key string, value int) error {
 		"proxy_health_check_batch_size":       {1, 500},
 		"proxy_health_check_concurrency":      {1, 20},
 		"proxy_health_check_timeout_seconds":  {2, 60},
+		"keepalive_interval":                  {config.KeepAliveMinIntervalSeconds, config.KeepAliveMaxIntervalSeconds},
 	}
 	bound, constrained := bounds[key]
 	if !constrained {

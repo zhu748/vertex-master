@@ -67,12 +67,21 @@ func (s *Server) SetBuildInfo(version, commit, buildTime string) {
 	}
 }
 
+// SetKeepAliveReload connects settings saves to the keep-alive service without
+// coupling the admin handler to the service implementation.
+func (s *Server) SetKeepAliveReload(reload func()) {
+	s.admin.keepAliveReload = reload
+}
+
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	assetsDir := filepath.Join(filepath.Dir(s.mw.cfg.ConfigDir()), "assets")
+	assetsHandler := http.StripPrefix("/assets/", http.FileServer(http.Dir(assetsDir)))
 	mux.HandleFunc("/", s.handleRoot)
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc("/readyz", s.handleReady)
+	mux.HandleFunc("/keepalive", s.handleKeepAlive)
 	mux.HandleFunc("/api/hello", s.handleAnthropicHello)
 	mux.HandleFunc("/v1/models", s.handleModelsOAI)
 	mux.HandleFunc("/v1beta/models", s.handleModelsGemini)
@@ -88,7 +97,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin", s.admin.handleAdminPage)
 	mux.HandleFunc("/admin/", s.admin.handleAdminPage)
 	mux.HandleFunc("/api/admin/", s.admin.handleAdminAPI)
-	mux.HandleFunc("/assets/", s.handleAssets)
+	// FileServer 和 StripPrefix 在路由构建时创建一次，避免每个静态资源
+	// 请求重复拼路径和分配 handler。
+	mux.Handle("/assets/", assetsHandler)
 	mux.HandleFunc("/v1beta/models/", s.gemini.handleModelsSubtree)
 	mux.HandleFunc("/v1/models/", s.gemini.handleModelsSubtree)
 
@@ -120,6 +131,15 @@ func (s *Server) Handler() http.Handler {
 	)
 }
 
+func (s *Server) handleKeepAlive(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
 func (s *Server) handleFavicon(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -136,12 +156,6 @@ func (s *Server) handleAnthropicHello(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
-}
-
-func (s *Server) handleAssets(w http.ResponseWriter, r *http.Request) {
-	assetsDir := filepath.Join(filepath.Dir(s.mw.cfg.ConfigDir()), "assets")
-	fs := http.StripPrefix("/assets/", http.FileServer(http.Dir(assetsDir)))
-	fs.ServeHTTP(w, r)
 }
 
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {

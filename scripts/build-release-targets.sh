@@ -29,6 +29,10 @@ build() {
   local stage="$OUT/$pkg"
   echo "==> 编译 $goos/$goarch"
 
+  # go build 不会创建 -o 的父目录。CI 的每个矩阵任务都从空 dist
+  # 开始，因此必须在编译前创建暂存目录。
+  mkdir -p "$stage/config"
+
   if [ "$goos" = "android" ]; then
     if [ -z "${ANDROID_NDK_HOME:-}" ]; then
       echo "错误：未指定 ANDROID_NDK_HOME 环境变量！" >&2
@@ -58,7 +62,6 @@ build() {
       go build -trimpath -ldflags="$LDFLAGS" -o "$stage/$bin" ./cmd/vproxy
   fi
 
-  mkdir -p "$stage/config"
   cp config/config.example.json   "$stage/config/"
   cp config/api_keys.example.txt  "$stage/config/"
   cp config/models.json           "$stage/config/"

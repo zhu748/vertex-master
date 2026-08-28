@@ -7,6 +7,7 @@ package spool
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -54,9 +55,9 @@ func (b *Buffer) Write(p []byte) (int, error) {
 		n, err := b.file.Write(p)
 		if n > 0 {
 			b.totalWritten += int64(n)
+			spilledBytes.Add(int64(n))
 		}
 		return n, err
-
 	}
 
 	if limit := maxMemSize.Load(); limit > 0 && int64(len(b.mem)+len(p)) > limit {
@@ -64,21 +65,26 @@ func (b *Buffer) Write(p []byte) (int, error) {
 		if err != nil {
 			return 0, fmt.Errorf("创建溢出临时文件: %w", err)
 		}
-		b.file = tmp
-		b.filePath = tmp.Name()
-		b.spilled = true
-
 		if len(b.mem) > 0 {
-			if _, err := b.file.Write(b.mem); err != nil {
+			if _, err := tmp.Write(b.mem); err != nil {
+				_ = tmp.Close()
+				_ = os.Remove(tmp.Name())
 				return 0, fmt.Errorf("转存内存缓冲到临时文件: %w", err)
 			}
 		}
+
+		b.file = tmp
+		b.filePath = tmp.Name()
+		b.spilled = true
+		b.totalWritten = int64(len(b.mem))
+		spilledBytes.Add(b.totalWritten)
+		b.mem = nil
+
 		n, err := b.file.Write(p)
 		if n > 0 {
-			b.totalWritten = int64(len(b.mem)) + int64(n)
+			b.totalWritten += int64(n)
+			spilledBytes.Add(int64(n))
 		}
-		b.mem = nil
-		spilledBytes.Add(b.totalWritten)
 		return n, err
 	}
 
@@ -111,13 +117,18 @@ func (b *Buffer) Reader() (io.Reader, error) {
 func (b *Buffer) Close() error {
 	b.mem = nil
 	if b.file != nil {
-		_ = b.file.Close()
+		closeErr := b.file.Close()
+		var removeErr error
 		if b.filePath != "" {
-			_ = os.Remove(b.filePath)
+			removeErr = os.Remove(b.filePath)
+			if os.IsNotExist(removeErr) {
+				removeErr = nil
+			}
 		}
 		b.file = nil
 		b.filePath = ""
 		b.spilled = false
+		return errors.Join(closeErr, removeErr)
 	}
 	return nil
 }

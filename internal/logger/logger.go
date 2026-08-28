@@ -220,6 +220,11 @@ func (l *DailyLogger) cleanup() {
 }
 
 func (l *DailyLogger) cleanupWithLimit(maxRetainedBytes int64) {
+	// 与 Write/Close 的归档操作串行，避免清理线程在轮转文件仍在追加时
+	// 删除它（Unix 上会导致后续日志写入一个已 unlink 的文件）。
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
 	entries, err := os.ReadDir(l.logDir)
 	if err != nil {
 		return

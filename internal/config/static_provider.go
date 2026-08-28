@@ -25,6 +25,10 @@ func (s staticConfig) MaxRequestMB() int          { return s.c.MaxRequestMB }
 func (s staticConfig) MaxConcurrentRequests() int { return s.c.MaxConcurrentRequests }
 func (s staticConfig) MaxSpillMB() int            { return s.c.MaxSpillMB }
 func (s staticConfig) RequestTimeout() int        { return s.c.RequestTimeout }
+func (s staticConfig) KeepAliveURL() string       { return s.c.KeepAliveURL }
+func (s staticConfig) KeepAliveIntervalSeconds() int {
+	return s.c.KeepAliveIntervalSeconds
+}
 func (s staticConfig) ClaudePromptInjectionEnabled() bool {
 	return s.c.ClaudePromptInjectionEnabled
 }

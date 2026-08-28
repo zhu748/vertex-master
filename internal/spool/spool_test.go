@@ -118,6 +118,39 @@ func TestBufferSpillRoundTrip(t *testing.T) {
 	}
 }
 
+func TestBufferCountsWritesAfterSpill(t *testing.T) {
+	SetMaxSpillBytes(4)
+	defer SetMaxSpillBytes(0)
+
+	before := SpilledBytes()
+	b := New()
+	t.Cleanup(func() { _ = b.Close() })
+
+	chunks := [][]byte{[]byte("head"), []byte("-spill"), []byte("-more"), []byte("-tail")}
+	var want []byte
+	for _, chunk := range chunks {
+		if _, err := b.Write(chunk); err != nil {
+			t.Fatal(err)
+		}
+		want = append(want, chunk...)
+	}
+
+	reader, err := b.Reader()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("落盘后多次写入内容不一致: got=%q want=%q", got, want)
+	}
+	if delta := SpilledBytes() - before; delta != int64(len(want)) {
+		t.Fatalf("SpilledBytes 增量应覆盖全部落盘写入 %d，got %d", len(want), delta)
+	}
+}
+
 // TestConcurrentSpillCounter 覆盖多请求并发落盘与 /metrics 并发读取计数器的场景。
 // 该场景曾触发 spilledBytes 的数据竞争，需配合 go test -race 防回归。
 func TestConcurrentSpillCounter(t *testing.T) {

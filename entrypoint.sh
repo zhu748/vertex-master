@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 set -e
 
 # 支持将配置指向 Render 持久磁盘或其他自定义目录

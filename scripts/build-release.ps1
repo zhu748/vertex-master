@@ -39,6 +39,10 @@ function Build-Release {
     $stage = Join-Path $OUT $pkg
     Write-Host "==> 编译 $goos/$goarch"
 
+    # go build 不会创建 -o 的父目录；先创建暂存目录，保证首次构建可用。
+    $configDir = Join-Path $stage "config"
+    New-Item -ItemType Directory -Force -Path $configDir | Out-Null
+
     if ($goos -eq "android") {
         if (-not $env:ANDROID_NDK_HOME) {
             Write-Error "错误：未指定 ANDROID_NDK_HOME 环境变量！"
@@ -75,9 +79,7 @@ function Build-Release {
         Remove-Item Env:\GOARCH
     }
 
-    $configDir = Join-Path $stage "config"
-    New-Item -ItemType Directory -Force -Path $configDir | Out-Null
-    
+
     if (Test-Path "config\config.example.json") { Copy-Item "config\config.example.json" -Destination $configDir }
     if (Test-Path "config\api_keys.example.txt") { Copy-Item "config\api_keys.example.txt" -Destination $configDir }
     if (Test-Path "config\models.json") { Copy-Item "config\models.json" -Destination $configDir }

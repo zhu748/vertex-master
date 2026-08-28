@@ -206,7 +206,7 @@ func isUpstreamWorkloadPath(path string) bool {
 
 func (m *middleware) withMetrics(next http.Handler) http.Handler {
 	skip := map[string]bool{
-		"/": true, "/health": true, "/healthz": true, "/readyz": true, "/api/hello": true,
+		"/": true, "/health": true, "/healthz": true, "/readyz": true, "/keepalive": true, "/api/hello": true,
 		"/favicon.ico": true,
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -242,7 +242,7 @@ func (m *middleware) withMetrics(next http.Handler) http.Handler {
 
 func (m *middleware) withAPIKey(next http.Handler) http.Handler {
 	excluded := map[string]bool{
-		"/": true, "/health": true, "/healthz": true, "/readyz": true,
+		"/": true, "/health": true, "/healthz": true, "/readyz": true, "/keepalive": true,
 		"/api/hello": true, "/favicon.ico": true,
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

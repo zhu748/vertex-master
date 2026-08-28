@@ -13,6 +13,10 @@ const SETTINGS_FIELDS = [
   { k: 'proxy_health_check_concurrency', label: '巡检并发数', type: 'number', max: 20, min: 1, group: 'health', desc: 'Render Free 建议 5～10（默认 5）' },
   { k: 'proxy_health_check_timeout_seconds', label: '单节点巡检超时（秒）', type: 'number', max: 60, min: 2, group: 'health', desc: '超过该时间即记录失败并进入冷却（默认 8）' },
 
+  // 💓 Group: keepalive (部署保活)
+  { k: 'keepalive_url', label: '保活 URL', type: 'url', group: 'keepalive', desc: '留空即关闭；启用后会立即请求一次，再按设定间隔发送 GET 请求' },
+  { k: 'keepalive_interval', label: '保活间隔（秒）', type: 'number', max: 86400, min: 5, group: 'keepalive', desc: '两次保活请求之间的间隔（默认 60 秒）' },
+
   // 🛠 Group: core (核心控制与基础参数)
   { k: 'max_retries', label: '上游重试次数', type: 'number', group: 'core', desc: '上游请求失败时的重试次数；总尝试 = 此值 + 1' },
   { k: 'max_n', label: '最大候选数 (max_n)', type: 'number', group: 'core', desc: '限制客户端一次生成回答的条数上限，防滥用刷量 (默认 8)' },
@@ -846,7 +850,7 @@ async function loadSettings() {
     if (f.type === 'bool') return `<div class="field bool ${managedBy ? 'managed-setting' : ''}"><div class="min-w-0"><label for="set_${f.k}">${f.label}</label>${f.desc ? `<div class="desc mt-4px">${f.desc}</div>` : ''}${managedHint}</div><label class="toggle"><input type="checkbox" id="set_${f.k}" ${v ? 'checked' : ''} ${disabled}><span class="track"></span></label></div>`;
     let input;
     if (f.type === 'select') input = `<select id="set_${f.k}" ${disabled}>${f.opts.map(o => `<option ${o === v ? 'selected' : ''}>${o}</option>`).join('')}</select>`;
-    else input = `<input type="${f.type}" id="set_${f.k}" value="${v ?? ''}" ${f.max !== undefined ? `max="${f.max}" data-input-action="clamp-max" data-clamp-max="${f.max}"` : ''} ${f.min !== undefined ? `min="${f.min}"` : ''} ${disabled}>`;
+    else input = `<input type="${f.type}" id="set_${f.k}" value="${escapeSettingsHTML(v ?? '')}" ${f.max !== undefined ? `max="${f.max}" data-input-action="clamp-max" data-clamp-max="${f.max}"` : ''} ${f.min !== undefined ? `min="${f.min}"` : ''} ${disabled}>`;
     return `<div class="field ${managedBy ? 'managed-setting' : ''}"><label for="set_${f.k}">${f.label}</label>${input}${f.desc ? `<div class="desc">${f.desc}</div>` : ''}${managedHint}</div>`;
   };
 
@@ -854,6 +858,7 @@ async function loadSettings() {
   const groups = {
     pool: { title: '🚀 并发与 Token 池管理', fields: [] },
     health: { title: '🩺 代理健康巡检', fields: [] },
+    keepalive: { title: '💓 部署保活', fields: [] },
     core: { title: '🛠 核心控制与基础参数', fields: [] },
     security: { title: '🛡 安全增强与模型策略', fields: [] }
   };
@@ -878,6 +883,15 @@ async function loadSettings() {
             <div class="desc" style="margin-top:4px;">定期修改密码有助于保障管理后台及节点会话安全</div>
           </div>
           <button type="button" class="btn ghost" style="padding:8px 16px;" data-click-action="showChangePasswordModal" ${managedSettings.admin_password ? 'disabled title="请在 Render Environment 中修改 VPROXY_ADMIN_PASSWORD"' : ''}>${managedSettings.admin_password ? '环境托管' : '修改密码'}</button>
+        </div>
+      `;
+    }
+    if (key === 'keepalive') {
+      const keepAliveManaged = managedSettings.keepalive_url || '';
+      extraHtml = `
+        <div class="toolbar m-0 gap-8">
+          <button type="button" class="btn ghost" data-click-action="useCurrentKeepAliveURL" ${keepAliveManaged ? `disabled title="请通过 ${escapeSettingsHTML(keepAliveManaged)} 修改"` : ''}>使用当前服务地址</button>
+          <span class="desc">自动填写 ${escapeSettingsHTML(window.location.origin)}/keepalive</span>
         </div>
       `;
     }
@@ -989,7 +1003,22 @@ async function saveSettings() {
       }
       out[f.k] = Math.trunc(value);
     }
-    else out[f.k] = el.value;
+    else {
+      if (f.k === 'keepalive_url' && el.value.trim() !== '') {
+        let parsed;
+        try { parsed = new URL(el.value.trim()); } catch (_) {
+          toast('保活 URL 必须是完整的 http 或 https 地址');
+          el.focus();
+          return;
+        }
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+          toast('保活 URL 必须是完整的 http 或 https 地址');
+          el.focus();
+          return;
+        }
+      }
+      out[f.k] = el.value.trim();
+    }
   }
   const replacementEnabled = $('#set_claude_prompt_replacement_enabled').checked;
   const injectionEnabled = $('#set_claude_prompt_injection_enabled').checked;
@@ -1163,6 +1192,13 @@ async function submitChangePassword() {
 
 registerActions({
   saveSettings: function () { saveSettings(); },
+  useCurrentKeepAliveURL: function () {
+    const input = $('#set_keepalive_url');
+    if (!input || input.disabled) return;
+    input.value = window.location.origin + '/keepalive';
+    window.hasUnsavedSettings = true;
+    input.focus();
+  },
   addClaudeReplacementRule: function () { addClaudeReplacementRule(); },
   removeClaudeReplacementRule: function (element) { removeClaudeReplacementRule(element); },
   moveClaudeReplacementRule: function (element) { moveClaudeReplacementRule(element); },

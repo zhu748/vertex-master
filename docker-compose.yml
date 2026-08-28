@@ -12,6 +12,9 @@ services:
     environment:
       # 可选：如果需要配置全局代理，可以直接在这里传入环境变量
       - PROXY_URL=
+      # 可选保活（取消注释并换成实际可访问地址）
+      # - VPROXY_KEEPALIVE_URL=https://example.com/keepalive
+      # - VPROXY_KEEPALIVE_INTERVAL_SECONDS=60
     read_only: true
     tmpfs:
       - /tmp

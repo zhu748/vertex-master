@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/bsfdsagfadg/vertex/internal/config"
 )
 
 func TestServerExposesBuildInfo(t *testing.T) {
@@ -67,6 +69,25 @@ func TestHealthMethods(t *testing.T) {
 		server.handleHealth(recorder, httptest.NewRequest(test.method, "/healthz", nil))
 		if recorder.Code != test.status {
 			t.Errorf("%s status=%d, want %d", test.method, recorder.Code, test.status)
+		}
+	}
+}
+
+func TestKeepAliveEndpointIsPublicAndMethodLimited(t *testing.T) {
+	server := NewServer(nil, NewAPIKeyManager(), config.StaticProvider(config.DefaultConfig()))
+	handler := server.Handler()
+	for _, test := range []struct {
+		method string
+		status int
+	}{
+		{method: http.MethodGet, status: http.StatusOK},
+		{method: http.MethodHead, status: http.StatusOK},
+		{method: http.MethodPost, status: http.StatusMethodNotAllowed},
+	} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(test.method, "/keepalive", nil))
+		if recorder.Code != test.status {
+			t.Errorf("%s status=%d, want %d; body=%s", test.method, recorder.Code, test.status, recorder.Body.String())
 		}
 	}
 }

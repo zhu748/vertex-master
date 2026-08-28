@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -20,6 +21,13 @@ const (
 	defaultCountTokensQuerySig = "2/mENOSldfC+HZM+tGhVuJLrl8M6gEyK3HRjUKuA5AM58="
 	defaultMaxRetries          = 10
 	defaultParallelPoolSize    = 10
+	defaultKeepAliveInterval   = 60
+
+	// KeepAliveMinIntervalSeconds and KeepAliveMaxIntervalSeconds define the
+	// supported admin/config range for the outbound keep-alive request loop.
+	KeepAliveMinIntervalSeconds = 5
+	KeepAliveMaxIntervalSeconds = 86400
+	MaxKeepAliveURLBytes        = 4096
 
 	// MaxClaudePromptSettingBytes bounds one configured prompt policy payload.
 	MaxClaudePromptSettingBytes = 1 << 20
@@ -46,6 +54,8 @@ type AppConfig struct { //nolint:govet
 	MaxRequestMB              int               `json:"max_request_mb"`
 	MaxConcurrentRequests     int               `json:"max_concurrent_requests"`
 	RequestTimeout            int               `json:"request_timeout"`
+	KeepAliveURL              string            `json:"keepalive_url"`
+	KeepAliveIntervalSeconds  int               `json:"keepalive_interval"`
 
 	// Claude Messages 顶层及中途 system 提示词处理
 	ClaudePromptInjectionEnabled  bool   `json:"claude_prompt_injection_enabled"`
@@ -308,6 +318,7 @@ func DefaultConfig() AppConfig {
 		MaxRequestMB:                    64,
 		MaxConcurrentRequests:           16,
 		RequestTimeout:                  180,
+		KeepAliveIntervalSeconds:        defaultKeepAliveInterval,
 		ClaudePromptInjectionPosition:   "append",
 		ClaudePromptStripPromotions:     true,
 		ClaudePromptReplaceSecurity:     true,
@@ -402,6 +413,12 @@ func WriteSettings(updates map[string]any) error {
 	clampIntSetting(raw, "proxy_health_check_batch_size", 1, 500)
 	clampIntSetting(raw, "proxy_health_check_concurrency", 1, 20)
 	clampIntSetting(raw, "proxy_health_check_timeout_seconds", 2, 60)
+	clampIntSetting(
+		raw,
+		"keepalive_interval",
+		KeepAliveMinIntervalSeconds,
+		KeepAliveMaxIntervalSeconds,
+	)
 	clampHealthCheckWorkload(raw)
 
 	if err := writeJSONFile(path, raw); err != nil {
@@ -605,6 +622,13 @@ func loadCacheEntry() *cacheEntry {
 				60,
 				8,
 			)
+			normalize(
+				"keepalive_interval",
+				&cfg.KeepAliveIntervalSeconds,
+				KeepAliveMinIntervalSeconds,
+				KeepAliveMaxIntervalSeconds,
+				defaultKeepAliveInterval,
+			)
 			if maximum := maxHealthCheckBatch(
 				cfg.ProxyHealthCheckIntervalMinutes,
 				cfg.ProxyHealthCheckConcurrency,
@@ -674,6 +698,7 @@ func applyEnvironmentOverrides(cfg *AppConfig) {
 	applyEnvInt("VPROXY_PROXY_HEALTH_CHECK_TIMEOUT_SECONDS", &cfg.ProxyHealthCheckTimeoutSeconds, 2, 60)
 	applyEnvInt("VPROXY_PROXY_FAILOVER_MAX_ATTEMPTS", &cfg.ProxyFailoverMaxAttempts, 1, 100)
 	applyEnvInt("VPROXY_MAX_CONCURRENT_REQUESTS", &cfg.MaxConcurrentRequests, 1, 1000)
+	applyKeepAliveEnvironmentOverrides(cfg)
 	if cfg.ProxyFailoverMaxAttempts < cfg.ParallelPoolSize {
 		log.Printf(
 			"[Config] 接力尝试数 %d 小于最大并发 %d，已提升为 %d",
@@ -695,6 +720,59 @@ func applyEnvironmentOverrides(cfg *AppConfig) {
 		)
 		cfg.ProxyHealthCheckBatchSize = maximum
 	}
+}
+
+func applyKeepAliveEnvironmentOverrides(cfg *AppConfig) {
+	for _, key := range []string{"VPROXY_KEEPALIVE_URL", "KEEPALIVE_URL"} {
+		raw, present := os.LookupEnv(key)
+		if !present {
+			continue
+		}
+		value := strings.TrimSpace(raw)
+		if err := ValidateKeepAliveURL(value); err != nil {
+			log.Printf("[Config] 忽略无效的 %s: %v", key, err)
+		} else {
+			cfg.KeepAliveURL = value
+		}
+		break
+	}
+	for _, key := range []string{
+		"VPROXY_KEEPALIVE_INTERVAL_SECONDS",
+		"VPROXY_KEEPALIVE_INTERVAL",
+		"KEEPALIVE_INTERVAL",
+	} {
+		if strings.TrimSpace(os.Getenv(key)) == "" {
+			continue
+		}
+		applyEnvInt(
+			key,
+			&cfg.KeepAliveIntervalSeconds,
+			KeepAliveMinIntervalSeconds,
+			KeepAliveMaxIntervalSeconds,
+		)
+		break
+	}
+}
+
+// ValidateKeepAliveURL accepts an empty value (which disables keep-alive) or
+// an absolute HTTP(S) URL. Credentials are rejected so secrets cannot be
+// accidentally persisted in the admin-visible configuration.
+func ValidateKeepAliveURL(raw string) error {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return nil
+	}
+	if len(value) > MaxKeepAliveURLBytes {
+		return fmt.Errorf("保活 URL 不能超过 %d 字节", MaxKeepAliveURLBytes)
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return fmt.Errorf("保活 URL 必须是完整的 http 或 https 地址")
+	}
+	if parsed.User != nil {
+		return fmt.Errorf("保活 URL 不能包含用户名或密码")
+	}
+	return nil
 }
 
 func maxHealthCheckBatch(intervalMinutes, concurrency, timeoutSeconds int) int {
