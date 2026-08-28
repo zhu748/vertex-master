@@ -257,6 +257,15 @@ func runRacePreferred[T any](
 	}
 
 	for {
+		// 防御性终止检查：每次 select 唤醒前都先确认还有可飞 goroutine 或
+		// 待启动候选。否则在某些边角情形（所有剩余候选都是重复 URI、
+		// launchNode 都返回 false、active 已经归零）下，timer 不会被重置、
+		// resCh 没有生产者、ctx 未取消——主循环会永远阻塞，race engine 永不返回。
+		// 已经在 resCh 分支有等价检查，但 timer 分支缺失，这里统一兜底。
+		if active == 0 && nextIdx >= len(cands) {
+			cancel()
+			return finishWithFallback(nil)
+		}
 		select {
 		case <-ctx.Done():
 			cancel()

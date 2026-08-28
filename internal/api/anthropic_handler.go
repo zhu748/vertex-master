@@ -766,7 +766,7 @@ func anthropicStopReason(finish string, hasTools bool) string {
 }
 
 func (h *AnthropicHandler) streamMessages(
-	ctx context.Context,
+	parentCtx context.Context,
 	w http.ResponseWriter,
 	displayModel, model string,
 	payload map[string]any,
@@ -780,8 +780,16 @@ func (h *AnthropicHandler) streamMessages(
 		return
 	}
 
+	// 派生 ctx：让 ping 失败时能立即 cancel 上游 StreamChat / CompleteChat
+	// 调用，让 race engine 终止 429 重试循环。仅依赖 parentCtx 不可靠：
+	// CF 在客户端 abort 后常不立即关 origin TCP（HTTP/2 多路复用、"读完再丢"
+	// 策略），Go net/http 长时间不取消 ctx，后端会持续多节点重试浪费配额。
+	ctx, ctxCancel := context.WithCancel(parentCtx)
+	defer ctxCancel()
+
 	// Claude Code SDK 期望流式连接中每 ~15 秒收到一个 ping 事件保活。
 	// 长思考场景下 Gemini 可能 10-30 秒不发内容，没有 ping 会导致 SDK 误判超时断连。
+	// ping 写失败时立即 ctxCancel，让 race engine 终止重试。
 	pingCtx, pingCancel := context.WithCancel(ctx)
 	defer pingCancel()
 	var pingWg sync.WaitGroup
@@ -796,6 +804,7 @@ func (h *AnthropicHandler) streamMessages(
 				return
 			case <-ticker.C:
 				if !state.emitPing() {
+					ctxCancel()
 					return
 				}
 			}

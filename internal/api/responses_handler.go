@@ -848,7 +848,7 @@ func defaultBool(v any, fallback bool) bool {
 }
 
 func (h *ResponsesHandler) streamResponses(
-	ctx context.Context,
+	parentCtx context.Context,
 	w http.ResponseWriter,
 	displayModel, model string,
 	payload, request map[string]any,
@@ -865,8 +865,23 @@ func (h *ResponsesHandler) streamResponses(
 		return
 	}
 
+	// 真流式期间上游 429 风暴 / HIGH 思考 / 网络拥塞时，第一个 chunk 可能几十秒
+	// 不来；期间不写任何字节会让 CF / Render / SillyTavern 任一空闲超时先触发
+	// 而中断连接。派生 ctx + keep-alive：ping 失败（= 客户端链路已断，CF
+	// 不一定立即关 origin TCP）时立即 cancel，让 race engine 终止 429 重试
+	// 循环，不再浪费上游配额。保留 StreamChat 期间持续 ping：chunk 之间空隙
+	// 也可能几十秒无数据。
+	ctx, cancel := context.WithCancel(parentCtx)
+	defer cancel()
+	stopKeepAlive := sw.startKeepAlive(ctx, 10*time.Second, cancel)
+	defer stopKeepAlive()
+
 	if aggregate {
 		resp, err := h.vc.CompleteChat(ctx, model, payload)
+		// CompleteChat 已返回，立即停止 keep-alive ping：后续 state.consume /
+		// state.finish 会写正文 data 帧，ping 与之交错会让客户端收到顺序紊乱的
+		// 帧序列。state.fail 内部仍会写错误帧，同样不应再叠加 ping。
+		stopKeepAlive()
 		if err != nil {
 			state.fail(toVertexError(err))
 			return

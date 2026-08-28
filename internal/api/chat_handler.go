@@ -172,11 +172,22 @@ func (c *ChatHandler) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, oaiResp)
 }
 
-func (c *ChatHandler) streamChatCompletions(ctx context.Context, w http.ResponseWriter, model string, geminiPayload map[string]any) {
+func (c *ChatHandler) streamChatCompletions(parentCtx context.Context, w http.ResponseWriter, model string, geminiPayload map[string]any) {
 	requestID := reqID24()
 
 	sw := newSSEWriter(w, "text/event-stream")
 	clientDisconnected := false
+
+	// 真流式期间上游 429 风暴 / HIGH 思考 / 网络拥塞时，第一个 chunk 可能几十秒
+	// 不来；期间不写任何字节会让 CF / Render / SillyTavern 任一空闲超时先触发
+	// 而中断连接。派生 ctx + keep-alive：ping 失败（= 客户端链路已断，CF
+	// 不一定立即关 origin TCP）时立即 cancel，让 race engine 终止 429 重试
+	// 循环，不再浪费上游配额。保留 StreamChat 期间持续 ping：chunk 之间空隙
+	// 也可能几十秒无数据。
+	ctx, cancel := context.WithCancel(parentCtx)
+	defer cancel()
+	stopKeepAlive := sw.startKeepAlive(ctx, 10*time.Second, cancel)
+	defer stopKeepAlive()
 
 	write := func(line string) bool {
 		if !sw.write(line) {
@@ -330,11 +341,26 @@ func (c *ChatHandler) writeStreamError(write func(string) bool, e *vertex.Vertex
 	_ = write("data: [DONE]\n\n")
 }
 
-func (c *ChatHandler) oaiFakeStream(ctx context.Context, w http.ResponseWriter, model string, geminiPayload map[string]any) {
+func (c *ChatHandler) oaiFakeStream(parentCtx context.Context, w http.ResponseWriter, model string, geminiPayload map[string]any) {
 	requestID := reqID24()
 	sw := newSSEWriter(w, "text/event-stream")
 
+	// CompleteChat 是非流式调用，必须等上游整段生成完才能切片下发。在 HIGH 思考
+	// 档或上游 429 风暴重试期间，等待可能持续数十秒；不写任何字节会让 CF / Render /
+	// SillyTavern 任一空闲超时先触发而中断连接。
+	//
+	// 关键修复：派生 ctx 让 keep-alive 在 ping 写失败（= 客户端链路已断）时
+	// 主动 cancel，让 CompleteChat 内的 race engine 立即终止 429 重试循环。
+	// 仅依赖 r.Context() 不可靠：CF 在客户端 abort 后常不立即关 origin TCP
+	// （HTTP/2 多路复用、CF"读完再丢"策略），后端会持续多节点重试浪费配额。
+	ctx, cancel := context.WithCancel(parentCtx)
+	defer cancel()
+
+	stopKeepAlive := sw.startKeepAlive(ctx, 10*time.Second, cancel)
+
 	resp, vErr := c.vc.CompleteChat(ctx, model, geminiPayload)
+	stopKeepAlive()
+
 	if vErr != nil {
 		ve := toVertexError(vErr)
 		c.writeStreamError(sw.write, ve, requestID, model)
@@ -375,11 +401,24 @@ func (c *ChatHandler) oaiFakeStream(ctx context.Context, w http.ResponseWriter, 
 	_ = sw.write("data: [DONE]\n\n")
 }
 
-func (c *ChatHandler) oaiAggregateStream(ctx context.Context, w http.ResponseWriter, model string, geminiPayload map[string]any) {
+func (c *ChatHandler) oaiAggregateStream(parentCtx context.Context, w http.ResponseWriter, model string, geminiPayload map[string]any) {
 	requestID := reqID24()
 	sw := newSSEWriter(w, "text/event-stream")
 
+	// 与 oaiFakeStream 同样的考虑：聚合流式只在 CompleteChat 返回后一次性写出，
+	// 等待期间需要 keep-alive 防止 CF / Render / SillyTavern 中断。
+	//
+	// 关键修复：派生 ctx，让 keep-alive ping 写失败时主动 cancel，立即终止
+	// race engine 的 429 重试循环。仅依赖 r.Context() 不可靠（CF 不一定立即
+	// 关 origin TCP）。
+	ctx, cancel := context.WithCancel(parentCtx)
+	defer cancel()
+
+	stopKeepAlive := sw.startKeepAlive(ctx, 10*time.Second, cancel)
+
 	resp, vErr := c.vc.CompleteChat(ctx, model, geminiPayload)
+	stopKeepAlive()
+
 	if vErr != nil {
 		ve := toVertexError(vErr)
 		c.writeStreamError(sw.write, ve, requestID, model)

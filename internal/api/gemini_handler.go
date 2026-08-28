@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/bsfdsagfadg/vertex/internal/jsonx"
 	"github.com/bsfdsagfadg/vertex/internal/transform"
@@ -134,8 +135,27 @@ func (g *GeminiHandler) handleGeminiStreamGenerate(w http.ResponseWriter, r *htt
 
 	sw := newSSEWriter(w, "text/event-stream")
 
+	// 派生 ctx + keep-alive：真流式期间上游 429 风暴 / HIGH 思考 / 网络拥塞
+	// 时，第一个 chunk 可能几十秒不来；期间不写任何字节会让 CF / Render /
+	// SillyTavern 任一空闲超时先触发而中断连接。ping 失败（= 客户端链路
+	// 已断，CF 不一定立即关 origin TCP）时立即 cancel，让 race engine
+	// 终止 429 重试循环，不再浪费上游配额。
+	//
+	// 保留 StreamChat 期间持续 ping：chunk 之间空隙也可能几十秒无数据。
+	//
+	// 注意：假流式分支会自己启动一次 keep-alive（geminiFakeStream 内），
+	// 并在 CompleteChat 返回后立即 stop，避免 ping 与正文 data 帧交错。
+	// 这里若再启动一次会形成"双 ping goroutine + ping 与 data 交错"问题，
+	// 因此仅在真流式分支启动 keep-alive。
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	if !useFake {
+		stopKeepAlive := sw.startKeepAlive(ctx, 10*time.Second, cancel)
+		defer stopKeepAlive()
+	}
+
 	if useFake {
-		g.geminiFakeStream(r.Context(), sw, actualModel, body)
+		g.geminiFakeStream(ctx, sw, actualModel, body)
 		return
 	}
 
@@ -150,7 +170,7 @@ func (g *GeminiHandler) handleGeminiStreamGenerate(w http.ResponseWriter, r *htt
 	)
 	var textStreamEncoder geminiTextStreamEncoder
 	textStreamEncoder.init()
-	g.vc.StreamChat(r.Context(), actualModel, body, func(ch vertex.StreamChunk) bool {
+	g.vc.StreamChat(ctx, actualModel, body, func(ch vertex.StreamChunk) bool {
 		if sw.failed.Load() {
 			return false
 		}
@@ -333,8 +353,23 @@ func firstGeminiCandidate(data map[string]any) map[string]any {
 	return candidate
 }
 
-func (g *GeminiHandler) geminiFakeStream(ctx context.Context, sw *sseWriter, model string, body map[string]any) {
+func (g *GeminiHandler) geminiFakeStream(parentCtx context.Context, sw *sseWriter, model string, body map[string]any) {
+	// Gemini 假流式同样要等 CompleteChat 整段返回，期间没有任何 SSE 帧输出。
+	// 套了 CF / Render 时尤其容易被中间链路空闲超时切断。
+	//
+	// 关键修复：派生 ctx 让 keep-alive 在 ping 写失败（= 客户端链路已断）时
+	// 主动 cancel，从而让 CompleteChat 内部的 race engine 立即终止 429 重试
+	// 循环。仅依赖 r.Context() 不可靠：CF 在客户端 abort 后常不立即关 origin
+	// 的 TCP（HTTP/2 多路复用、CF 内部"读完再丢"策略），导致 Go net/http
+	// 长时间不取消 ctx，后端持续多节点重试浪费上游配额。
+	ctx, cancel := context.WithCancel(parentCtx)
+	defer cancel()
+
+	stopKeepAlive := sw.startKeepAlive(ctx, 10*time.Second, cancel)
+
 	resp, vErr := g.vc.CompleteChat(ctx, model, body)
+	stopKeepAlive()
+
 	if vErr != nil {
 		ve := toVertexError(vErr)
 		if isSafetyBlock(ve) {

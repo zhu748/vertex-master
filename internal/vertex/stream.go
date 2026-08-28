@@ -217,7 +217,12 @@ retryLoop:
 			sess.Close()
 			newSess, e := c.net.CreateSession(cfg.RequestTimeout(), proxyURI, reqID)
 			if e != nil {
-				yield(StreamChunk{Err: NewInternalError("recreate session: " + e.Error())})
+				// 保留原始 429 错误上下文：客户端看到的是"被限流"而不是
+				// 含糊的 "recreate session: ..."，便于上层 race engine 走
+				// 429 重试策略而非把整条链路当成 internal 错误熔断。
+				// 同时记录重建会话失败原因到日志便于排查。
+				log.Printf("[Vertex] [StreamChat] 节点 %s 429 后重建会话失败: %s, 请求ID=%s, 代理=%s", model, e.Error(), reqID, nodeName)
+				yield(StreamChunk{Err: lastError})
 				return
 			}
 			sess = newSess

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -1151,4 +1152,70 @@ func TestProtocolStreamStatesStopAfterClientWriteFailure(t *testing.T) {
 				writer.writes, state.text.Len(), state.outputIndex, len(state.items))
 		}
 	})
+}
+
+// TestSSEWriterKeepAliveConcurrentWithWriteData 用 race detector 验证 startKeepAlive
+// 的 ping goroutine 与主回调的 writeData/write 调用并发时不会触发 data race。
+//
+// 之前 sseWriter 没有 mutex 保护 ResponseWriter 的并发写，startKeepAlive goroutine
+// 调用 sw.write(": ping\n\n") 与主回调 sw.writeData(...) 会同时触碰 sw.w.Write /
+// sw.flush，net/http 的 ResponseWriter 不是并发安全的。这个测试必须配合
+// `go test -race` 才能暴露问题。
+func TestSSEWriterKeepAliveConcurrentWithWriteData(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	sw := newSSEWriter(recorder, "text/event-stream")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	stop := sw.startKeepAlive(ctx, 2*time.Millisecond, cancel)
+
+	// 并发：主 goroutine 高频写 data 帧；ping goroutine 高频写注释帧。
+	// 二者会争抢同一个 ResponseWriter——没有 mutex 时 -race 会爆。
+	const iterations = 200
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < iterations; i++ {
+			if !sw.writeData(map[string]any{"i": i, "text": "hello"}) {
+				break
+			}
+		}
+	}()
+
+	// 给 ping goroutine 一点时间穿插，再停止。
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("writeData loop did not complete in time")
+	}
+	stop()
+
+	// 失败检测：连续写很多次没失败说明连接没断；如果失败被设置但 ping goroutine
+	// 也写了一些帧（写入成功），说明 mutex 工作正常。
+	if recorder.Body.Len() == 0 {
+		t.Fatal("expected SSE body to contain data + ping frames, got 0 bytes")
+	}
+}
+
+// TestSSEWriterKeepAlivePingFailureCancelsContext 验证 ping 写失败时立即 cancel
+// 派生 ctx 的 onDisconnect 回调被调用，从而让上层 race engine 终止 429 重试。
+func TestSSEWriterKeepAlivePingFailureCancelsContext(t *testing.T) {
+	// failAfter=0 让 Write 第 1 次就失败；ping goroutine 第一次尝试即触发
+	// onDisconnect。
+	writer := &failingStreamResponseWriter{failAfter: 0}
+	sw := &sseWriter{w: writer}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	stop := sw.startKeepAlive(ctx, 1*time.Millisecond, cancel)
+	defer stop()
+
+	select {
+	case <-ctx.Done():
+		// 预期路径：ping 失败触发了 cancel。
+	case <-time.After(2 * time.Second):
+		t.Fatal("keep-alive ping failure did not cancel context within 2s")
+	}
 }
