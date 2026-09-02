@@ -112,6 +112,39 @@ func TestGemini37ConvertsTrailingAssistantPrefill(t *testing.T) {
 	}
 }
 
+func TestGemini38ConvertsTrailingAssistantPrefill(t *testing.T) {
+	for _, model := range []string{"gemini-3.8-flash", "fake-gemini-3.8-flash", "假流式-gemini-3.8-flash"} {
+		t.Run(model, func(t *testing.T) {
+			body := map[string]any{
+				"model": model,
+				"messages": []any{
+					map[string]any{"role": "user", "content": "Continue"},
+					map[string]any{"role": "assistant", "content": "Alice:"},
+				},
+			}
+			resolved, payload, err := ConvertChatRequest(
+				body,
+				config.StaticProvider(config.DefaultConfig()),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := AssistantPrefillFromPayload(payload); got != "Alice:" {
+				t.Fatalf("Gemini 3.8 prefill=%q, want Alice:", got)
+			}
+			contents := payload["contents"].([]any)
+			if role := contents[len(contents)-1].(map[string]any)["role"]; role != "user" {
+				t.Fatalf("Gemini 3.8 请求必须以 user continuation 结束，got %v", role)
+			}
+			vars := BuildVertexVariables(resolved, payload, config.StaticProvider(config.DefaultConfig()))
+			upstream := vars["contents"].([]any)
+			if role := upstream[len(upstream)-1].(map[string]any)["role"]; role != "user" {
+				t.Fatalf("Gemini 3.8 出站请求必须以 user 结束，got %v", role)
+			}
+		})
+	}
+}
+
 func TestGemini36ConvertsTrailingAssistantTextArrayPrefill(t *testing.T) {
 	body := map[string]any{
 		"model": "gemini-3.6-flash",
@@ -297,6 +330,22 @@ func TestAdaptGemini37NativePrefill(t *testing.T) {
 	contents := payload["contents"].([]any)
 	if role := contents[len(contents)-1].(map[string]any)["role"]; role != "user" {
 		t.Fatalf("Gemini 3.7 原生请求最后一轮必须是 user，got %v", role)
+	}
+}
+
+func TestAdaptGemini38NativePrefill(t *testing.T) {
+	payload := map[string]any{
+		"contents": []any{
+			map[string]any{"role": "user", "parts": []any{map[string]any{"text": "Continue"}}},
+			map[string]any{"role": "model", "parts": []any{map[string]any{"text": "ABC"}}},
+		},
+	}
+	if got := AdaptGemini36OrLaterPrefill("gemini-3.8-flash", payload); got != "ABC" {
+		t.Fatalf("Gemini 3.8 原生 prefill=%q, want ABC", got)
+	}
+	contents := payload["contents"].([]any)
+	if role := contents[len(contents)-1].(map[string]any)["role"]; role != "user" {
+		t.Fatalf("Gemini 3.8 原生请求最后一轮必须是 user，got %v", role)
 	}
 }
 

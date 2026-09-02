@@ -192,9 +192,9 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ver
 
 保活也可完全通过环境变量配置。推荐使用 `VPROXY_KEEPALIVE_URL` 与 `VPROXY_KEEPALIVE_INTERVAL_SECONDS`；为兼容 gcli2api，项目同时接受 `KEEPALIVE_URL` 与 `KEEPALIVE_INTERVAL`（以及 `VPROXY_KEEPALIVE_INTERVAL`）。同一项同时设置时，`VPROXY_*` 形式优先；URL 环境变量存在时，管理面板会将对应字段标为环境托管。可将 URL 设为当前实例的 `/keepalive`，例如 `https://example.onrender.com/keepalive`。
 
-> **提示**：默认模型清单已包含 `gemini-3.6-flash` 与前瞻适配的 `gemini-3.7-flash`。在模型名前加上 `fake-` 或 `假流式-` 前缀，可将非流式模型伪装成流式输出。假流式变体同样会经过完整的思考强度归一化（fake prefix 在内部被防御性剥离）。3.7 的官方独立能力表尚未发布，详见上方思考强度说明。
+> **提示**：默认模型清单已包含 `gemini-3.6-flash`、官方已发布的 `gemini-3.7-flash` 与前瞻适配的 `gemini-3.8-flash`。在模型名前加上 `fake-` 或 `假流式-` 前缀，可将非流式模型伪装成流式输出。假流式变体同样会经过完整的思考强度归一化（fake prefix 在内部被防御性剥离）。3.8 尚未正式发布，当前按 3.7 的三档形态适配，详见下方思考强度说明。
 
-> **预填充兼容**：通过 OpenAI Chat/Responses、Claude Messages 或 Gemini 原生接口调用 `gemini-3.6-flash`、`gemini-3.7-flash`（以及后续 3.6+ 系列）时，服务会保留末尾纯文本 `assistant`/`model` 预填充的角色与原文，再追加一条短续写提示，使请求合法地以 `user` 结束；流式或非流式回复都会移除模型可能重复输出的前缀。工具调用、媒体、思考块和其他模型的历史行为保持不变；旧客户端传入的 `NONE`/`thinkingBudget` 也会在出站时转换为该模型支持的思考级别。
+> **预填充兼容**：通过 OpenAI Chat/Responses、Claude Messages 或 Gemini 原生接口调用 `gemini-3.6-flash`、`gemini-3.7-flash`、`gemini-3.8-flash`（以及后续 3.6+ 系列）时，服务会保留末尾纯文本 `assistant`/`model` 预填充的角色与原文，再追加一条短续写提示，使请求合法地以 `user` 结束；流式或非流式回复都会移除模型可能重复输出的前缀。工具调用、媒体、思考块和其他模型的历史行为保持不变；旧客户端传入的 `NONE`/`thinkingBudget` 也会在出站时转换为该模型支持的思考级别。
 
 > **🧠 思考强度（Thinking Budget）兼容**：本项目会自动把客户端的各种"思考强度"参数统一映射到 Gemini 的 `thinkingConfig`，按模型官方上限做 clamp，并按目标模型支持的字段形态（budget vs level）归一化。具体行为见下表：
 
@@ -213,13 +213,14 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ver
 | `gemini-2.5-flash` | thinkingBudget | 0 – 24576 | 动态思考 |
 | `gemini-2.5-flash-lite` | thinkingBudget | 512 – 24576（正数下限 512） | 关闭 |
 | `gemini-2.5-flash-image` | 不支持 | 删除整个 thinkingConfig | 固定 |
-| `gemini-3.7-flash`（前瞻适配）/ `3.6-flash` / `3.5-flash` / `3.1-flash-lite` / `3-flash` | thinkingLevel | MINIMAL/LOW/MEDIUM/HIGH | 3.7 待官方发布；其余见官方表 |
-| `gemini-3.1-pro` | thinkingLevel | LOW/MEDIUM/HIGH（不支持 MINIMAL） | — |
+| `gemini-3.8-flash`（前瞻适配，按 3.7 形态）/ `3.6-flash` / `3.5-flash` / `3.1-flash-lite` / `3-flash` | thinkingLevel | MINIMAL/LOW/MEDIUM/HIGH | 3.6 默认 medium |
+| `gemini-3.7-flash`（官方已发布） | thinkingLevel | LOW/MEDIUM/HIGH（**不支持 MINIMAL，发送会报验证错误**） | 默认 medium；NONE/MINIMAL 自动折叠为 LOW |
+| `gemini-3.1-pro` | thinkingLevel | LOW/MEDIUM/HIGH（不支持 MINIMAL） | 默认 high |
 | `gemini-3.1-flash-image` / `3.1-flash-lite-image` | thinkingLevel | MINIMAL/HIGH 两档 | — |
 | `gemini-3-pro-preview` | thinkingLevel | LOW/HIGH 两档 | — |
 | `gemini-3-pro-image` | 不支持 | 删除整个 thinkingConfig | 固定 |
 
-> **Claude Code "max" 档**：Claude Code 走 Anthropic 协议时，"max" 档会发送较大的 `thinking.budget_tokens`。本项目会自动按 budget 大小映射到 HIGH（>8192 → HIGH），从而真正开启 Gemini 的最大思考强度。Gemini 3.6 系列官方明确支持 MINIMAL/LOW/MEDIUM/HIGH 四档，HIGH 即是最大档；3.7 当前沿用此映射，等待官方独立规格确认。
+> **Claude Code "max" 档**：Claude Code 走 Anthropic 协议时，"max" 档会发送较大的 `thinking.budget_tokens`。本项目会自动按 budget 大小映射到 HIGH（>8192 → HIGH），从而真正开启 Gemini 的最大思考强度。Gemini 3.6 系列官方明确支持 MINIMAL/LOW/MEDIUM/HIGH 四档（HIGH 即最大档）；官方公布的 3.7 Flash 仅支持 LOW/MEDIUM/HIGH 三档，`thinkingLevel: MINIMAL` 会返回 API 验证错误，因此本项目会把 NONE/MINIMAL 请求自动折叠为 LOW；未发布的 3.8 暂沿 3.7 形态适配，正式规格公布后再跟进。
 
 > **聊天软件 "auto" 档**：Cherry Studio / ChatBox 等聊天软件的"自动"选项会发送 `reasoning_effort: "auto"` 或 `output_config.effort: "auto"`。本项目会跳过设置 thinkingConfig，让 Gemini 使用其官方默认思考行为（2.5 系列动态思考、3.x 系列 HIGH），不会被报错也不会被钉死在固定档位。
 

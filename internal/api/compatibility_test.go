@@ -484,7 +484,7 @@ func TestAnthropicAdaptiveThinkingEffortReachesGemini(t *testing.T) {
 		},
 		{
 			name: "3.7 disabled", model: "gemini-3.7-flash",
-			thinking: map[string]any{"type": "disabled"}, wantLevel: "MINIMAL",
+			thinking: map[string]any{"type": "disabled"}, wantLevel: "LOW",
 		},
 		{
 			name: "manual budget wins", output: map[string]any{"effort": "low"},

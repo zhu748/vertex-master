@@ -70,11 +70,11 @@ func applyModelGenerationCompatibility(model string, cfg map[string]any) {
 
 // isGemini36OrLaterModel covers the documented 3.6+ API generation. Google
 // applies its prefilled-turn and sampling restrictions to Gemini 3.6 Flash and
-// all future Gemini releases, so 3.7 Flash must not fall through the older
+// all future Gemini releases, so 3.7/3.8 Flash must not fall through the older
 // request path.
 func isGemini36OrLaterModel(model string) bool {
 	model = strings.ToLower(strings.TrimSpace(model))
-	// 防御性剥离假流式前缀，确保 fake-gemini-3.7-flash 也被识别为 3.6+ 系列。
+	// 防御性剥离假流式前缀，确保 fake-gemini-3.8-flash 也被识别为 3.6+ 系列。
 	model = stripFakePrefixes(model)
 	const prefix = "gemini-3."
 	if !strings.HasPrefix(model, prefix) {

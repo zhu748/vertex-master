@@ -10,8 +10,10 @@ import (
 )
 
 // TestLiveGemini37FlashThinkingLevels verifies that the anonymous upstream
-// accepts every configured Gemini 3.7 Flash thinking level. It is opt-in so
-// normal unit-test runs never make external requests.
+// accepts every officially supported Gemini 3.7 Flash thinking level
+// (LOW/MEDIUM/HIGH; MINIMAL returns an API validation error per the official
+// model docs, so it is intentionally absent). It is opt-in so normal
+// unit-test runs never make external requests.
 func TestLiveGemini37FlashThinkingLevels(t *testing.T) {
 	if os.Getenv("VERTEX_LIVE_THINKING_TEST") == "" {
 		t.Skip("set VERTEX_LIVE_THINKING_TEST=1 to run")
@@ -23,7 +25,7 @@ func TestLiveGemini37FlashThinkingLevels(t *testing.T) {
 	cfg.RequestTimeout = 60
 	client := NewVertexAIClient(config.StaticProvider(cfg))
 
-	for _, level := range []string{"MINIMAL", "LOW", "MEDIUM", "HIGH"} {
+	for _, level := range []string{"LOW", "MEDIUM", "HIGH"} {
 		t.Run(level, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 			defer cancel()

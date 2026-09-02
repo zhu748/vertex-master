@@ -48,7 +48,7 @@ func AdaptGemini36OrLaterPrefill(model string, payload map[string]any) string {
 
 // AdaptGemini36Prefill is retained for internal callers compiled against the
 // earlier helper name. The behavior now intentionally covers Gemini 3.6 and
-// every later compatible model, including Gemini 3.7 Flash.
+// every later compatible model, including Gemini 3.7 and 3.8 Flash.
 func AdaptGemini36Prefill(model string, payload map[string]any) string {
 	return AdaptGemini36OrLaterPrefill(model, payload)
 }

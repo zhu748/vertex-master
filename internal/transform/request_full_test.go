@@ -1285,8 +1285,12 @@ func TestReasoningEffortUsesOfficialModelThinkingControls(t *testing.T) {
 	}{
 		{name: "3.6 none", model: "gemini-3.6-flash", effort: "none", wantLevel: "MINIMAL"},
 		{name: "3.6 max", model: "gemini-3.6-flash", effort: "max", wantLevel: "HIGH"},
-		{name: "3.7 minimal", model: "gemini-3.7-flash", effort: "minimal", wantLevel: "MINIMAL"},
+		{name: "3.7 minimal", model: "gemini-3.7-flash", effort: "minimal", wantLevel: "LOW"},
+		{name: "3.7 none", model: "gemini-3.7-flash", effort: "none", wantLevel: "LOW"},
 		{name: "3.7 max", model: "gemini-3.7-flash", effort: "max", wantLevel: "HIGH"},
+		{name: "3.8 minimal", model: "gemini-3.8-flash", effort: "minimal", wantLevel: "LOW"},
+		{name: "3.8 none", model: "gemini-3.8-flash", effort: "none", wantLevel: "LOW"},
+		{name: "3.8 max", model: "gemini-3.8-flash", effort: "max", wantLevel: "HIGH"},
 		{name: "3.1 pro minimal", model: "gemini-3.1-pro-preview", effort: "minimal", wantLevel: "LOW"},
 		{name: "3.1 pro medium", model: "gemini-3.1-pro-preview", effort: "medium", wantLevel: "MEDIUM"},
 		{name: "3.1 flash lite minimal", model: "gemini-3.1-flash-lite", effort: "minimal", wantLevel: "MINIMAL"},
@@ -1365,6 +1369,9 @@ func TestClaudeThinkingBudgetUsesTargetModelControls(t *testing.T) {
 		{name: "3.7 low", model: "gemini-3.7-flash", budget: 1024, wantLevel: "LOW"},
 		{name: "3.7 medium", model: "gemini-3.7-flash", budget: 8192, wantLevel: "MEDIUM"},
 		{name: "3.7 high", model: "gemini-3.7-flash", budget: 9000, wantLevel: "HIGH"},
+		{name: "3.8 low", model: "gemini-3.8-flash", budget: 1024, wantLevel: "LOW"},
+		{name: "3.8 medium", model: "gemini-3.8-flash", budget: 8192, wantLevel: "MEDIUM"},
+		{name: "3.8 high", model: "gemini-3.8-flash", budget: 9000, wantLevel: "HIGH"},
 		{name: "3.1 image collapses medium to high", model: "gemini-3.1-flash-image", budget: 8192, wantLevel: "HIGH"},
 		{name: "3 dynamic budget", model: "gemini-3.6-flash", budget: -1, wantLevel: "HIGH"},
 		{name: "2.5 flash preserves manual budget", model: "gemini-2.5-flash", budget: 4000, wantBudget: 4000},
@@ -1686,6 +1693,81 @@ func TestGemini37UsesGemini36OrLaterGenerationCompatibility(t *testing.T) {
 	}
 	if _, exists := thinking["thinkingBudget"]; exists {
 		t.Fatalf("Gemini 3.7 不应继续发送 thinkingBudget: %#v", thinking)
+	}
+}
+
+// TestGemini37ThinkingLevelsMatchOfficialSpec 验证官方公布的 3.7 Flash
+// 思考档位：仅 LOW/MEDIUM/HIGH，MINIMAL 会返回 API 验证错误，因此
+// NONE/MINIMAL 请求必须折叠为 LOW 后出站。
+func TestGemini37ThinkingLevelsMatchOfficialSpec(t *testing.T) {
+	tests := []struct {
+		name  string
+		level string
+		want  string
+	}{
+		{name: "LOW", level: "LOW", want: "LOW"},
+		{name: "MEDIUM", level: "MEDIUM", want: "MEDIUM"},
+		{name: "HIGH", level: "HIGH", want: "HIGH"},
+		{name: "MINIMAL", level: "MINIMAL", want: "LOW"},
+		{name: "NONE", level: "NONE", want: "LOW"},
+		{name: "lowercase medium", level: "medium", want: "MEDIUM"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := map[string]any{
+				"contents": []any{map[string]any{
+					"role": "user", "parts": []any{map[string]any{"text": "hi"}},
+				}},
+				"generationConfig": map[string]any{
+					"thinkingConfig": map[string]any{
+						"thinkingLevel": tc.level,
+					},
+				},
+			}
+			vars := BuildVertexVariables(
+				"gemini-3.7-flash",
+				payload,
+				config.StaticProvider(config.DefaultConfig()),
+			)
+			thinking := vars["generationConfig"].(map[string]any)["thinkingConfig"].(map[string]any)
+			if got := thinking["thinkingLevel"]; got != tc.want {
+				t.Fatalf("Gemini 3.7 thinkingLevel=%v, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestGemini38UsesGemini36OrLaterGenerationCompatibility(t *testing.T) {
+	payload := map[string]any{
+		"contents": []any{map[string]any{
+			"role": "user", "parts": []any{map[string]any{"text": "hi"}},
+		}},
+		"generationConfig": map[string]any{
+			"temperature": 0.7,
+			"topP":        0.9,
+			"topK":        40,
+			"thinkingConfig": map[string]any{
+				"thinkingBudget": 8192,
+			},
+		},
+	}
+	vars := BuildVertexVariables(
+		"fake-gemini-3.8-flash",
+		payload,
+		config.StaticProvider(config.DefaultConfig()),
+	)
+	generation := vars["generationConfig"].(map[string]any)
+	for _, field := range []string{"temperature", "topP", "topK"} {
+		if _, exists := generation[field]; exists {
+			t.Fatalf("Gemini 3.8 不应发送 %s: %#v", field, generation)
+		}
+	}
+	thinking := generation["thinkingConfig"].(map[string]any)
+	if thinking["thinkingLevel"] != "MEDIUM" {
+		t.Fatalf("Gemini 3.8 budget 8192 应映射为 MEDIUM: %#v", thinking)
+	}
+	if _, exists := thinking["thinkingBudget"]; exists {
+		t.Fatalf("Gemini 3.8 不应继续发送 thinkingBudget: %#v", thinking)
 	}
 }
 
