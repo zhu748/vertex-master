@@ -24,7 +24,7 @@ func stripFakePrefixes(model string) string {
 
 // thinkingModelKind 描述 GenerateContent API 中不同模型接受的思考控制形态。
 // Gemini 2.5 使用 token budget；Gemini 3 使用离散 level。3.6 及更早的 Flash
-// 支持四档（含 MINIMAL），官方公布的 3.7 Flash 仅支持 LOW/MEDIUM/HIGH，
+// 支持四档（含 MINIMAL），官方已发布的 3.7/3.8 Flash 仅支持 LOW/MEDIUM/HIGH，
 // 部分 3.x Pro/图像模型档位更少或思考行为固定。
 type thinkingModelKind uint8
 
@@ -66,10 +66,10 @@ func thinkingKindForModel(model string) thinkingModelKind {
 		return thinkingModelLevelsLowHigh
 	case strings.HasPrefix(model, "gemini-3.8-flash"),
 		strings.HasPrefix(model, "gemini-3.7-flash"):
-		// 官方公布 Gemini 3.7 Flash 仅支持 LOW/MEDIUM/HIGH，
+		// 官方模型卡与 Thinking 文档：3.7 Flash（2026-08-13 GA）与
+		// 3.8 Flash（2026-09-02 GA）均仅支持 LOW/MEDIUM/HIGH 三档，
 		// thinking_level=MINIMAL 会返回 API 验证错误（默认 MEDIUM）。
-		// 3.8 Flash 尚未正式发布，作为 3.6+ 后续版本沿 3.7 的三档
-		// 形态做前瞻适配；NONE/MINIMAL 请求折叠为 LOW。
+		// NONE/MINIMAL 请求折叠为 LOW。
 		return thinkingModelLevelsNoMinimal
 	case strings.HasPrefix(model, "gemini-3.6-flash"),
 		strings.HasPrefix(model, "gemini-3.5-flash-lite"),

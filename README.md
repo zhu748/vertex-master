@@ -118,7 +118,7 @@ claude --model gemini-3.6-flash
 
 | Gemini 模型 | 官方默认 | 官方可用控制 | 兼容协议转换 |
 |---|---|---|---|
-| 3.7 Flash（前瞻适配） | 官方尚未单列 | 按 3.6+ Flash 兼容：`minimal/low/medium/high` | `none` 降为 `minimal`，`xhigh/max` 收敛到 `high` |
+| 3.8 / 3.7 Flash（官方已发布） | `medium` | `low/medium/high`（**MINIMAL 会返回验证错误**） | `none/minimal` 降为 `low`，`xhigh/max` 收敛到 `high` |
 | 3.6 / 3.5 Flash | `medium` | `minimal/low/medium/high` | `none` 降为 `minimal`，`xhigh/max` 收敛到 `high` |
 | 3.5 / 3.1 Flash-Lite | `minimal` | `minimal/low/medium/high` | 同上 |
 | 3.1 Pro | `high` | `low/medium/high` | `none/minimal` 降为 `low` |
@@ -132,7 +132,7 @@ claude --model gemini-3.6-flash
 
 未显式传入强度时不会强行覆盖 Gemini 的模型默认值。Claude 旧版数值预算在 Gemini 2.5 上会尽量原值保留并按官方范围截断；发往 Gemini 3 时，`≤1024`、`≤8192`、更高预算依次映射为 `low`、`medium`、`high`，再按具体模型支持的等级收敛。
 
-> **Gemini 3.7 Flash 说明（截至 2026-08-14）**：Google 官方模型和 Thinking 文档尚未发布该型号的独立能力表；本项目按 Google 对 3.6 Flash 及未来模型的 API 兼容说明，采用 Flash 四档 `MINIMAL/LOW/MEDIUM/HIGH` 的前瞻映射。`MINIMAL` 不等同于“完全关闭思考”。如要在当前网络和匿名上游配额下复测四档，可运行：`$env:VERTEX_LIVE_THINKING_TEST = '1'; go test ./internal/vertex -run '^TestLiveGemini37FlashThinkingLevels$' -v -count=1`。若上游明确返回 `INVALID_ARGUMENT`，请以其实际错误和新发布的官方表为准。
+> **Gemini 3.7 / 3.8 Flash 说明（官方已发布）**：Google 官方模型卡与 Thinking 文档已公布二者的独立等级表：3.7 Flash（2026-08-13 GA）与 3.8 Flash（2026-09-02 GA）均仅支持 `LOW/MEDIUM/HIGH` 三档（默认 `medium`），`thinking_level: MINIMAL` 会返回 API 验证错误。因此本项目把 `NONE/MINIMAL` 请求自动折叠为 `LOW`；3.6 Flash 仍保持官方四档 `MINIMAL/LOW/MEDIUM/HIGH`。如要在当前网络和匿名上游配额下复测 3.7 三档，可运行：`$env:VERTEX_LIVE_THINKING_TEST = '1'; go test ./internal/vertex -run '^TestLiveGemini37FlashThinkingLevels$' -v -count=1`（3.8 模型卡标注 Live API 暂不支持，故未提供对应的 Live 复测）。若上游明确返回 `INVALID_ARGUMENT`，请以其实际错误和最新官方表为准。
 
 参考 [Google Gemini Thinking](https://ai.google.dev/gemini-api/docs/generate-content/thinking)、[Google OpenAI 兼容映射](https://ai.google.dev/gemini-api/docs/openai#thinking)、[Google 3.6+ 模型迁移说明](https://ai.google.dev/gemini-api/docs/latest-model)、[Anthropic Effort](https://platform.claude.com/docs/en/build-with-claude/effort) 和 [Anthropic Extended Thinking](https://platform.claude.com/docs/en/build-with-claude/extended-thinking)。
 
@@ -192,7 +192,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ver
 
 保活也可完全通过环境变量配置。推荐使用 `VPROXY_KEEPALIVE_URL` 与 `VPROXY_KEEPALIVE_INTERVAL_SECONDS`；为兼容 gcli2api，项目同时接受 `KEEPALIVE_URL` 与 `KEEPALIVE_INTERVAL`（以及 `VPROXY_KEEPALIVE_INTERVAL`）。同一项同时设置时，`VPROXY_*` 形式优先；URL 环境变量存在时，管理面板会将对应字段标为环境托管。可将 URL 设为当前实例的 `/keepalive`，例如 `https://example.onrender.com/keepalive`。
 
-> **提示**：默认模型清单已包含 `gemini-3.6-flash`、官方已发布的 `gemini-3.7-flash` 与前瞻适配的 `gemini-3.8-flash`。在模型名前加上 `fake-` 或 `假流式-` 前缀，可将非流式模型伪装成流式输出。假流式变体同样会经过完整的思考强度归一化（fake prefix 在内部被防御性剥离）。3.8 尚未正式发布，当前按 3.7 的三档形态适配，详见下方思考强度说明。
+> **提示**：默认模型清单已包含 `gemini-3.6-flash`、官方已发布的 `gemini-3.7-flash` 与 `gemini-3.8-flash`（2026-09-02 GA）。在模型名前加上 `fake-` 或 `假流式-` 前缀，可将非流式模型伪装成流式输出。假流式变体同样会经过完整的思考强度归一化（fake prefix 在内部被防御性剥离）。3.7/3.8 均为官方三档思考规格，详见下方思考强度说明。
 
 > **预填充兼容**：通过 OpenAI Chat/Responses、Claude Messages 或 Gemini 原生接口调用 `gemini-3.6-flash`、`gemini-3.7-flash`、`gemini-3.8-flash`（以及后续 3.6+ 系列）时，服务会保留末尾纯文本 `assistant`/`model` 预填充的角色与原文，再追加一条短续写提示，使请求合法地以 `user` 结束；流式或非流式回复都会移除模型可能重复输出的前缀。工具调用、媒体、思考块和其他模型的历史行为保持不变；旧客户端传入的 `NONE`/`thinkingBudget` 也会在出站时转换为该模型支持的思考级别。
 
@@ -213,14 +213,14 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ver
 | `gemini-2.5-flash` | thinkingBudget | 0 – 24576 | 动态思考 |
 | `gemini-2.5-flash-lite` | thinkingBudget | 512 – 24576（正数下限 512） | 关闭 |
 | `gemini-2.5-flash-image` | 不支持 | 删除整个 thinkingConfig | 固定 |
-| `gemini-3.8-flash`（前瞻适配，按 3.7 形态）/ `3.6-flash` / `3.5-flash` / `3.1-flash-lite` / `3-flash` | thinkingLevel | MINIMAL/LOW/MEDIUM/HIGH | 3.6 默认 medium |
-| `gemini-3.7-flash`（官方已发布） | thinkingLevel | LOW/MEDIUM/HIGH（**不支持 MINIMAL，发送会报验证错误**） | 默认 medium；NONE/MINIMAL 自动折叠为 LOW |
+| `gemini-3.8-flash` / `3.7-flash`（官方已发布） | thinkingLevel | LOW/MEDIUM/HIGH（**不支持 MINIMAL，发送会报验证错误**） | 默认 medium；NONE/MINIMAL 自动折叠为 LOW |
+| `3.6-flash` / `3.5-flash` / `3.1-flash-lite` / `3-flash` | thinkingLevel | MINIMAL/LOW/MEDIUM/HIGH | 3.6 默认 medium |
 | `gemini-3.1-pro` | thinkingLevel | LOW/MEDIUM/HIGH（不支持 MINIMAL） | 默认 high |
 | `gemini-3.1-flash-image` / `3.1-flash-lite-image` | thinkingLevel | MINIMAL/HIGH 两档 | — |
 | `gemini-3-pro-preview` | thinkingLevel | LOW/HIGH 两档 | — |
 | `gemini-3-pro-image` | 不支持 | 删除整个 thinkingConfig | 固定 |
 
-> **Claude Code "max" 档**：Claude Code 走 Anthropic 协议时，"max" 档会发送较大的 `thinking.budget_tokens`。本项目会自动按 budget 大小映射到 HIGH（>8192 → HIGH），从而真正开启 Gemini 的最大思考强度。Gemini 3.6 系列官方明确支持 MINIMAL/LOW/MEDIUM/HIGH 四档（HIGH 即最大档）；官方公布的 3.7 Flash 仅支持 LOW/MEDIUM/HIGH 三档，`thinkingLevel: MINIMAL` 会返回 API 验证错误，因此本项目会把 NONE/MINIMAL 请求自动折叠为 LOW；未发布的 3.8 暂沿 3.7 形态适配，正式规格公布后再跟进。
+> **Claude Code "max" 档**：Claude Code 走 Anthropic 协议时，"max" 档会发送较大的 `thinking.budget_tokens`。本项目会自动按 budget 大小映射到 HIGH（>8192 → HIGH），从而真正开启 Gemini 的最大思考强度。Gemini 3.6 系列官方明确支持 MINIMAL/LOW/MEDIUM/HIGH 四档（HIGH 即最大档）；官方已发布的 3.7 Flash（2026-08-13）与 3.8 Flash（2026-09-02）均仅支持 LOW/MEDIUM/HIGH 三档，`thinkingLevel: MINIMAL` 会返回 API 验证错误，因此本项目会把 NONE/MINIMAL 请求自动折叠为 LOW。
 
 > **聊天软件 "auto" 档**：Cherry Studio / ChatBox 等聊天软件的"自动"选项会发送 `reasoning_effort: "auto"` 或 `output_config.effort: "auto"`。本项目会跳过设置 thinkingConfig，让 Gemini 使用其官方默认思考行为（2.5 系列动态思考、3.x 系列 HIGH），不会被报错也不会被钉死在固定档位。
 

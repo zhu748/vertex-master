@@ -1737,6 +1737,48 @@ func TestGemini37ThinkingLevelsMatchOfficialSpec(t *testing.T) {
 	}
 }
 
+// TestGemini38ThinkingLevelsMatchOfficialSpec 验证官方模型卡公布的 3.8 Flash
+// 思考档位（2026-09-02 GA）：仅 LOW/MEDIUM/HIGH，"minimal is not supported
+// and returns an error"（官方 Thinking 文档等级表），因此 NONE/MINIMAL 请求
+// 必须折叠为 LOW 后出站，与 3.7 Flash 规格一致。
+func TestGemini38ThinkingLevelsMatchOfficialSpec(t *testing.T) {
+	tests := []struct {
+		name  string
+		level string
+		want  string
+	}{
+		{name: "LOW", level: "LOW", want: "LOW"},
+		{name: "MEDIUM", level: "MEDIUM", want: "MEDIUM"},
+		{name: "HIGH", level: "HIGH", want: "HIGH"},
+		{name: "MINIMAL", level: "MINIMAL", want: "LOW"},
+		{name: "NONE", level: "NONE", want: "LOW"},
+		{name: "lowercase medium", level: "medium", want: "MEDIUM"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := map[string]any{
+				"contents": []any{map[string]any{
+					"role": "user", "parts": []any{map[string]any{"text": "hi"}},
+				}},
+				"generationConfig": map[string]any{
+					"thinkingConfig": map[string]any{
+						"thinkingLevel": tc.level,
+					},
+				},
+			}
+			vars := BuildVertexVariables(
+				"gemini-3.8-flash",
+				payload,
+				config.StaticProvider(config.DefaultConfig()),
+			)
+			thinking := vars["generationConfig"].(map[string]any)["thinkingConfig"].(map[string]any)
+			if got := thinking["thinkingLevel"]; got != tc.want {
+				t.Fatalf("Gemini 3.8 thinkingLevel=%v, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestGemini38UsesGemini36OrLaterGenerationCompatibility(t *testing.T) {
 	payload := map[string]any{
 		"contents": []any{map[string]any{
