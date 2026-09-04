@@ -1,7 +1,6 @@
 package vertex
 
 import (
-	"context"
 	"strings"
 	"testing"
 
@@ -315,7 +314,8 @@ func TestOfficialStreamingBranchCompiles(t *testing.T) {
 	if client.officialAPIEnabled() {
 		t.Fatal("anonymous mode expected")
 	}
-	// 官方模式执行函数存在且签名正确（编译期校验；用空白标识符避免
-	// staticcheck SA4031 对"函数值永不为 nil"的误报式 nil 检查）。
-	var _ func(context.Context, string, map[string]any, string, func(StreamChunk) bool) = client.executeOfficialStreamingWithPreparedVariables
+	// 官方模式执行函数存在（编译期校验）。方法引用本身就是存在性断言；
+	// 其签名由真实流式调用点在编译期天然约束，无需显式声明函数类型
+	// （声明式写法会触发 staticcheck SA4031 / QF1011）。
+	_ = client.executeOfficialStreamingWithPreparedVariables
 }
