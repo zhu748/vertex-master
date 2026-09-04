@@ -315,9 +315,7 @@ func TestOfficialStreamingBranchCompiles(t *testing.T) {
 	if client.officialAPIEnabled() {
 		t.Fatal("anonymous mode expected")
 	}
-	// 官方模式执行函数存在且签名正确（编译期校验）。
-	var executor func(context.Context, string, map[string]any, string, func(StreamChunk) bool) = client.executeOfficialStreamingWithPreparedVariables
-	if executor == nil {
-		t.Fatal("official streaming executor must not be nil")
-	}
+	// 官方模式执行函数存在且签名正确（编译期校验；用空白标识符避免
+	// staticcheck SA4031 对"函数值永不为 nil"的误报式 nil 检查）。
+	var _ func(context.Context, string, map[string]any, string, func(StreamChunk) bool) = client.executeOfficialStreamingWithPreparedVariables
 }

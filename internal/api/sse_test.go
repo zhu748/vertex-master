@@ -1183,7 +1183,9 @@ func TestSSEWriterKeepAliveConcurrentWithWriteData(t *testing.T) {
 		}
 	}()
 
-	// 给 ping goroutine 一点时间穿插，再停止。
+	// 给 ping goroutine 一点时间穿插，再停止。stop() 具有 join 语义：
+	// 返回时 ping goroutine 已完全退出，之后读取 recorder.Body 不会与
+	// ping 写入并发（-race 会验证这一保证）。
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):

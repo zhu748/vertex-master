@@ -184,12 +184,20 @@ func (sw *sseWriter) writeBuffer(buffer *bytes.Buffer) bool {
 //
 // interval 应远小于链路最短超时（建议 10s）。返回的 stop 函数必须在
 // 真实数据帧开始写之前调用，以避免 keep-alive 帧与正文帧交错。
+//
+// stop 具有 join 语义：close(stopped) 后会阻塞等待 ping goroutine 完全退出，
+// 因此 stop 返回后保证不再有任何 ping 帧写入。调用方（如 responses handler
+// 聚合分支）因此能严格保证「先停 ping，再写正文帧」的顺序；测试也能在
+// stop 之后安全地读取底层响应缓冲，不会与 ping 写入产生 data race。
+// 若 goroutine 已因 ctx.Done 或 ping 写失败自行退出，stop 会立即返回。
 func (sw *sseWriter) startKeepAlive(ctx context.Context, interval time.Duration, onDisconnect context.CancelFunc) (stop func()) {
 	if interval <= 0 || sw == nil {
 		return func() {}
 	}
 	stopped := make(chan struct{})
+	exited := make(chan struct{})
 	go func() {
+		defer close(exited)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
@@ -213,6 +221,9 @@ func (sw *sseWriter) startKeepAlive(ctx context.Context, interval time.Duration,
 	}()
 	var once sync.Once
 	return func() {
-		once.Do(func() { close(stopped) })
+		once.Do(func() {
+			close(stopped)
+			<-exited
+		})
 	}
 }
