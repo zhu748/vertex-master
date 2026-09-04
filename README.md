@@ -11,6 +11,7 @@
 - **多模态输入**：兼容 OpenAI、Responses、Claude 和 Gemini 常见的图片输入格式。
 - **丰富的多媒体支持**：支持文生图、图片编辑、语音合成（TTS）。
 - **内置反爬突破**：内置 TLS 指纹伪装及 reCAPTCHA token 自动获取，轻松通过 Google 匿名端点校验。
+- **单 API Key 直连**：切换到 `official` 模式即可改走官方接口（无需 reCAPTCHA），继续复用代理池做每请求 IP 轮换，适合有"每分钟每 IP 限额"的免费 Key；默认仍为无头 Vertex 匿名端点。
 - **内置代理节点池**：支持 HTTP、HTTPS、SOCKS4、SOCKS4A、SOCKS5、SOCKS5H 以及 mihomo 节点；可订阅纯文本代理列表、定时差异更新、自动健康巡检、失败冷却与请求接力，并通过分页筛选管理大规模代理池。
 - **可视化管理面板**：提供精美的 Web 后台，无需修改 JSON 文件，在浏览器中即可轻松管理 API 密钥、模型别名、代理节点和系统设置。
 - **高级功能**：支持 Token 计数、Gemini 原生端点透传、假流式输出等。
@@ -64,6 +65,25 @@ curl http://127.0.0.1:2156/v1/messages \
 ```
 
 Responses 当前实现面向无状态生成：支持 `input`、`instructions`、图片、函数工具、结构化输出和 SSE；`previous_response_id`、Conversations 及 OpenAI 托管工具不会在本地持久化或执行。
+
+## 🔑 上游通道：无头 Vertex 匿名 / 单 API Key 直连
+
+本项目默认使用**无头 Vertex 匿名端点**（项目初始行为：模拟浏览器调用 Cloud Console 私有接口，网页公开 `anonAPIKey` + reCAPTCHA，无需任何密钥）。同时支持切换到**单 API Key 直连**：所有对话、绘图、TTS 与 Token 计数请求改走官方 Gemini API（`generativelanguage.googleapis.com`，`x-goog-api-key` 鉴权，无需 reCAPTCHA）。
+
+**如何切换模式**（三选一，保存即时生效）：
+
+1. **管理面板**：设置 → 🔑 上游通道 → 「上游通道模式」下拉框选 `anon`（匿名端点，默认）或 `official`（官方直连）；
+2. **配置文件**：`config.json` 中 `"gemini_api_mode": "official"`（或 `"anon"`）；
+3. **环境变量**：`VPROXY_GEMINI_API_MODE=official`（优先级最高）；仅设置 `VPROXY_GEMINI_API_KEY` 而未选模式时，视为要直连。
+
+- **开箱即用**：项目内置一个免费代理池订阅（`https://youhua.onrender.com/api/latest/txt`，每小时自动拉取最新可用代理，`type://host:port` 行式列表按行识别 http/socks4/socks5），开箱自动启用并轮换 IP。直连模式的 Key 支持三种方式：面板粘贴一次（保存到本地 `config.json`，已被 `.gitignore` 排除，不会入库）、环境变量 `VPROXY_GEMINI_API_KEY`、或自建时构建期注入：`go build -ldflags "-X github.com/bsfdsagfadg/vertex/internal/config.builtinGeminiAPIKey=你的Key"`。注意：不要把真实 Key 硬编码进公开仓库源码——Google 会扫描公开仓库并自动吊销泄露的密钥。
+- **代理池照常生效**：直连模式仍复用竞速节点池。上游按 IP 限速时，429 会让该节点进入 30 秒冷却并自动接力下一个节点，相当于每个请求自动换 IP，特别适合有"每分钟每 IP 请求上限"的免费 Key。建议同时开启「并发请求池」并导入多个代理节点。
+- **地理封锁自动换节点**：官方 API 对部分地区 IP 返回 `User location is not supported`，该错误被识别为节点故障（可重试）而非请求错误，会自动换节点接力。
+- **Key 与模式解耦**：Key 填好后切换 `anon/official` 不会丢失；anon 模式下 Key 仅保存不生效，随时一键切回直连。面板中的 Key 以脱敏形式展示，重新输入即更换；`official` 模式未配置 Key 时请求会收到明确的配置错误提示。
+- **代理订阅**：默认代理池订阅可通过环境变量 `VPROXY_PROXY_SUBSCRIPTION_URL` 覆盖；显式设为空串可停用托管订阅，完全不影响手动导入的节点。
+- **镜像/中转**：`gemini_api_base_url` 可填自定义 Base URL（需以 `http(s)://` 开头），留空使用官方地址。
+
+> 注意：切换模式不改变客户端接入方式，四种兼容协议照常使用；仅有模型可用性取决于所用通道/Key 本身的权限。
 
 ## 🧑‍💻 Codex CLI / Claude Code
 
@@ -187,6 +207,9 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ver
 | `proxy_health_check_timeout_seconds` | 8 | 单个代理巡检超时（秒） |
 | `keepalive_url` | 空 | 部署保活的 HTTP(S) 地址；留空关闭，保存后立即热重载 |
 | `keepalive_interval` | 60 | 保活 GET 请求间隔（秒），范围 5–86400 |
+| `gemini_api_mode` | `anon` | 上游通道：`anon`＝无头 Vertex 匿名端点（默认）；`official`＝官方 Gemini API 直连。支持环境变量 `VPROXY_GEMINI_API_MODE` |
+| `gemini_api_key` | 空 | 直连模式密钥，仅 `official` 模式生效；支持面板粘贴 / `VPROXY_GEMINI_API_KEY`（单独设置时视为要直连）/ 构建期注入内置密钥 |
+| `gemini_api_base_url` | 空 | 官方 API 基地址覆盖（镜像/中转）；留空使用 `https://generativelanguage.googleapis.com/v1beta` |
 
 自建 HTTPS 反向代理默认不会信任客户端可伪造的 `X-Forwarded-*` 请求头。只有当 Vertex 仅接收来自可信反向代理的流量时，才设置环境变量 `VPROXY_TRUST_PROXY_HEADERS=true`，以便管理会话正确识别 HTTPS 和客户端地址；Render 环境会自动启用该行为。
 

@@ -152,6 +152,10 @@ func (c *VertexAIClient) countTokenSetsUpstream(
 	model string,
 	contentSets [][]any,
 ) ([]int, []error) {
+	// 单 API Key 直连模式：官方 :countTokens 端点，无需 reCAPTCHA。
+	if c.officialAPIEnabled() {
+		return c.officialCountTokenSetsUpstream(ctx, model, contentSets)
+	}
 	counts := make([]int, len(contentSets))
 	requestErrors := make([]error, len(contentSets))
 	active := make([]int, 0, len(contentSets))

@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -10,6 +11,85 @@ import (
 	"github.com/bsfdsagfadg/vertex/internal/db"
 	"github.com/bsfdsagfadg/vertex/internal/nodes"
 )
+
+// unsetProxySubscriptionEnvForTest 模拟 VPROXY_PROXY_SUBSCRIPTION_URL 完全未设置，
+// 并注册 cleanup 在测试结束后恢复原状（避免污染同进程的后续测试）。
+func unsetProxySubscriptionEnvForTest(t *testing.T) {
+	t.Helper()
+	oldValue, wasSet := os.LookupEnv("VPROXY_PROXY_SUBSCRIPTION_URL")
+	if err := os.Unsetenv("VPROXY_PROXY_SUBSCRIPTION_URL"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if wasSet {
+			_ = os.Setenv("VPROXY_PROXY_SUBSCRIPTION_URL", oldValue)
+			return
+		}
+		_ = os.Unsetenv("VPROXY_PROXY_SUBSCRIPTION_URL")
+	})
+}
+
+func TestProxySubscriptionFromEnvironmentBuiltinDefault(t *testing.T) {
+	unsetProxySubscriptionEnvForTest(t)
+
+	item, err := proxySubscriptionFromEnvironment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item == nil || item.ManagedKey != environmentProxySubscriptionKey ||
+		item.URL != builtinProxySubscriptionURL || item.ProxyType != "auto" ||
+		item.RefreshIntervalMinutes != builtinProxySubscriptionInterval || !item.Enabled {
+		t.Fatalf("unexpected builtin subscription: %#v", item)
+	}
+}
+
+func TestSyncBuiltinDefaultProxySubscriptionPreservesPanelChanges(t *testing.T) {
+	db.CloseDB()
+	if err := db.InitDB(filepath.Join(t.TempDir(), "builtin-sub.db")); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(db.CloseDB)
+	unsetProxySubscriptionEnvForTest(t)
+
+	// 环境变量未设置：首次同步应落库内置默认订阅。
+	if err := SyncEnvironmentProxySubscription(); err != nil {
+		t.Fatal(err)
+	}
+	first, err := nodes.GetManagedProxySubscription(environmentProxySubscriptionKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.URL != builtinProxySubscriptionURL || first.ProxyType != "auto" {
+		t.Fatalf("managed subscription should be the builtin default: %#v", first)
+	}
+
+	// 管理员在面板中停用订阅。
+	first.Enabled = false
+	if _, err := nodes.SaveProxySubscription(first); err != nil {
+		t.Fatal(err)
+	}
+
+	// 模拟进程重启后的再次同步：URL 未变化，必须保留面板修改（仍为停用）。
+	if err := SyncEnvironmentProxySubscription(); err != nil {
+		t.Fatal(err)
+	}
+	again, err := nodes.GetManagedProxySubscription(environmentProxySubscriptionKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.ID != first.ID || again.Enabled {
+		t.Fatalf("builtin sync must preserve panel changes: %#v", again)
+	}
+
+	// 显式退出：环境变量设置为空串 → 删除托管订阅。
+	t.Setenv("VPROXY_PROXY_SUBSCRIPTION_URL", "")
+	if err := SyncEnvironmentProxySubscription(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := nodes.GetManagedProxySubscription(environmentProxySubscriptionKey); err == nil {
+		t.Fatal("managed subscription should be removed on explicit opt-out")
+	}
+}
 
 func TestProxySubscriptionFromEnvironmentDefaults(t *testing.T) {
 	t.Setenv("VPROXY_PROXY_SUBSCRIPTION_URL", "https://user:pass@example.com/list.txt?token=secret")

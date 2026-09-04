@@ -13,6 +13,11 @@ const SETTINGS_FIELDS = [
   { k: 'proxy_health_check_concurrency', label: '巡检并发数', type: 'number', max: 20, min: 1, group: 'health', desc: 'Render Free 建议 5～10（默认 5）' },
   { k: 'proxy_health_check_timeout_seconds', label: '单节点巡检超时（秒）', type: 'number', max: 60, min: 2, group: 'health', desc: '超过该时间即记录失败并进入冷却（默认 8）' },
 
+  // 🔑 Group: official (单 API Key 直连官方 Gemini API)
+  { k: 'gemini_api_mode', label: '上游通道模式', type: 'select', opts: ['anon', 'official'], group: 'official', desc: 'anon＝原版无头 Vertex 匿名端点（默认，与项目初始行为一致，无需任何密钥）；official＝直连官方 Gemini API（对话/绘图/TTS/计数全走官方接口，复用代理池轮换 IP，429 自动换节点）' },
+  { k: 'gemini_api_key', label: 'Gemini API Key（official 模式）', type: 'text', group: 'official', desc: '仅 official 模式生效；留空自动使用内置默认 Key，也可填自己的 Key。保存后仅显示脱敏值，重新输入即更换' },
+  { k: 'gemini_api_base_url', label: '自定义 API Base URL（可选）', type: 'text', group: 'official', desc: '留空使用官方地址 generativelanguage.googleapis.com；可填镜像/中转地址（需以 http(s):// 开头）' },
+
   // 💓 Group: keepalive (部署保活)
   { k: 'keepalive_url', label: '保活 URL', type: 'url', group: 'keepalive', desc: '留空即关闭；启用后会立即请求一次，再按设定间隔发送 GET 请求' },
   { k: 'keepalive_interval', label: '保活间隔（秒）', type: 'number', max: 86400, min: 5, group: 'keepalive', desc: '两次保活请求之间的间隔（默认 60 秒）' },
@@ -294,7 +299,7 @@ function claudePromptSettingsHTML() {
   const replaceSecurity = curSettings.claude_prompt_replace_security_preamble !== false;
   const position = curSettings.claude_prompt_injection_position === 'prepend' ? 'prepend' : 'append';
   claudeReplacementRules = configuredClaudeReplacementRules();
-	configuredClaudeBuiltinRules();
+        configuredClaudeBuiltinRules();
   if (!claudeReplacementRules.length) {
     claudeReplacementRules.push({ from: '', to: '', action: 'replace', disabled: false, models: [] });
   }
@@ -411,6 +416,38 @@ function updateClaudePromptControls() {
   if (injectionFields) {
     injectionFields.classList.toggle('claude-rule-disabled', !injectionEnabled);
     injectionFields.querySelectorAll('textarea,select,input').forEach(el => { el.disabled = !injectionEnabled; });
+  }
+}
+
+function updateOfficialChannelControls() {
+  const modeEl = $('#set_gemini_api_mode');
+  if (!modeEl) return;
+  const official = modeEl.value === 'official';
+  ['gemini_api_key', 'gemini_api_base_url'].forEach(k => {
+    const el = $('#set_' + k);
+    if (!el || managedSettings[k]) return; // 环境托管字段保持服务端渲染状态
+    el.disabled = !official;
+    const container = el.closest('.field');
+    if (container) {
+      container.style.opacity = !official ? '0.5' : '1';
+      container.style.pointerEvents = !official ? 'none' : '';
+    }
+  });
+  const keyEl = $('#set_gemini_api_key');
+  if (keyEl) {
+    const desc = keyEl.closest('.field')?.querySelector('.desc');
+    if (desc) {
+      desc.dataset.base = desc.dataset.base || desc.textContent;
+      let hint;
+      if (official) {
+        hint = curSettings.gemini_api_key_builtin
+          ? '（当前生效：构建时注入的内置 Key）'
+          : (keyEl.value.trim() ? '（当前生效：已保存的 Key）' : '（⚠ 尚未配置 Key，切换后请求会报错）');
+      } else {
+        hint = keyEl.value.trim() ? '（anon 模式下暂不生效，已保存待切换）' : '（anon 模式下暂不生效）';
+      }
+      desc.textContent = desc.dataset.base + hint;
+    }
   }
 }
 
@@ -858,6 +895,7 @@ async function loadSettings() {
   const groups = {
     pool: { title: '🚀 并发与 Token 池管理', fields: [] },
     health: { title: '🩺 代理健康巡检', fields: [] },
+    official: { title: '🔑 上游通道（无头 Vertex 匿名 / 官方 API 直连）', fields: [] },
     keepalive: { title: '💓 部署保活', fields: [] },
     core: { title: '🛠 核心控制与基础参数', fields: [] },
     security: { title: '🛡 安全增强与模型策略', fields: [] }
@@ -875,6 +913,11 @@ async function loadSettings() {
     const boolFields = g.fields.filter(f => f.type === 'bool');
 
     let extraHtml = '';
+    if (key === 'official') {
+      extraHtml = `
+        <div class="desc" style="margin-top:10px; line-height:1.7;">💡 <b>模式说明</b>：<b>anon</b>＝默认的无头 Vertex 匿名端点（与项目初始行为一致，无需任何密钥）；<b>official</b>＝直连官方 Gemini API（x-goog-api-key 鉴权，无需 reCAPTCHA），未填 Key 时自动使用内置默认密钥。两种模式都复用「节点管理」里的代理池 —— 每个请求自动挑选健康节点，遇 429 限速自动冷却该 IP 并接力下一个节点，适合有“每分钟每 IP 请求上限”限制的免费 Key。建议同时开启「并发请求池」并导入多个代理节点。</div>
+      `;
+    }
     if (key === 'security') {
       extraHtml = `
         <div class="field" style="margin-top:12px; display:flex; justify-content:space-between; align-items:center; background:rgba(255,255,255,0.03); padding:14px; border-radius:10px; border:1px solid var(--stroke);">
@@ -930,6 +973,7 @@ async function loadSettings() {
 
   $('#set_claude_prompt_replacement_enabled').addEventListener('change', updateClaudePromptControls);
   $('#set_claude_prompt_injection_enabled').addEventListener('change', updateClaudePromptControls);
+  $('#set_gemini_api_mode')?.addEventListener('change', updateOfficialChannelControls);
   $('#set_claude_prompt_strip_claude_code_promotions').addEventListener('change', () => {
     if (!claudeBuiltinRulesEditing) renderClaudeBuiltinRules();
   });
@@ -938,6 +982,7 @@ async function loadSettings() {
   });
   $('#claudePromptLatestEndpoint')?.addEventListener('change', loadLatestClaudePrompt);
   updateClaudePromptControls();
+  updateOfficialChannelControls();
   await loadLatestClaudePrompt();
   startClaudePromptPolling();
 

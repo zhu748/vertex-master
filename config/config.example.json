@@ -29,5 +29,8 @@
   "proxy_health_check_concurrency": 5,
   "proxy_health_check_timeout_seconds": 8,
   "keepalive_url": "",
-  "keepalive_interval": 60
+  "keepalive_interval": 60,
+  "gemini_api_mode": "anon",
+  "gemini_api_key": "",
+  "gemini_api_base_url": ""
 }

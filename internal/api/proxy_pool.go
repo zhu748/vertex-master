@@ -29,6 +29,14 @@ const (
 	environmentProxySubscriptionKey            = "environment:proxy-subscription"
 	defaultEnvironmentProxyType                = "http"
 	defaultEnvironmentProxyRefreshIntervalMins = 60
+
+	// 内置默认免费代理池订阅：VPROXY_PROXY_SUBSCRIPTION_URL 完全未设置时启用，
+	// 开箱即拥有一个自动更新的公网代理池，用于单 API Key 直连模式的 IP 轮换。
+	// 订阅内容为 type://host:port 行式列表，type=auto 可按行识别 http/socks4/socks5。
+	builtinProxySubscriptionName     = "内置免费代理池 (youhua.onrender.com)"
+	builtinProxySubscriptionURL      = "https://youhua.onrender.com/api/latest/txt"
+	builtinProxySubscriptionType     = "auto"
+	builtinProxySubscriptionInterval = 60
 )
 
 type subscriptionRefreshLockEntry struct {
@@ -41,8 +49,29 @@ var subscriptionRefreshLockRegistry = struct { //nolint:gochecknoglobals
 	entries map[int64]*subscriptionRefreshLockEntry
 }{entries: make(map[int64]*subscriptionRefreshLockEntry)}
 
+// envProxySubscriptionURLSet 报告 VPROXY_PROXY_SUBSCRIPTION_URL 是否设置了非空值。
+func envProxySubscriptionURLSet() bool {
+	raw, ok := os.LookupEnv("VPROXY_PROXY_SUBSCRIPTION_URL")
+	return ok && strings.TrimSpace(raw) != ""
+}
+
+// proxySubscriptionFromEnvironment 决定受托管代理订阅的内容：
+//  1. VPROXY_PROXY_SUBSCRIPTION_URL 设置为非空值 → 使用环境变量订阅（Render 部署场景）；
+//  2. 设置为空字符串 → 显式停用托管订阅（返回 nil, nil）；
+//  3. 完全未设置 → 使用内置默认免费代理池订阅，开箱即用。
 func proxySubscriptionFromEnvironment() (*nodes.ProxySubscription, error) {
-	rawURL := strings.TrimSpace(os.Getenv("VPROXY_PROXY_SUBSCRIPTION_URL"))
+	rawURL, envSet := os.LookupEnv("VPROXY_PROXY_SUBSCRIPTION_URL")
+	rawURL = strings.TrimSpace(rawURL)
+	if !envSet {
+		return &nodes.ProxySubscription{ //nolint:exhaustruct
+			ManagedKey:             environmentProxySubscriptionKey,
+			Name:                   builtinProxySubscriptionName,
+			URL:                    builtinProxySubscriptionURL,
+			ProxyType:              builtinProxySubscriptionType,
+			RefreshIntervalMinutes: builtinProxySubscriptionInterval,
+			Enabled:                true,
+		}, nil
+	}
 	if rawURL == "" {
 		return nil, nil
 	}
@@ -84,7 +113,13 @@ func proxySubscriptionFromEnvironment() (*nodes.ProxySubscription, error) {
 	}, nil
 }
 
-// SyncEnvironmentProxySubscription 将 Render 环境变量同步为一个受托管的代理池订阅。
+// SyncEnvironmentProxySubscription 将环境变量（或内置默认）代理订阅同步到数据库。
+//
+// 同步语义：
+//   - 环境变量设置非空 URL → 每次启动都按环境变量覆盖托管订阅（环境变量优先）；
+//   - 环境变量设置为空串 → 显式停用，删除托管订阅；
+//   - 环境变量未设置 → 启用内置默认订阅；若数据库中的托管订阅已指向同一地址，
+//     则跳过同步，保留管理员在面板里做的修改（如停用、调整刷新间隔）。
 func SyncEnvironmentProxySubscription() error {
 	item, err := proxySubscriptionFromEnvironment()
 	if err != nil {
@@ -108,11 +143,18 @@ func SyncEnvironmentProxySubscription() error {
 		return nil
 	}
 
+	// 内置默认订阅不抢占管理员的面板修改：地址未变化时直接跳过。
+	if !envProxySubscriptionURLSet() {
+		if existing, getErr := nodes.GetManagedProxySubscription(environmentProxySubscriptionKey); getErr == nil &&
+			existing.URL == item.URL {
+			return nil
+		}
+	}
 	saved, err := nodes.UpsertManagedProxySubscription(environmentProxySubscriptionKey, *item)
 	if err != nil {
 		return err
 	}
-	log.Printf("[ProxyPool] 已同步环境变量代理订阅 %q：%s，类型 %s，每 %d 分钟刷新",
+	log.Printf("[ProxyPool] 已同步代理订阅 %q：%s，类型 %s，每 %d 分钟刷新",
 		saved.Name, subscriptionURLForLog(saved.URL), saved.ProxyType, saved.RefreshIntervalMinutes)
 	return nil
 }
