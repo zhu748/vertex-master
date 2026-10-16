@@ -108,7 +108,8 @@ func TestReadAdminLogTailBoundsLargeFileAndKeepsLastLines(t *testing.T) {
 	var content strings.Builder
 	content.Grow(maxAdminLogTailBytes + 32*1024)
 	content.WriteString(strings.Repeat("discarded-old-line\n", maxAdminLogTailBytes/19+100))
-	for index := range 250 {
+	// 生成的尾部行数必须超过 maxAdminLogTailLines，才会真正触发按行截断。
+	for index := range maxAdminLogTailLines + 50 {
 		_, _ = fmt.Fprintf(&content, "tail-%03d\n", index)
 	}
 	if err := os.WriteFile(path, []byte(content.String()), 0o600); err != nil {
@@ -123,7 +124,10 @@ func TestReadAdminLogTailBoundsLargeFileAndKeepsLastLines(t *testing.T) {
 	if len(lines) != maxAdminLogTailLines {
 		t.Fatalf("got %d lines, want %d", len(lines), maxAdminLogTailLines)
 	}
-	if lines[0] != "tail-050" || lines[len(lines)-1] != "tail-249" {
+	// 行数窗口超出 maxAdminLogTailLines 行时，保留最后的 maxAdminLogTailLines 行。
+	wantFirst := fmt.Sprintf("tail-%03d", 50)
+	wantLast := fmt.Sprintf("tail-%03d", maxAdminLogTailLines+49)
+	if lines[0] != wantFirst || lines[len(lines)-1] != wantLast {
 		t.Fatalf("unexpected bounded tail: first=%q last=%q", lines[0], lines[len(lines)-1])
 	}
 	if len(got) > maxAdminLogTailBytes {

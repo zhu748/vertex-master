@@ -203,13 +203,20 @@ td code { background: rgba(0, 0, 0, .3); padding: 2px 9px; border-radius: 8px; f
   width: 100% !important;
 }
 #logsTable th:nth-child(1), #logsTable td:nth-child(1),
-#logsTable th:nth-child(2), #logsTable td:nth-child(2) {
+#logsTable th:nth-child(2), #logsTable td:nth-child(2),
+#logsTable th:nth-child(3), #logsTable td:nth-child(3) {
   white-space: nowrap !important;
   width: 1% !important;
 }
-#logsTable th:nth-child(3), #logsTable td:nth-child(3) {
+#logsTable th:nth-child(4), #logsTable td:nth-child(4) {
   word-break: break-all !important;
-  white-space: pre-wrap !important;
+}
+#logsTable thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: rgba(34, 27, 22, .95);
+  backdrop-filter: blur(6px);
 }
 
 .field { margin-bottom: 18px; }
@@ -1009,9 +1016,84 @@ td code { background: rgba(0, 0, 0, .3); padding: 2px 9px; border-radius: 8px; f
   border-radius: 10px;
 }
 
-.log-level-info { color: #3b82f6; font-weight: bold; }
-.log-level-warn { color: #f59e0b; font-weight: bold; }
-.log-level-error { color: #ef4444; font-weight: bold; }
+/* ===== 运行日志页：筛选 / 级别徽标 / 智能滚动 ===== */
+.log-card { position: relative; }
+.log-filter-toolbar { align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
+.log-level-chips { display: flex; gap: 8px; flex-wrap: wrap; flex: none; }
+.log-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: rgba(255, 255, 255, .05); color: var(--text-dim);
+  border: 1px solid var(--stroke); border-radius: 999px;
+  padding: 5px 12px; font-size: calc(var(--base-font-size) * 12.5 / 14);
+  transition: color .18s var(--ease), border-color .18s var(--ease), background .18s var(--ease);
+}
+.log-chip:hover { color: var(--text); border-color: rgba(var(--gold-rgb), .5); }
+.log-chip.active {
+  color: #2c1d08; background: linear-gradient(180deg, var(--gold), var(--gold-deep));
+  border-color: transparent; font-weight: 600;
+}
+.log-chip-count { font-variant-numeric: tabular-nums; opacity: .8; }
+.log-chip-error .log-chip-count { color: var(--red); font-weight: 700; }
+.log-chip.active .log-chip-count { color: inherit; }
+.log-chip-error.log-chip-has { border-color: rgba(236, 138, 124, .55); }
+.log-chip-warn.log-chip-has .log-chip-count { color: var(--gold); font-weight: 700; }
+.log-chip-warn.log-chip-has { border-color: rgba(240, 189, 92, .5); }
+#logSearchInput { max-width: 340px; min-width: 200px; padding: 7px 12px; }
+
+.log-level-badge {
+  display: inline-block; min-width: 42px; text-align: center;
+  padding: 2px 8px; border-radius: 7px;
+  font-weight: 700; font-size: calc(var(--base-font-size) * 11.5 / 14); letter-spacing: .03em;
+}
+.log-level-info { color: var(--blue); background: rgba(120, 150, 190, .16); }
+.log-level-warn { color: var(--gold); background: rgba(240, 189, 92, .13); }
+.log-level-error { color: var(--red); background: rgba(236, 138, 124, .15); }
+.log-level-debug { color: var(--text-dim); background: rgba(255, 255, 255, .07); }
+
+.log-tag {
+  display: inline-block; padding: 2px 8px; border-radius: 7px;
+  background: rgba(255, 255, 255, .06); border: 1px solid var(--stroke);
+  color: var(--text-dim); font-size: calc(var(--base-font-size) * 11 / 14); white-space: nowrap;
+}
+
+/* 报错行视觉强化：淡红底色 + 左侧红色竖条 */
+#logsTable tr.log-row-error td { background: rgba(236, 138, 124, .07); }
+#logsTable tr.log-row-error td:nth-child(4) { border-left: 2px solid rgba(236, 138, 124, .55); }
+#logsTable tr.log-row-warn td { background: rgba(240, 189, 92, .05); }
+#logsTable tr.log-row-startup td { border-top: 1px dashed var(--stroke); }
+
+.log-msg-cell { position: relative; }
+.log-msg { white-space: pre-wrap; word-break: break-all; }
+.log-msg-clamped { max-height: 11em; overflow: hidden; position: relative; }
+.log-msg-clamped::after {
+  content: '';
+  position: absolute; left: 0; right: 0; bottom: 0; height: 2.4em;
+  background: linear-gradient(180deg, transparent, var(--glass-solid));
+  pointer-events: none;
+}
+.log-expand-btn, .log-copy-btn {
+  margin-top: 6px; padding: 3px 10px;
+  font-size: calc(var(--base-font-size) * 11 / 14);
+  background: rgba(255, 255, 255, .06); color: var(--text-dim);
+  border: 1px solid var(--stroke); border-radius: 8px;
+  opacity: .75; transition: opacity .18s var(--ease), color .18s var(--ease), border-color .18s var(--ease);
+}
+.log-copy-btn { margin-left: 8px; }
+.log-expand-btn:hover, .log-copy-btn:hover { opacity: 1; color: var(--gold); border-color: rgba(var(--gold-rgb), .5); }
+
+.log-empty { padding: 26px 0; text-align: center; color: var(--text-dim); }
+
+.log-jump-btn {
+  position: absolute; right: 26px; bottom: 26px; z-index: 6;
+  display: inline-flex; align-items: center; gap: 4px;
+  background: var(--glass-solid); color: var(--gold);
+  border: 1px solid rgba(var(--gold-rgb), .45); border-radius: 999px;
+  padding: 8px 16px; font-size: calc(var(--base-font-size) * 12.5 / 14); font-weight: 600;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, .45); backdrop-filter: blur(6px);
+  animation: rise .35s var(--ease) both;
+}
+.log-jump-btn:hover { filter: brightness(1.1); transform: translateY(-1px); }
+.log-jump-count { color: var(--red); font-weight: 700; }
 
 .mt-20 { margin-top: 20px; }
 

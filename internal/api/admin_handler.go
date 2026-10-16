@@ -26,9 +26,11 @@ const (
 	maxBackgroundUploadBytes  = 10 << 20
 	maxBackgroundUploadPixels = 40_000_000
 	maxAdminLogTailBytes      = 1 << 20
-	maxAdminLogTailLines      = 200
-	adminLogReadBlockSize     = 32 * 1024
-	defaultAdminBackground    = "url('background.jpg')"
+	// 前端会把无时间戳的续行（多行报错体、panic 堆栈）归组进上一条日志，
+	// 因此按"原始行"计的窗口要放大，保证归组后仍有足够的可见条目。
+	maxAdminLogTailLines   = 400
+	adminLogReadBlockSize  = 32 * 1024
+	defaultAdminBackground = "url('background.jpg')"
 )
 
 var adminLogReadBlockPool = sync.Pool{ //nolint:gochecknoglobals

@@ -513,7 +513,7 @@
           <div class="page-head">
             <div>
               <h2>运行日志</h2>
-              <div class="hint">系统最近 200 条日志</div>
+              <div class="hint" id="logsHint">正在加载日志…</div>
             </div>
             <div style="display:flex; align-items:center; gap:16px;">
               <div style="display:flex; align-items:center; gap:10px;">
@@ -527,19 +527,40 @@
               <button class="btn ghost" data-click-action="loadLogs">立即刷新</button>
             </div>
           </div>
-          <div class="card glass">
+          <div class="card glass log-card">
+            <div class="toolbar log-filter-toolbar">
+              <div class="log-level-chips" id="logLevelChips" role="group" aria-label="按级别筛选日志">
+                <button type="button" class="log-chip active" data-level="all"
+                  data-click-action="filterLogLevel">全部 <span class="log-chip-count" data-count="all">0</span></button>
+                <button type="button" class="log-chip log-chip-error" data-level="error"
+                  data-click-action="filterLogLevel">错误 <span class="log-chip-count" data-count="error">0</span></button>
+                <button type="button" class="log-chip log-chip-warn" data-level="warn"
+                  data-click-action="filterLogLevel">警告 <span class="log-chip-count" data-count="warn">0</span></button>
+                <button type="button" class="log-chip log-chip-debug" data-level="debug"
+                  data-click-action="filterLogLevel">调试 <span class="log-chip-count" data-count="debug">0</span></button>
+                <button type="button" class="log-chip log-chip-info" data-level="info"
+                  data-click-action="filterLogLevel">信息 <span class="log-chip-count" data-count="info">0</span></button>
+              </div>
+              <label for="logSearchInput" class="sr-only">搜索日志</label>
+              <input id="logSearchInput" type="search" placeholder="搜索日志内容，如节点名、报错信息…"
+                data-input-action="searchLogs">
+            </div>
             <div class="table-wrap" id="logContentUI" style="max-height: 60vh; overflow-y: auto;">
               <table id="logsTable">
                 <thead>
                   <tr>
                     <th>时间</th>
                     <th>级别</th>
+                    <th>模块</th>
                     <th>消息</th>
                   </tr>
                 </thead>
                 <tbody id="logUITbody" class="font-mono" style="font-size: 0.9em;"></tbody>
               </table>
+              <div class="log-empty hidden" id="logEmptyHint">没有匹配的日志</div>
             </div>
+            <button type="button" class="log-jump-btn hidden" id="logJumpBtn"
+              data-click-action="jumpToLogBottom">↓ 回到底部<span class="log-jump-count" id="logJumpCount"></span></button>
           </div>
         </section>
       </div>
