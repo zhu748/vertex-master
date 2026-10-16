@@ -132,7 +132,11 @@ func (c *VertexAIClient) executeStreamingWithPreparedVariables(ctx context.Conte
 
 retryLoop:
 	for attempt <= maxRetries {
-		log.Printf("[Vertex] [StreamChat] 开始尝试 (Attempt %d/%d), 模型=%s, 请求ID=%s, 代理=%s", attempt, maxRetries, model, reqID, nodeName)
+		// 逐 attempt 进度日志仅在 debug 模式输出；非 debug 模式由竞速账本
+		// 汇总（race_journal.go），避免并发竞速时每个候选每次尝试都刷屏。
+		if cfg.DebugMode() {
+			log.Printf("[Vertex] [StreamChat] 开始尝试 (Attempt %d/%d), 模型=%s, 请求ID=%s, 代理=%s", attempt, maxRetries, model, reqID, nodeName)
+		}
 		if recaptchaToken == "" {
 			tok, tokenErr := c.pool.GetTokenWithProxyContext(ctx, proxyURI)
 			if tokenErr != nil && ctx.Err() != nil {
@@ -210,7 +214,9 @@ retryLoop:
 		case ve != nil && ve.Kind == "ratelimit":
 			lastError = ve
 			if payloadYielded || attempt >= maxRetries {
-				log.Printf("[Vertex] [StreamChat] (Attempt %d/%d) 节点 %s 触发 429 失败, 请求ID=%s, 代理=%s", attempt, maxRetries, model, reqID, nodeName)
+				if cfg.DebugMode() {
+					log.Printf("[Vertex] [StreamChat] (Attempt %d/%d) 节点 %s 触发 429 失败, 请求ID=%s, 代理=%s", attempt, maxRetries, model, reqID, nodeName)
+				}
 				break retryLoop
 			}
 			// 429：销毁旧 session 重建新的，换 token。
@@ -221,7 +227,7 @@ retryLoop:
 				// 含糊的 "recreate session: ..."，便于上层 race engine 走
 				// 429 重试策略而非把整条链路当成 internal 错误熔断。
 				// 同时记录重建会话失败原因到日志便于排查。
-				log.Printf("[Vertex] [StreamChat] 节点 %s 429 后重建会话失败: %s, 请求ID=%s, 代理=%s", model, e.Error(), reqID, nodeName)
+				log.Printf("[Vertex] [StreamChat] 节点 %s 429 后重建会话失败: %s, 请求ID=%s, 代理=%s", model, compactLogMessage(e.Error(), journalMaxLastErrChars), reqID, nodeName)
 				yield(StreamChunk{Err: lastError})
 				return
 			}
@@ -233,7 +239,9 @@ retryLoop:
 			if wait <= 0 {
 				wait = min(10, 1+attempt)
 			}
-			log.Printf("[Vertex] [StreamChat] (Attempt %d/%d) 节点 %s 触发 429 将重试 (延迟 %ds), 请求ID=%s, 代理=%s", attempt, maxRetries, model, wait, reqID, nodeName)
+			if cfg.DebugMode() {
+				log.Printf("[Vertex] [StreamChat] (Attempt %d/%d) 节点 %s 触发 429 将重试 (延迟 %ds), 请求ID=%s, 代理=%s", attempt, maxRetries, model, wait, reqID, nodeName)
+			}
 			attempt++
 			if err := sleepCtx(ctx, time.Duration(wait)*time.Second); err != nil {
 				break retryLoop
@@ -243,10 +251,14 @@ retryLoop:
 			lastError = ve
 			// 【关键改动】：如果是网络不通等内部错误，直接熔断并停止重试。
 			if ve.Kind == "internal" || !ve.IsRetryable() || payloadYielded || attempt >= maxRetries {
-				log.Printf("[Vertex] [StreamChat] (Attempt %d/%d) 节点 %s 触发异常错误失败: [%s] %s, 请求ID=%s, 代理=%s", attempt, maxRetries, model, ve.Kind, ve.Message, reqID, nodeName)
+				if cfg.DebugMode() {
+					log.Printf("[Vertex] [StreamChat] (Attempt %d/%d) 节点 %s 触发异常错误失败: [%s] %s, 请求ID=%s, 代理=%s", attempt, maxRetries, model, ve.Kind, ve.Message, reqID, nodeName)
+				}
 				break retryLoop
 			}
-			log.Printf("[Vertex] [StreamChat] (Attempt %d/%d) 节点 %s 触发异常错误将重试: [%s] %s, 请求ID=%s, 代理=%s", attempt, maxRetries, model, ve.Kind, ve.Message, reqID, nodeName)
+			if cfg.DebugMode() {
+				log.Printf("[Vertex] [StreamChat] (Attempt %d/%d) 节点 %s 触发异常错误将重试: [%s] %s, 请求ID=%s, 代理=%s", attempt, maxRetries, model, ve.Kind, ve.Message, reqID, nodeName)
+			}
 			attempt++
 			if err := sleepCtx(ctx, backoff(attempt)); err != nil {
 				break retryLoop
@@ -281,7 +293,9 @@ func effectiveMaxRetries(configured int, parallelPoolEnabled, parallelPoolRetryE
 // ctx 绑定 to 上游流连接：ctx 取消时 Body.Read 报错，scanStream 干净结束（返回 nil，不 panic）。
 func (c *VertexAIClient) executeStreamingAttempt(ctx context.Context, sess *transport.Session, model, nodeName string, preparedVariables map[string]any, recaptchaToken string, _ bool, emit func(StreamChunk) bool) error {
 	reqID := RequestIDFromContext(ctx)
-	log.Printf("[Vertex] [executeStreamingAttempt] 准备发送流式请求: 模型=%s, 请求ID=%s, 代理=%s", model, reqID, nodeName)
+	if c.cfg.DebugMode() {
+		log.Printf("[Vertex] [executeStreamingAttempt] 准备发送流式请求: 模型=%s, 请求ID=%s, 代理=%s", model, reqID, nodeName)
+	}
 	cfg := c.cfg
 	newBody := buildRequestPayloadFromVariables(preparedVariables, recaptchaToken)
 	// 上游请求 payload 序列化到 spool 缓冲（大媒体自动落盘）。流式：请求体在 DoStream 发送期被读取，
@@ -329,7 +343,7 @@ func (c *VertexAIClient) executeStreamingAttempt(ctx context.Context, sess *tran
 			log.Printf("[DEBUG] [StreamChat] 上游回复: %s", errText)
 		} else if sr.StatusCode == 400 {
 			debugBody, _ := json.Marshal(newBody.Variables)
-			log.Printf("[Vertex] [Stream] 收到 400 Bad Request, Variables Payload: %s", string(debugBody))
+			log.Printf("[Vertex] [Stream] 收到 400 Bad Request, Variables Payload: %s", compactLogMessage(string(debugBody), journalMaxVariablesChars))
 		}
 
 		if sr.StatusCode == 401 || sr.StatusCode == 403 ||

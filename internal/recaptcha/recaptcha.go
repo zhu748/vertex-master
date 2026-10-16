@@ -78,7 +78,7 @@ func FetchRecaptchaTokenContext(
 		if debugMode {
 			log.Printf("[Recaptcha] [节点: %s] 开始获取 reCAPTCHA token (尝试 %d/3)", nodeName, retry+1)
 		}
-		if token, ok := fetchOnce(ctx, net, proxyURI); ok {
+		if token, ok := fetchOnce(ctx, net, proxyURI, debugMode); ok {
 			elapsed := time.Since(start)
 			if debugMode {
 				log.Printf("[Recaptcha] [节点: %s] 成功获取 reCAPTCHA token, 耗时: %d ms", nodeName, elapsed.Milliseconds())
@@ -96,21 +96,23 @@ func FetchRecaptchaTokenContext(
 	return "", nil
 }
 
-func fetchOnce(ctx context.Context, net *transport.NetworkClient, proxyURI string) (string, bool) {
+func fetchOnce(ctx context.Context, net *transport.NetworkClient, proxyURI string, debugMode bool) (string, bool) {
 	sess, err := net.CreateSession(15, proxyURI, "recaptcha")
 	if err != nil {
 		return "", false
 	}
 	defer sess.Close()
 
-	token, err := FetchTokenWithSession(ctx, sess)
+	token, err := FetchTokenWithSession(ctx, sess, debugMode)
 	return token, err == nil && token != ""
 }
 
 // FetchTokenWithSession executes the shared reCAPTCHA exchange on an existing
 // transport session. Admin health checks use this to test the exact same flow
 // as production requests without creating a second implementation.
-func FetchTokenWithSession(ctx context.Context, sess *transport.Session) (string, error) {
+// debugMode 控制中间步骤明细日志（并发竞速时每候选都会抓 token，
+// 明细只在排查时需要，默认交给上层汇总，避免刷屏）。
+func FetchTokenWithSession(ctx context.Context, sess *transport.Session, debugMode bool) (string, error) {
 	if sess == nil {
 		return "", fmt.Errorf("transport session is nil")
 	}
@@ -133,7 +135,9 @@ func FetchTokenWithSession(ctx context.Context, sess *transport.Session) (string
 		if len(bodyStr) > 500 {
 			bodyStr = bodyStr[:500] + "..."
 		}
-		log.Printf("[Recaptcha] anchor token正则匹配失败, body前缀: %s", bodyStr)
+		if debugMode {
+			log.Printf("[Recaptcha] anchor token正则匹配失败, body前缀: %s", bodyStr)
+		}
 		return "", fmt.Errorf("从 anchor HTML 解析 recaptcha-token 失败")
 	}
 	baseToken := string(m[1])
@@ -163,11 +167,23 @@ func FetchTokenWithSession(ctx context.Context, sess *transport.Session) (string
 		return "", fmt.Errorf("POST reload: %w", err)
 	}
 	if status != 200 {
-		log.Printf("[Recaptcha] Reload 失败, HTTP 状态码: %d, 返回内容: %s", status, string(reloadBody))
+		if debugMode {
+			log.Printf("[Recaptcha] Reload 失败, HTTP 状态码: %d, 返回内容: %s", status, truncateForLog(string(reloadBody), 300))
+		}
 	}
 	rm := rrespRe.FindSubmatch(reloadBody)
 	if rm == nil {
 		return "", fmt.Errorf("从 reload 响应解析 rresp 失败")
 	}
 	return string(rm[1]), nil
+}
+
+// truncateForLog 把可能多行的响应体压成单行并截断，防止单条日志爆炸。
+func truncateForLog(s string, maxChars int) string {
+	compact := strings.Join(strings.Fields(s), " ")
+	runes := []rune(compact)
+	if len(runes) <= maxChars {
+		return compact
+	}
+	return string(runes[:maxChars]) + "…"
 }

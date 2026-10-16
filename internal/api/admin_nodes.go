@@ -527,7 +527,7 @@ func testProxyNodeWithRecaptcha(
 		return err
 	}
 	defer session.Close()
-	_, err = recaptcha.FetchTokenWithSession(ctx, session)
+	_, err = recaptcha.FetchTokenWithSession(ctx, session, false)
 	return err
 }
 

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -361,6 +362,10 @@ var (
 	reloadMu sync.Mutex
 	//nolint:gochecknoglobals // Serializes atomic config read-modify-write cycles.
 	settingsWriteMu sync.Mutex
+	//nolint:gochecknoglobals // 上一次成功加载的 config.json 原始内容；
+	// 用于把周期性 TTL 重载的“成功加载”日志压缩到内容真正变化时才打印。
+	// 仅在 reloadMu 持有期间读写。
+	lastLoadedConfigRaw []byte
 )
 
 const cacheTTL = 60 * time.Second
@@ -657,7 +662,10 @@ func loadCacheEntry() *cacheEntry {
 					}
 				}(expected, normalized)
 			}
-			log.Printf("[Config] 成功加载配置文件 config.json")
+			if !bytes.Equal(data, lastLoadedConfigRaw) {
+				log.Printf("[Config] 成功加载配置文件 config.json")
+			}
+			lastLoadedConfigRaw = append([]byte(nil), data...)
 		}
 	} else if os.IsNotExist(err) {
 		// 全新部署（尚无 config.json）：保持默认匿名模式（无头 Vertex）。

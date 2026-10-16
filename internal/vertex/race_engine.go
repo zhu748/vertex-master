@@ -149,21 +149,30 @@ func runRacePreferred[T any](
 			proxy = cfg.ProxyURL()
 		}
 		log.Printf("[Vertex] [RunParallel] 降级为单节点运行: %s", nodes.GetNodeName(proxy))
+		journal := newRaceJournal(RequestIDFromContext(ctx))
+		journal.recordLaunch()
 		startedAt := time.Now()
 		value, err := run(ctx, proxy)
+		elapsed := time.Since(startedAt)
 		if err == nil {
-			recordProxyAttempt(proxy, nil, time.Since(startedAt))
+			recordProxyAttempt(proxy, nil, elapsed)
 			nodes.RecordProxySuccessForRequest(
 				proxy,
 				RequestIDFromContext(ctx),
-				proxyAttemptMilliseconds(time.Since(startedAt)),
+				proxyAttemptMilliseconds(elapsed),
 			)
+			journal.logSingleWin(nodes.GetNodeName(proxy), elapsed)
 		} else {
-			recordProxyAttempt(proxy, err, time.Since(startedAt))
+			recordProxyAttempt(proxy, err, elapsed)
+			journal.logSingleFail(nodes.GetNodeName(proxy), err, elapsed)
 		}
 		return value, err
 	}
 	stickyPool := nodes.GetStickyPool()
+
+	// 请求级竞速账本：非 debug 模式下逐候选明细不再直接打印，
+	// 由账本在竞速结束时输出唯一一条汇总行（胜出/全败/回退）。
+	journal := newRaceJournal(RequestIDFromContext(ctx))
 
 	if cfg.DebugMode() {
 		log.Printf("[Vertex] [RunParallel] 开启对冲延迟竞速, %d 个节点参与", len(cands))
@@ -198,6 +207,7 @@ func runRacePreferred[T any](
 
 		nodes.RecordSelection(uri)
 		active++
+		journal.recordLaunch()
 		go func(node nodes.Node) {
 			startedAt := time.Now()
 			v, err := run(nodeCtx, node.RawURI)
@@ -248,8 +258,10 @@ func runRacePreferred[T any](
 	var fallbackResults []T
 	finishWithFallback := func(lastErr error) (T, error) {
 		if len(fallbackResults) > 0 && chooseFallback != nil {
+			journal.logFallbackSummary()
 			return chooseFallback(fallbackResults)
 		}
+		journal.logFailSummary(lastErr)
 		if lastErr != nil {
 			return zero, lastErr
 		}
@@ -288,6 +300,7 @@ func runRacePreferred[T any](
 		}
 		select {
 		case <-ctx.Done():
+			// 客户端主动断开：正常行为，不输出竞速汇总避免刷屏。
 			cancel()
 			return zero, ctx.Err()
 
@@ -315,6 +328,7 @@ func runRacePreferred[T any](
 				if preferred != nil && !preferred(res.val) {
 					fallbackResults = append(fallbackResults, res.val)
 					cancelCandidate(uri)
+					journal.recordSuccess()
 					if launchFill() > 0 {
 						safeResetTimer(timer, delay)
 					}
@@ -329,11 +343,8 @@ func runRacePreferred[T any](
 					RequestIDFromContext(ctx),
 					proxyAttemptMilliseconds(res.elapsed),
 				)
-				log.Printf(
-					"[Racing] 竞速胜出节点: %s, 请求ID=%s",
-					name,
-					RequestIDFromContext(ctx),
-				)
+				journal.recordWinner(name, res.elapsed)
+				journal.logWinSummary()
 				cli.UpdateReqWinner(RequestIDFromContext(ctx), name)
 				cli.UpdateReqState(RequestIDFromContext(ctx), "🟢 数据传输", "\033[32m", "已建立连接")
 
@@ -348,6 +359,7 @@ func runRacePreferred[T any](
 			cancelCandidate(uri)
 
 			if !errors.Is(res.err, context.Canceled) {
+				journal.recordFailure(name, res.err)
 				if cfg.DebugMode() {
 					log.Printf("[Racing] 节点 %s 失败: %s", name, res.err.Error())
 				}

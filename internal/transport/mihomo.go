@@ -74,7 +74,9 @@ func getOrStartProxyDialer(uri string, reqID string, debugMode bool) (func(ctx c
 	proxyMutex.RUnlock()
 
 	nodeName := nodes.GetNodeName(uri)
-	log.Printf("[Transport] 请求ID=%s 触发代理初始化: %s", reqID, nodeName)
+	if debugMode {
+		log.Printf("[Transport] 请求ID=%s 触发代理初始化: %s", reqID, nodeName)
+	}
 
 	outMap, err := ParseURI(uri)
 	if err != nil {
