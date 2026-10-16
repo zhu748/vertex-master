@@ -48,7 +48,9 @@ func AdaptGemini36OrLaterPrefill(model string, payload map[string]any) string {
 
 // AdaptGemini36Prefill is retained for internal callers compiled against the
 // earlier helper name. The behavior now intentionally covers Gemini 3.6 and
-// every later compatible model, including Gemini 3.7 and 3.8 Flash.
+// every later compatible model, including Gemini 3.7/3.8 Flash and Gemini 4
+// Argon (official docs: history payloads can't end with a model role turn and
+// prefilled model turns aren't supported).
 func AdaptGemini36Prefill(model string, payload map[string]any) string {
 	return AdaptGemini36OrLaterPrefill(model, payload)
 }

@@ -106,11 +106,6 @@ func (c *VertexAIClient) executeStreamingWithRetries(ctx context.Context, model 
 }
 
 func (c *VertexAIClient) executeStreamingWithPreparedVariables(ctx context.Context, model string, preparedVariables map[string]any, proxyURI string, yield func(StreamChunk) bool) {
-	// 单 API Key 直连模式：请求改发官方 Gemini API，仍走同一竞速/重试骨架。
-	if c.officialAPIEnabled() {
-		c.executeOfficialStreamingWithPreparedVariables(ctx, model, preparedVariables, proxyURI, yield)
-		return
-	}
 	cfg := c.cfg
 	maxRetries := effectiveMaxRetries(
 		cfg.MaxRetries(),

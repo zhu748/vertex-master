@@ -31,7 +31,7 @@ var defaultModels = []string{
 	"gemini-3-flash-preview", "gemini-3-pro-image", "gemini-3.1-flash-lite",
 	"gemini-3.1-flash-lite-image", "gemini-3.1-flash-image", "gemini-3.1-pro-preview",
 	"gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.7-flash",
-	"gemini-3.8-flash",
+	"gemini-3.8-flash", "gemini-4-argon",
 	"imagen-3.0-capability", "imagen-4.0-generate-001",
 	"imagen-4.0-ultra-generate-001", "imagen-4.0-fast-generate-001", "virtual-try-on-001",
 	"lyria-002", "veo-2-generate-001", "veo-3-generate-001", "veo-3-fast-generate-001",

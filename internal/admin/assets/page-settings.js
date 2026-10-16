@@ -3,27 +3,22 @@ const SETTINGS_FIELDS = [
   { k: 'parallel_pool_enabled', label: '并发请求池', type: 'bool', group: 'pool', desc: '同时请求多个健康节点，首包到达即采纳，降低延迟' },
   { k: 'parallel_pool_retry_enabled', label: '并发池单点重试', type: 'bool', group: 'pool', desc: '默认开启；节点遇到429等可重试错误时允许节点内再次尝试' },
   { k: 'sticky_node_priority', label: '优先复用成功节点', type: 'bool', group: 'pool', desc: '优先选择近期请求成功的节点，同时保留少量未测试节点用于探索。' },
-  { k: 'parallel_pool_size', label: '最大同时并发', type: 'number', max: 20, min: 1, group: 'pool', desc: '同一请求最多同时运行的代理数量（默认 10，最大 20）' },
-  { k: 'proxy_failover_max_attempts', label: '单请求最多尝试代理', type: 'number', max: 100, min: 1, group: 'pool', desc: '失败或超时后可继续接力的候选总数（默认 30）' },
+  { k: 'parallel_pool_size', label: '最大同时并发', type: 'number', max: 40, min: 1, group: 'pool', desc: '同一请求最多同时运行的代理数量（默认 16，最大 40）；多用户高负载场景建议调高，配合更大的节点池使用' },
+  { k: 'proxy_failover_max_attempts', label: '单请求最多尝试代理', type: 'number', max: 200, min: 1, group: 'pool', desc: '失败或超时后可继续接力的候选总数（默认 60，最大 200）；用户越多越应调大，避免竞速提前耗尽候选' },
   { k: 'parallel_pool_delay_dynamic', label: '动态对冲延迟', type: 'bool', group: 'pool', desc: '根据节点平均响应时间动态调整并发启动间隔，平衡延迟与流量消耗' },
-  { k: 'parallel_pool_delay_ms', label: '固定对冲延迟时间 (毫秒)', type: 'number', max: 10000, min: 100, group: 'pool', desc: '当前代理尚未响应时，启动下一个后备代理的间隔（默认 1000ms）' },
+  { k: 'parallel_pool_delay_ms', label: '固定对冲延迟时间 (毫秒)', type: 'number', max: 10000, min: 50, group: 'pool', desc: '当前代理尚未响应时，启动下一个后备代理的间隔（默认 500ms，最小 50ms）；节点失败时会立即补满并发空位，不等待此延迟' },
   { k: 'proxy_health_check_enabled', label: '自动健康巡检', type: 'bool', group: 'health', desc: '后台限量检查代理连通性；失败仅进入冷却，不会永久禁用。' },
   { k: 'proxy_health_check_interval_minutes', label: '巡检间隔（分钟）', type: 'number', max: 1440, min: 1, group: 'health', desc: '每轮巡检之间的间隔（默认 15）' },
   { k: 'proxy_health_check_batch_size', label: '每轮巡检数量', type: 'number', max: 500, min: 1, group: 'health', desc: '优先检查未测试和冷却到期节点（默认 50）' },
   { k: 'proxy_health_check_concurrency', label: '巡检并发数', type: 'number', max: 20, min: 1, group: 'health', desc: 'Render Free 建议 5～10（默认 5）' },
   { k: 'proxy_health_check_timeout_seconds', label: '单节点巡检超时（秒）', type: 'number', max: 60, min: 2, group: 'health', desc: '超过该时间即记录失败并进入冷却（默认 8）' },
 
-  // 🔑 Group: official (单 API Key 直连官方 Gemini API)
-  { k: 'gemini_api_mode', label: '上游通道模式', type: 'select', opts: ['anon', 'official'], group: 'official', desc: 'anon＝原版无头 Vertex 匿名端点（默认，与项目初始行为一致，无需任何密钥）；official＝直连官方 Gemini API（对话/绘图/TTS/计数全走官方接口，复用代理池轮换 IP，429 自动换节点）' },
-  { k: 'gemini_api_key', label: 'Gemini API Key（official 模式）', type: 'text', group: 'official', desc: '仅 official 模式生效；留空自动使用内置默认 Key，也可填自己的 Key。保存后仅显示脱敏值，重新输入即更换' },
-  { k: 'gemini_api_base_url', label: '自定义 API Base URL（可选）', type: 'text', group: 'official', desc: '留空使用官方地址 generativelanguage.googleapis.com；可填镜像/中转地址（需以 http(s):// 开头）' },
-
   // 💓 Group: keepalive (部署保活)
   { k: 'keepalive_url', label: '保活 URL', type: 'url', group: 'keepalive', desc: '留空即关闭；启用后会立即请求一次，再按设定间隔发送 GET 请求' },
   { k: 'keepalive_interval', label: '保活间隔（秒）', type: 'number', max: 86400, min: 5, group: 'keepalive', desc: '两次保活请求之间的间隔（默认 60 秒）' },
 
   // 🛠 Group: core (核心控制与基础参数)
-  { k: 'max_retries', label: '上游重试次数', type: 'number', group: 'core', desc: '上游请求失败时的重试次数；总尝试 = 此值 + 1' },
+  { k: 'max_retries', label: '上游重试次数', type: 'number', max: 20, min: 0, group: 'core', desc: '单节点上游请求失败时的重试次数（默认 10，最大 20）；总尝试 = 此值 + 1。并发池开启且单点重试开启时生效' },
   { k: 'max_n', label: '最大候选数 (max_n)', type: 'number', group: 'core', desc: '限制客户端一次生成回答的条数上限，防滥用刷量 (默认 8)' },
   { k: 'max_spill_mb', label: '最大内存缓冲 (MB)', type: 'number', group: 'core', desc: '上传大文件时，超过此大小将写入磁盘，防爆内存 (默认 2048)' },
   { k: 'max_request_mb', label: '最大请求体 (MB)', type: 'number', min: 1, max: 1024, group: 'core', desc: '限制客户端请求体大小（默认 64 MB）' },
@@ -416,38 +411,6 @@ function updateClaudePromptControls() {
   if (injectionFields) {
     injectionFields.classList.toggle('claude-rule-disabled', !injectionEnabled);
     injectionFields.querySelectorAll('textarea,select,input').forEach(el => { el.disabled = !injectionEnabled; });
-  }
-}
-
-function updateOfficialChannelControls() {
-  const modeEl = $('#set_gemini_api_mode');
-  if (!modeEl) return;
-  const official = modeEl.value === 'official';
-  ['gemini_api_key', 'gemini_api_base_url'].forEach(k => {
-    const el = $('#set_' + k);
-    if (!el || managedSettings[k]) return; // 环境托管字段保持服务端渲染状态
-    el.disabled = !official;
-    const container = el.closest('.field');
-    if (container) {
-      container.style.opacity = !official ? '0.5' : '1';
-      container.style.pointerEvents = !official ? 'none' : '';
-    }
-  });
-  const keyEl = $('#set_gemini_api_key');
-  if (keyEl) {
-    const desc = keyEl.closest('.field')?.querySelector('.desc');
-    if (desc) {
-      desc.dataset.base = desc.dataset.base || desc.textContent;
-      let hint;
-      if (official) {
-        hint = curSettings.gemini_api_key_builtin
-          ? '（当前生效：构建时注入的内置 Key）'
-          : (keyEl.value.trim() ? '（当前生效：已保存的 Key）' : '（⚠ 尚未配置 Key，切换后请求会报错）');
-      } else {
-        hint = keyEl.value.trim() ? '（anon 模式下暂不生效，已保存待切换）' : '（anon 模式下暂不生效）';
-      }
-      desc.textContent = desc.dataset.base + hint;
-    }
   }
 }
 
@@ -895,7 +858,6 @@ async function loadSettings() {
   const groups = {
     pool: { title: '🚀 并发与 Token 池管理', fields: [] },
     health: { title: '🩺 代理健康巡检', fields: [] },
-    official: { title: '🔑 上游通道（无头 Vertex 匿名 / 官方 API 直连）', fields: [] },
     keepalive: { title: '💓 部署保活', fields: [] },
     core: { title: '🛠 核心控制与基础参数', fields: [] },
     security: { title: '🛡 安全增强与模型策略', fields: [] }
@@ -913,11 +875,6 @@ async function loadSettings() {
     const boolFields = g.fields.filter(f => f.type === 'bool');
 
     let extraHtml = '';
-    if (key === 'official') {
-      extraHtml = `
-        <div class="desc" style="margin-top:10px; line-height:1.7;">💡 <b>模式说明</b>：<b>anon</b>＝默认的无头 Vertex 匿名端点（与项目初始行为一致，无需任何密钥）；<b>official</b>＝直连官方 Gemini API（x-goog-api-key 鉴权，无需 reCAPTCHA），未填 Key 时自动使用内置默认密钥。两种模式都复用「节点管理」里的代理池 —— 每个请求自动挑选健康节点，遇 429 限速自动冷却该 IP 并接力下一个节点，适合有“每分钟每 IP 请求上限”限制的免费 Key。建议同时开启「并发请求池」并导入多个代理节点。</div>
-      `;
-    }
     if (key === 'security') {
       extraHtml = `
         <div class="field" style="margin-top:12px; display:flex; justify-content:space-between; align-items:center; background:rgba(255,255,255,0.03); padding:14px; border-radius:10px; border:1px solid var(--stroke);">
@@ -973,7 +930,6 @@ async function loadSettings() {
 
   $('#set_claude_prompt_replacement_enabled').addEventListener('change', updateClaudePromptControls);
   $('#set_claude_prompt_injection_enabled').addEventListener('change', updateClaudePromptControls);
-  $('#set_gemini_api_mode')?.addEventListener('change', updateOfficialChannelControls);
   $('#set_claude_prompt_strip_claude_code_promotions').addEventListener('change', () => {
     if (!claudeBuiltinRulesEditing) renderClaudeBuiltinRules();
   });
@@ -982,7 +938,6 @@ async function loadSettings() {
   });
   $('#claudePromptLatestEndpoint')?.addEventListener('change', loadLatestClaudePrompt);
   updateClaudePromptControls();
-  updateOfficialChannelControls();
   await loadLatestClaudePrompt();
   startClaudePromptPolling();
 

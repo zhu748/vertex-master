@@ -267,20 +267,9 @@ func main() {
 	if cfg.ParallelPoolEnabled() {
 		poolStr = strconv.Itoa(cfg.ParallelPoolSize()) + "（开启）"
 	}
-	channelStr := "anon（无头 Vertex 匿名端点）"
-	if config.NormalizeGeminiAPIMode(cfg.GeminiAPIMode()) == config.GeminiAPIModeOfficial {
-		keyOrigin := "未配置密钥（请求将报错，请填入 Key 或构建时注入）"
-		switch {
-		case strings.TrimSpace(cfg.GeminiAPIKey()) != "":
-			keyOrigin = "自定义密钥"
-		case config.UsingBuiltinGeminiAPIKey(cfg.GeminiAPIMode(), cfg.GeminiAPIKey()):
-			keyOrigin = "内置默认密钥"
-		}
-		channelStr = "official（官方 Gemini API 直连，" + keyOrigin + "）"
-	}
 	log.Printf("[vproxy] 监听 %s（API 密钥 %d 个，max_retries=%d，并发池=%s）",
 		httpServer.Addr, keys.Count(), cfg.MaxRetries(), poolStr)
-	log.Printf("[vproxy] 上游通道: %s", channelStr)
+	log.Printf("[vproxy] 上游通道: anon（无头 Vertex 匿名端点）")
 	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("[vproxy] server error: %v", err)
 	}

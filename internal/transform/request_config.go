@@ -70,19 +70,34 @@ func applyModelGenerationCompatibility(model string, cfg map[string]any) {
 
 // isGemini36OrLaterModel covers the documented 3.6+ API generation. Google
 // applies its prefilled-turn and sampling restrictions to Gemini 3.6 Flash and
-// all future Gemini releases, so 3.7/3.8 Flash must not fall through the older
-// request path.
+// all future Gemini releases, so 3.7/3.8 Flash and Gemini 4 Argon must not
+// fall through the older request path.
 func isGemini36OrLaterModel(model string) bool {
 	model = strings.ToLower(strings.TrimSpace(model))
-	// 防御性剥离假流式前缀，确保 fake-gemini-3.8-flash 也被识别为 3.6+ 系列。
+	// 防御性剥离假流式前缀，确保 fake-gemini-4-argon 也被识别为 3.6+ 系列。
 	model = stripFakePrefixes(model)
-	const prefix = "gemini-3."
+	const prefix = "gemini-"
 	if !strings.HasPrefix(model, prefix) {
 		return false
 	}
 	remainder := strings.TrimPrefix(model, prefix)
-	minorText, _, ok := strings.Cut(remainder, "-")
-	if !ok {
+	// 先按第一个 '-' 截出世代段：3.6-flash → "3.6"，4-argon → "4"，
+	// 3-flash-preview → "3"，2.5-pro → "2.5"。
+	segment := remainder
+	if dash := strings.IndexByte(segment, '-'); dash >= 0 {
+		segment = segment[:dash]
+	}
+	majorText, minorText, hasMinor := strings.Cut(segment, ".")
+	major, err := strconv.Atoi(majorText)
+	if err != nil {
+		return false
+	}
+	if major > 3 {
+		// Gemini 4 及后续世代沿用 3.6+ 的请求形态（官方迁移说明：
+		// 4 Argon 同样不允许历史以非空 model 回合结束、不支持预填充）。
+		return true
+	}
+	if major < 3 || !hasMinor {
 		return false
 	}
 	minor, err := strconv.Atoi(minorText)

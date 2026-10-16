@@ -54,9 +54,6 @@ func (s staticConfig) ClaudePromptPolicySnapshot() ClaudePromptPolicyConfig {
 	return s.claudePromptPolicy
 }
 func (s staticConfig) VertexAPIKey() string              { return s.c.VertexAPIKey }
-func (s staticConfig) GeminiAPIKey() string              { return s.c.GeminiAPIKey }
-func (s staticConfig) GeminiAPIMode() string             { return s.c.GeminiAPIMode }
-func (s staticConfig) GeminiAPIBaseURL() string          { return s.c.GeminiAPIBaseURL }
 func (s staticConfig) CountTokensQuerySignature() string { return s.c.CountTokensQuerySignature }
 func (s staticConfig) SafetySettings() map[string]string { return s.c.SafetySettings }
 func (s staticConfig) ParallelPoolEnabled() bool         { return s.c.ParallelPoolEnabled }

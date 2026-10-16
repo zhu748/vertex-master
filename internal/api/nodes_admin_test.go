@@ -449,8 +449,8 @@ func TestAdminGetSettingsIncludesProxyPoolControls(t *testing.T) {
 
 	expected := map[string]any{
 		"max_retries":                         float64(10),
-		"parallel_pool_size":                  float64(10),
-		"proxy_failover_max_attempts":         float64(30),
+		"parallel_pool_size":                  float64(16),
+		"proxy_failover_max_attempts":         float64(60),
 		"proxy_health_check_enabled":          true,
 		"proxy_health_check_interval_minutes": float64(15),
 		"proxy_health_check_batch_size":       float64(50),

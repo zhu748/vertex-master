@@ -173,7 +173,7 @@ func runRacePreferred[T any](
 		}
 	}()
 
-	resCh := make(chan raceResult[T], min(len(cands)+20, 30))
+	resCh := make(chan raceResult[T], len(cands)+8)
 	active := 0
 	activeKeys := make(map[string]bool)
 	activeCancels := make(map[string]context.CancelFunc)
@@ -223,8 +223,8 @@ func runRacePreferred[T any](
 	if cfg.ParallelPoolDelayDynamic() {
 		delay = time.Duration(nodes.GetAverageLatency()) * time.Millisecond
 	}
-	if delay < 100*time.Millisecond {
-		delay = 100 * time.Millisecond
+	if delay < 50*time.Millisecond {
+		delay = 50 * time.Millisecond
 	} else if delay > 10*time.Second {
 		delay = 10 * time.Second
 	}
@@ -254,6 +254,22 @@ func runRacePreferred[T any](
 			}
 		}
 		return false
+	}
+
+	// launchFill 把并发空位一次性补满：节点失败/429/被取消时不再逐个接力，
+	// 而是立刻把所有空闲槽位全部填满（仍受 maxConcurrent 约束）。高负载场景下
+	// 多个节点几乎同时失败时，单个接力会让竞速长时间“空转”，补满策略能让
+	// 每个失败批次立刻换来满额的候选。返回本次新启动的节点数。
+	launchFill := func() int {
+		launched := 0
+		for nextIdx < len(cands) && active < maxConcurrent {
+			candidate := cands[nextIdx]
+			nextIdx++
+			if launchNode(candidate) {
+				launched++
+			}
+		}
+		return launched
 	}
 
 	for {
@@ -292,7 +308,7 @@ func runRacePreferred[T any](
 				if preferred != nil && !preferred(res.val) {
 					fallbackResults = append(fallbackResults, res.val)
 					cancelCandidate(uri)
-					if launchNext() {
+					if launchFill() > 0 {
 						safeResetTimer(timer, delay)
 					}
 					if active == 0 && nextIdx >= len(cands) {
@@ -347,9 +363,9 @@ func runRacePreferred[T any](
 					return finishWithFallback(res.err)
 				}
 
-				if launchNext() {
+				if launched := launchFill(); launched > 0 {
 					if cfg.DebugMode() {
-						log.Printf("[Racing] 竞速失败触发极速对冲接力...")
+						log.Printf("[Racing] 竞速失败触发极速对冲接力，本次补开 %d 个候选", launched)
 					}
 					safeResetTimer(timer, delay)
 				}
@@ -357,12 +373,12 @@ func runRacePreferred[T any](
 				if cfg.DebugMode() {
 					log.Printf("[Racing] 节点 %s 拨号取消", name)
 				}
-				if ctxRace.Err() == nil && launchNext() {
+				if ctxRace.Err() == nil && launchFill() > 0 {
 					safeResetTimer(timer, delay)
 				}
 			}
 
-			if active == 0 && nextIdx < len(cands) && launchNext() {
+			if active == 0 && nextIdx < len(cands) && launchFill() > 0 {
 				safeResetTimer(timer, delay)
 			}
 			if active == 0 && nextIdx >= len(cands) {

@@ -19,7 +19,7 @@ services:
       - key: VPROXY_RULES_HASH
         value: 36800adeec862126
       - key: VPROXY_PROXY_FAILOVER_MAX_ATTEMPTS
-        value: "30"
+        value: "60"
       - key: VPROXY_MAX_CONCURRENT_REQUESTS
         value: "16"
       - key: VPROXY_PROXY_HEALTH_CHECK_ENABLED

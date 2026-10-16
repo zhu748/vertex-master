@@ -349,6 +349,38 @@ func TestAdaptGemini38NativePrefill(t *testing.T) {
 	}
 }
 
+func TestAdaptGemini4ArgonNativePrefill(t *testing.T) {
+	// 官方文档：Gemini 4 Argon 的 history payloads 不能以 model 回合结束，
+	// 且不支持 prefilled model turns —— 与 3.6+ 同代限制，走同一转换路径。
+	payload := map[string]any{
+		"contents": []any{
+			map[string]any{"role": "user", "parts": []any{map[string]any{"text": "Continue"}}},
+			map[string]any{"role": "model", "parts": []any{map[string]any{"text": "ABC"}}},
+		},
+	}
+	if got := AdaptGemini36OrLaterPrefill("gemini-4-argon", payload); got != "ABC" {
+		t.Fatalf("Gemini 4 Argon 原生 prefill=%q, want ABC", got)
+	}
+	contents := payload["contents"].([]any)
+	if role := contents[len(contents)-1].(map[string]any)["role"]; role != "user" {
+		t.Fatalf("Gemini 4 Argon 原生请求最后一轮必须是 user，got %v", role)
+	}
+	// 假流式变体同样必须命中 3.6+ 预填充适配。
+	fakePayload := map[string]any{
+		"contents": []any{
+			map[string]any{"role": "user", "parts": []any{map[string]any{"text": "Continue"}}},
+			map[string]any{"role": "model", "parts": []any{map[string]any{"text": "XYZ"}}},
+		},
+	}
+	if got := AdaptGemini36OrLaterPrefill("fake-gemini-4-argon", fakePayload); got != "XYZ" {
+		t.Fatalf("fake-gemini-4-argon 原生 prefill=%q, want XYZ", got)
+	}
+	fakeContents := fakePayload["contents"].([]any)
+	if role := fakeContents[len(fakeContents)-1].(map[string]any)["role"]; role != "user" {
+		t.Fatalf("fake-gemini-4-argon 原生请求最后一轮必须是 user，got %v", role)
+	}
+}
+
 func TestAdaptGemini36ModelOnlyPrefillUsesSafeFallback(t *testing.T) {
 	payload := map[string]any{
 		"contents": []any{

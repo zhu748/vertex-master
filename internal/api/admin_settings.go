@@ -42,9 +42,6 @@ var adminAllowedSettings = map[string]bool{
 	"proxy_health_check_timeout_seconds":  true,
 	"keepalive_url":                       true,
 	"keepalive_interval":                  true,
-	"gemini_api_mode":                     true,
-	"gemini_api_key":                      true,
-	"gemini_api_base_url":                 true,
 	"active_node_uri":                     true,
 	"sticky_node_priority":                true,
 	"parallel_pool_retry_enabled":         true,
@@ -73,8 +70,6 @@ var adminSettingEnvironmentVariables = map[string][]string{
 		"VPROXY_KEEPALIVE_INTERVAL",
 		"KEEPALIVE_INTERVAL",
 	},
-	"gemini_api_mode": {"VPROXY_GEMINI_API_MODE"},
-	"gemini_api_key":  {"VPROXY_GEMINI_API_KEY"},
 }
 
 func environmentManagedAdminSettings() map[string]string {
@@ -135,10 +130,6 @@ func (adm *AdminHandler) adminGetSettings(w http.ResponseWriter, _ *http.Request
 			"proxy_health_check_timeout_seconds":  adm.cfg.ProxyHealthCheckTimeoutSeconds(),
 			"keepalive_url":                       adm.cfg.KeepAliveURL(),
 			"keepalive_interval":                  adm.cfg.KeepAliveIntervalSeconds(),
-			"gemini_api_mode":                     config.NormalizeGeminiAPIMode(adm.cfg.GeminiAPIMode()),
-			"gemini_api_key":                      maskAPIKey(config.ResolveGeminiAPIKey(adm.cfg.GeminiAPIMode(), adm.cfg.GeminiAPIKey())),
-			"gemini_api_key_builtin":              config.UsingBuiltinGeminiAPIKey(adm.cfg.GeminiAPIMode(), adm.cfg.GeminiAPIKey()),
-			"gemini_api_base_url":                 adm.cfg.GeminiAPIBaseURL(),
 			"sticky_node_priority":                adm.cfg.StickyNodePriority(),
 			"parallel_pool_retry_enabled":         adm.cfg.ParallelPoolRetryEnabled(),
 			"background_image":                    adm.cfg.BackgroundImage(),
@@ -270,58 +261,6 @@ func (adm *AdminHandler) adminPutSettings(w http.ResponseWriter, r *http.Request
 				writeJSON(w, http.StatusBadRequest, adminErr(k+" 必须是字符串"))
 				return
 			}
-		case "gemini_api_base_url":
-			baseURL, ok := v.(string)
-			if !ok {
-				writeJSON(w, http.StatusBadRequest, adminErr(k+" 必须是字符串"))
-				return
-			}
-			baseURL = strings.TrimSpace(baseURL)
-			if baseURL != "" && !strings.HasPrefix(baseURL, "http://") &&
-				!strings.HasPrefix(baseURL, "https://") {
-				writeJSON(w, http.StatusBadRequest, adminErr("gemini_api_base_url 必须以 http:// 或 https:// 开头"))
-				return
-			}
-			updates[k] = baseURL
-			continue
-		case "gemini_api_mode":
-			// 通道开关：anon（默认，无头 Vertex 匿名端点）/ official（官方直连）。
-			// 显式拒绝未知取值，避免拼写错误被静默归一化为 anon。
-			value, ok := v.(string)
-			if !ok {
-				writeJSON(w, http.StatusBadRequest, adminErr(k+" 必须是字符串"))
-				return
-			}
-			normalized := strings.ToLower(strings.TrimSpace(value))
-			if normalized != "" && normalized != config.GeminiAPIModeAnon && normalized != config.GeminiAPIModeOfficial {
-				writeJSON(w, http.StatusBadRequest, adminErr("gemini_api_mode 仅支持 anon（匿名端点）或 official（官方直连）"))
-				return
-			}
-			if normalized == "" {
-				normalized = config.GeminiAPIModeAnon
-			}
-			updates[k] = normalized
-			continue
-		case "gemini_api_key":
-			// GET 返回脱敏值；保存时若值仍是掩码（含 '*'）视为未修改，
-			// 避免把掩码当成新密钥写回。API Key 不含 '*'，不会误判。
-			value, ok := v.(string)
-			if !ok {
-				writeJSON(w, http.StatusBadRequest, adminErr(k+" 必须是字符串"))
-				return
-			}
-			value = strings.TrimSpace(value)
-			if strings.Contains(value, "*") {
-				continue
-			}
-			if len(value) > maxGeminiAPIKeyBytes {
-				writeJSON(w, http.StatusBadRequest, adminErr(
-					fmt.Sprintf("gemini_api_key 不能超过 %d 字节", maxGeminiAPIKeyBytes),
-				))
-				return
-			}
-			updates[k] = value
-			continue
 		case "custom_bg_presets":
 			values, ok := v.([]any)
 			if !ok {
@@ -703,15 +642,15 @@ func adminSettingInt(value any) (int, bool) {
 
 func validateAdminProxySetting(key string, value int) error {
 	bounds := map[string][2]int{
-		"max_retries":                         {0, 10},
+		"max_retries":                         {0, 20},
 		"max_spill_mb":                        {1, 8192},
 		"max_n":                               {1, 32},
-		"parallel_pool_size":                  {1, 20},
-		"parallel_pool_delay_ms":              {100, 10000},
+		"parallel_pool_size":                  {1, 40},
+		"parallel_pool_delay_ms":              {50, 10000},
 		"max_request_mb":                      {1, 1024},
 		"max_concurrent_requests":             {1, 1000},
 		"request_timeout":                     {1, 1800},
-		"proxy_failover_max_attempts":         {1, 100},
+		"proxy_failover_max_attempts":         {1, 200},
 		"proxy_health_check_interval_minutes": {1, 1440},
 		"proxy_health_check_batch_size":       {1, 500},
 		"proxy_health_check_concurrency":      {1, 20},
@@ -735,21 +674,4 @@ func (adm *AdminHandler) adminGetStats(w http.ResponseWriter, _ *http.Request) {
 func (adm *AdminHandler) adminResetStats(w http.ResponseWriter, _ *http.Request) {
 	adm.vc.ResetCountTokenStats()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
-// maxGeminiAPIKeyBytes 限制单 API Key 的最大长度（密钥远小于该值，防误粘大段文本）。
-const maxGeminiAPIKeyBytes = 512
-
-// maskAPIKey 对单 API Key 脱敏展示：保留前 5 后 4 字符，中间以 **** 代替。
-// 过短或为空的密钥原样/按规则处理，保证 GET 返回值永远不含完整密钥。
-func maskAPIKey(key string) string {
-	key = strings.TrimSpace(key)
-	if key == "" {
-		return ""
-	}
-	runes := []rune(key)
-	if len(runes) <= 9 {
-		return strings.Repeat("*", len(runes))
-	}
-	return string(runes[:5]) + "****" + string(runes[len(runes)-4:])
 }

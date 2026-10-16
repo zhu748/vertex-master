@@ -30,13 +30,6 @@ type ConfigProvider interface {
 	ClaudePromptPolicySnapshot() ClaudePromptPolicyConfig
 
 	VertexAPIKey() string
-	// GeminiAPIKey 单 API Key 直连模式的密钥（仅 official 模式生效）。
-	GeminiAPIKey() string
-	// GeminiAPIMode 返回通道开关原始值："anon"（默认，无头 Vertex）或
-	// "official"（官方 Gemini API 直连）；判定需先过 NormalizeGeminiAPIMode。
-	GeminiAPIMode() string
-	// GeminiAPIBaseURL 返回官方 API 基地址（留空时调用方用内置默认值）。
-	GeminiAPIBaseURL() string
 	CountTokensQuerySignature() string
 
 	// SafetySettings returns the immutable map from the active configuration
@@ -129,9 +122,6 @@ func (d dynamicConfig) ClaudePromptPolicySnapshot() ClaudePromptPolicyConfig {
 	return loadCacheEntry().claudePromptPolicy
 }
 func (d dynamicConfig) VertexAPIKey() string              { return Load().VertexAPIKey }
-func (d dynamicConfig) GeminiAPIKey() string              { return Load().GeminiAPIKey }
-func (d dynamicConfig) GeminiAPIMode() string             { return Load().GeminiAPIMode }
-func (d dynamicConfig) GeminiAPIBaseURL() string          { return Load().GeminiAPIBaseURL }
 func (d dynamicConfig) CountTokensQuerySignature() string { return Load().CountTokensQuerySignature }
 func (d dynamicConfig) SafetySettings() map[string]string { return Load().SafetySettings }
 func (d dynamicConfig) ParallelPoolEnabled() bool         { return Load().ParallelPoolEnabled }

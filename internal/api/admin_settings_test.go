@@ -59,8 +59,8 @@ func TestAdminPutSettingsRejectsInvalidProxySettings(t *testing.T) {
 		},
 		{
 			name:        "retry amplification",
-			body:        `{"settings":{"max_retries":11}}`,
-			wantMessage: "max_retries 必须在 0 到 10 之间",
+			body:        `{"settings":{"max_retries":21}}`,
+			wantMessage: "max_retries 必须在 0 到 20 之间",
 		},
 		{
 			name:        "unbounded memory spool",
@@ -177,30 +177,30 @@ func TestAdminPutSettingsAcceptsValidProxySettings(t *testing.T) {
 	t.Cleanup(config.InvalidateCache)
 	adm := newAdminSettingsTestHandler()
 	body := `{"settings":{
-		"proxy_url":"http://127.0.0.1:8080",
-		"parallel_pool_enabled":true,
-		"parallel_pool_size":6,
-		"parallel_pool_delay_dynamic":false,
-		"parallel_pool_delay_ms":1250,
-		"proxy_failover_max_attempts":24,
-		"proxy_health_check_enabled":true,
-		"proxy_health_check_interval_minutes":30,
-		"proxy_health_check_batch_size":100,
-		"proxy_health_check_concurrency":8,
-		"proxy_health_check_timeout_seconds":12,
-		"sticky_node_priority":true,
-		"parallel_pool_retry_enabled":true,
-		"claude_prompt_injection_enabled":true,
-		"claude_prompt_injection_position":"prepend",
-		"claude_prompt_injection_text":"injected policy",
-		"claude_prompt_strip_claude_code_promotions":false,
-		"claude_prompt_replace_security_preamble":false,
-		"claude_prompt_replacement_enabled":true,
-		"claude_prompt_replacements":[
-			{"from":"old policy","to":"new policy","models":["fake-gemini-3.6-flash"]},
-			{"from":"second section","to":"updated section","disabled":true}
-		]
-	}}`
+                "proxy_url":"http://127.0.0.1:8080",
+                "parallel_pool_enabled":true,
+                "parallel_pool_size":6,
+                "parallel_pool_delay_dynamic":false,
+                "parallel_pool_delay_ms":1250,
+                "proxy_failover_max_attempts":24,
+                "proxy_health_check_enabled":true,
+                "proxy_health_check_interval_minutes":30,
+                "proxy_health_check_batch_size":100,
+                "proxy_health_check_concurrency":8,
+                "proxy_health_check_timeout_seconds":12,
+                "sticky_node_priority":true,
+                "parallel_pool_retry_enabled":true,
+                "claude_prompt_injection_enabled":true,
+                "claude_prompt_injection_position":"prepend",
+                "claude_prompt_injection_text":"injected policy",
+                "claude_prompt_strip_claude_code_promotions":false,
+                "claude_prompt_replace_security_preamble":false,
+                "claude_prompt_replacement_enabled":true,
+                "claude_prompt_replacements":[
+                        {"from":"old policy","to":"new policy","models":["fake-gemini-3.6-flash"]},
+                        {"from":"second section","to":"updated section","disabled":true}
+                ]
+        }}`
 	req := httptest.NewRequest(http.MethodPut, "/api/admin/settings", bytes.NewBufferString(body))
 	rec := httptest.NewRecorder()
 
@@ -279,10 +279,10 @@ func TestAdminPutSettingsEditsBuiltinClaudePromptRules(t *testing.T) {
 	}
 
 	custom := put(`{"settings":{
-		"claude_prompt_promotion_targets":["custom-promotion-a","custom-promotion-b"],
-		"claude_prompt_security_preamble_from":"IMPORTANT: custom source",
-		"claude_prompt_security_preamble_to":"IMPORTANT: custom replacement"
-	}}`)
+                "claude_prompt_promotion_targets":["custom-promotion-a","custom-promotion-b"],
+                "claude_prompt_security_preamble_from":"IMPORTANT: custom source",
+                "claude_prompt_security_preamble_to":"IMPORTANT: custom replacement"
+        }}`)
 	if custom.Code != http.StatusOK {
 		t.Fatalf("自定义内置规则应被接受，status=%d body=%s", custom.Code, custom.Body.String())
 	}
@@ -302,10 +302,10 @@ func TestAdminPutSettingsEditsBuiltinClaudePromptRules(t *testing.T) {
 	}
 
 	restored := put(`{"settings":{
-		"claude_prompt_promotion_targets":null,
-		"claude_prompt_security_preamble_from":"",
-		"claude_prompt_security_preamble_to":""
-	}}`)
+                "claude_prompt_promotion_targets":null,
+                "claude_prompt_security_preamble_from":"",
+                "claude_prompt_security_preamble_to":""
+        }}`)
 	if restored.Code != http.StatusOK {
 		t.Fatalf("恢复内置规则应被接受，status=%d body=%s", restored.Code, restored.Body.String())
 	}
@@ -329,9 +329,9 @@ func TestAdminPutSettingsClearsStaleLegacyClaudePromptRule(t *testing.T) {
 	config.InvalidateCache()
 	t.Cleanup(config.InvalidateCache)
 	if err := os.WriteFile(path, []byte(`{
-		"claude_prompt_replace_from":"stale source",
-		"claude_prompt_replace_to":"stale target"
-	}`), 0o600); err != nil {
+                "claude_prompt_replace_from":"stale source",
+                "claude_prompt_replace_to":"stale target"
+        }`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	adm := newAdminSettingsTestHandler()
@@ -366,9 +366,9 @@ func TestAdminPutSettingsSynchronizesLegacyClaudePromptRule(t *testing.T) {
 	config.InvalidateCache()
 	t.Cleanup(config.InvalidateCache)
 	if err := os.WriteFile(path, []byte(`{
-		"claude_prompt_replace_from":"stale source",
-		"claude_prompt_replace_to":"stale target"
-	}`), 0o600); err != nil {
+                "claude_prompt_replace_from":"stale source",
+                "claude_prompt_replace_to":"stale target"
+        }`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	adm := newAdminSettingsTestHandler()

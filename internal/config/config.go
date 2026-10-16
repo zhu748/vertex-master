@@ -20,14 +20,8 @@ const (
 	defaultAnonAPIKey          = "AIzaSyCI-zsRP85UVOi0DjtiCwWBwQ1djDy741g"
 	defaultCountTokensQuerySig = "2/mENOSldfC+HZM+tGhVuJLrl8M6gEyK3HRjUKuA5AM58="
 	defaultMaxRetries          = 10
-	defaultParallelPoolSize    = 10
+	defaultParallelPoolSize    = 16
 	defaultKeepAliveInterval   = 60
-
-	// 单 API 直连模式开关取值（gemini_api_mode）。
-	// GeminiAPIModeAnon 为默认值：走项目原有的无头 Vertex 匿名端点；
-	// GeminiAPIModeOfficial 走官方 Gemini API 直连（未填 Key 时回退构建时注入的内置密钥）。
-	GeminiAPIModeAnon     = "anon"
-	GeminiAPIModeOfficial = "official"
 
 	// KeepAliveMinIntervalSeconds and KeepAliveMaxIntervalSeconds define the
 	// supported admin/config range for the outbound keep-alive request loop.
@@ -45,41 +39,23 @@ const (
 	MaxClaudePromptPromotionTargets = 16
 )
 
-// builtinGeminiAPIKey 是单 API 直连模式的可选内置默认密钥。
-// 默认为空：公开仓库源码绝不硬编码真实密钥（Google 会扫描公开仓库并自动吊销
-// 泄露的 Key）。需要开箱即用的自建部署可在构建时注入：
-//
-//	go build -ldflags "-X github.com/bsfdsagfadg/vertex/internal/config.builtinGeminiAPIKey=你的Key"
-//
-// 或运行时在管理面板粘贴一次（保存在本地 config.json，已被 .gitignore 排除）。
-var builtinGeminiAPIKey string //nolint:gochecknoglobals // ldflags 注入点
-
 type AppConfig struct { //nolint:govet
-	PortAPI         int               `json:"port_api"`
-	MaxRetries      int               `json:"max_retries"`
-	AdminPassword   string            `json:"admin_password"`
-	ProxyURL        string            `json:"proxy_url"`
-	AggregateStream bool              `json:"aggregate_stream"`
-	DropMaxTokens   bool              `json:"drop_max_tokens"`
-	SafetySettings  map[string]string `json:"safety_settings"`
-	VertexAPIKey    string            `json:"vertex_api_key"`
-	// GeminiAPIKey 单 API Key 直连模式使用的密钥；仅 official 模式下生效，
-	// 留空时回退内置默认密钥（见 ResolveGeminiAPIKey）。
-	GeminiAPIKey string `json:"gemini_api_key"`
-	// GeminiAPIMode 选择上游通道："anon"（默认，无头 Vertex 匿名端点）或
-	// "official"（官方 Gemini API 直连）。空串/未知值一律按 anon 处理，
-	// 判定请统一走 NormalizeGeminiAPIMode。
-	GeminiAPIMode string `json:"gemini_api_mode"`
-	// GeminiAPIBaseURL 允许覆盖官方 API 地址（镜像/中转），留空用官方默认值。
-	GeminiAPIBaseURL          string `json:"gemini_api_base_url"`
-	CountTokensQuerySignature string `json:"count_tokens_query_signature"`
-	MaxN                      int    `json:"max_n"`
-	MaxSpillMB                int    `json:"max_spill_mb"`
-	MaxRequestMB              int    `json:"max_request_mb"`
-	MaxConcurrentRequests     int    `json:"max_concurrent_requests"`
-	RequestTimeout            int    `json:"request_timeout"`
-	KeepAliveURL              string `json:"keepalive_url"`
-	KeepAliveIntervalSeconds  int    `json:"keepalive_interval"`
+	PortAPI                   int               `json:"port_api"`
+	MaxRetries                int               `json:"max_retries"`
+	AdminPassword             string            `json:"admin_password"`
+	ProxyURL                  string            `json:"proxy_url"`
+	AggregateStream           bool              `json:"aggregate_stream"`
+	DropMaxTokens             bool              `json:"drop_max_tokens"`
+	SafetySettings            map[string]string `json:"safety_settings"`
+	VertexAPIKey              string            `json:"vertex_api_key"`
+	CountTokensQuerySignature string            `json:"count_tokens_query_signature"`
+	MaxN                      int               `json:"max_n"`
+	MaxSpillMB                int               `json:"max_spill_mb"`
+	MaxRequestMB              int               `json:"max_request_mb"`
+	MaxConcurrentRequests     int               `json:"max_concurrent_requests"`
+	RequestTimeout            int               `json:"request_timeout"`
+	KeepAliveURL              string            `json:"keepalive_url"`
+	KeepAliveIntervalSeconds  int               `json:"keepalive_interval"`
 
 	// Claude Messages 顶层及中途 system 提示词处理
 	ClaudePromptInjectionEnabled  bool   `json:"claude_prompt_injection_enabled"`
@@ -352,8 +328,8 @@ func DefaultConfig() AppConfig {
 		ParallelPoolSize:                defaultParallelPoolSize,
 		ParallelNodeTopK:                80,
 		ParallelPoolDelayDynamic:        false, // 建议默认关闭动态对冲，改为稳定的秒级接力
-		ParallelPoolDelayMs:             1000,  // 每秒启动一个后备节点
-		ProxyFailoverMaxAttempts:        30,
+		ParallelPoolDelayMs:             500,   // 每 0.5 秒启动一个后备节点，高负载下更快填满并发池
+		ProxyFailoverMaxAttempts:        60,
 		ProxyHealthCheckEnabled:         true,
 		ProxyHealthCheckIntervalMinutes: 15,
 		ProxyHealthCheckBatchSize:       50,
@@ -425,14 +401,14 @@ func WriteSettings(updates map[string]any) error {
 		raw[k] = v
 	}
 
-	clampIntSetting(raw, "parallel_pool_size", 1, 20)
-	clampIntSetting(raw, "parallel_pool_delay_ms", 100, 10000)
-	clampIntSetting(raw, "max_retries", 0, 10)
+	clampIntSetting(raw, "parallel_pool_size", 1, 40)
+	clampIntSetting(raw, "parallel_pool_delay_ms", 50, 10000)
+	clampIntSetting(raw, "max_retries", 0, 20)
 	clampIntSetting(raw, "max_spill_mb", 1, 8192)
 	clampIntSetting(raw, "max_n", 1, 32)
 	clampIntSetting(raw, "max_request_mb", 1, 1024)
 	clampIntSetting(raw, "max_concurrent_requests", 1, 1000)
-	clampIntSetting(raw, "proxy_failover_max_attempts", 1, 100)
+	clampIntSetting(raw, "proxy_failover_max_attempts", 1, 200)
 	clampIntSetting(raw, "proxy_health_check_interval_minutes", 1, 1440)
 	clampIntSetting(raw, "proxy_health_check_batch_size", 1, 500)
 	clampIntSetting(raw, "proxy_health_check_concurrency", 1, 20)
@@ -563,38 +539,6 @@ func writeJSONFile(path string, v any) error {
 	return nil
 }
 
-// NormalizeGeminiAPIMode 把 gemini_api_mode 原始取值归一化为 "anon"/"official"。
-// 空串、大小写变体以外的未知值一律视为 anon（无头 Vertex 匿名端点）。
-func NormalizeGeminiAPIMode(mode string) string {
-	if strings.EqualFold(strings.TrimSpace(mode), GeminiAPIModeOfficial) {
-		return GeminiAPIModeOfficial
-	}
-	return GeminiAPIModeAnon
-}
-
-// ResolveGeminiAPIKey 解析直连模式实际生效的 API Key。
-// 显式配置的 key 优先；official 模式下 key 留空则回退构建时注入的内置密钥
-// （见 builtinGeminiAPIKey）。两者皆空时返回空串，由调用方报配置错误。
-func ResolveGeminiAPIKey(mode, key string) string {
-	key = strings.TrimSpace(key)
-	if key != "" {
-		return key
-	}
-	if NormalizeGeminiAPIMode(mode) == GeminiAPIModeOfficial {
-		return strings.TrimSpace(builtinGeminiAPIKey)
-	}
-	return ""
-}
-
-// UsingBuiltinGeminiAPIKey 报告直连模式当前是否正在使用构建时注入的内置密钥
-// （official 模式、未填写显式 gemini_api_key 且构建时注入了 builtinGeminiAPIKey）。
-// 供管理面板/日志展示密钥来源。
-func UsingBuiltinGeminiAPIKey(mode, key string) bool {
-	return strings.TrimSpace(key) == "" &&
-		NormalizeGeminiAPIMode(mode) == GeminiAPIModeOfficial &&
-		strings.TrimSpace(builtinGeminiAPIKey) != ""
-}
-
 func Load() AppConfig {
 	return loadCacheEntry().cfg
 }
@@ -649,20 +593,20 @@ func loadCacheEntry() *cacheEntry {
 				"parallel_pool_size",
 				&cfg.ParallelPoolSize,
 				1,
-				20,
+				40,
 				defaultParallelPoolSize,
 			)
-			normalize("parallel_pool_delay_ms", &cfg.ParallelPoolDelayMs, 100, 10000, 1000)
-			if cfg.MaxRetries < 0 || cfg.MaxRetries > 10 {
+			normalize("parallel_pool_delay_ms", &cfg.ParallelPoolDelayMs, 50, 10000, 500)
+			if cfg.MaxRetries < 0 || cfg.MaxRetries > 20 {
 				original := cfg.MaxRetries
-				cfg.MaxRetries = min(max(cfg.MaxRetries, 0), 10)
+				cfg.MaxRetries = min(max(cfg.MaxRetries, 0), 20)
 				recordNormalization("max_retries", original, cfg.MaxRetries)
 			}
 			normalize("max_spill_mb", &cfg.MaxSpillMB, 1, 8192, 2048)
 			normalize("max_n", &cfg.MaxN, 1, 32, 8)
 			normalize("max_request_mb", &cfg.MaxRequestMB, 1, 1024, 64)
 			normalize("max_concurrent_requests", &cfg.MaxConcurrentRequests, 1, 1000, 16)
-			normalize("proxy_failover_max_attempts", &cfg.ProxyFailoverMaxAttempts, 1, 100, 30)
+			normalize("proxy_failover_max_attempts", &cfg.ProxyFailoverMaxAttempts, 1, 200, 60)
 			normalize(
 				"proxy_health_check_interval_minutes",
 				&cfg.ProxyHealthCheckIntervalMinutes,
@@ -716,8 +660,7 @@ func loadCacheEntry() *cacheEntry {
 			log.Printf("[Config] 成功加载配置文件 config.json")
 		}
 	} else if os.IsNotExist(err) {
-		// 全新部署（尚无 config.json）：保持默认匿名模式（无头 Vertex），
-		// 直连官方 API 需显式切换（面板/配置/环境变量）。
+		// 全新部署（尚无 config.json）：保持默认匿名模式（无头 Vertex）。
 	} else if !os.IsNotExist(err) {
 		log.Printf("[Config] 读取 config.json 失败: %v", err)
 	}
@@ -745,18 +688,6 @@ func applyEnvironmentOverrides(cfg *AppConfig) {
 		cfg.AdminPassword = password
 	}
 
-	// VPROXY_GEMINI_API_MODE 显式选择通道（anon/official），优先级最高。
-	if rawMode := strings.TrimSpace(os.Getenv("VPROXY_GEMINI_API_MODE")); rawMode != "" {
-		cfg.GeminiAPIMode = NormalizeGeminiAPIMode(rawMode)
-	}
-	if geminiKey := strings.TrimSpace(os.Getenv("VPROXY_GEMINI_API_KEY")); geminiKey != "" {
-		cfg.GeminiAPIKey = geminiKey
-		// 旧行为兼容：只设了 Key 环境变量、未显式选择模式时，视为要直连。
-		if cfg.GeminiAPIMode == "" {
-			cfg.GeminiAPIMode = GeminiAPIModeOfficial
-		}
-	}
-
 	applyEnvBool("VPROXY_PROXY_HEALTH_CHECK_ENABLED", &cfg.ProxyHealthCheckEnabled)
 	applyEnvBool("VPROXY_ALLOW_PRIVATE_SUBSCRIPTION_URLS", &cfg.AllowPrivateSubscriptionURLs)
 	applyEnvBool("VPROXY_ALLOW_DOMAIN_SUBSCRIPTION_PROXIES", &cfg.AllowDomainSubscriptionProxies)
@@ -768,7 +699,7 @@ func applyEnvironmentOverrides(cfg *AppConfig) {
 	applyEnvInt("VPROXY_PROXY_HEALTH_CHECK_BATCH_SIZE", &cfg.ProxyHealthCheckBatchSize, 1, 500)
 	applyEnvInt("VPROXY_PROXY_HEALTH_CHECK_CONCURRENCY", &cfg.ProxyHealthCheckConcurrency, 1, 20)
 	applyEnvInt("VPROXY_PROXY_HEALTH_CHECK_TIMEOUT_SECONDS", &cfg.ProxyHealthCheckTimeoutSeconds, 2, 60)
-	applyEnvInt("VPROXY_PROXY_FAILOVER_MAX_ATTEMPTS", &cfg.ProxyFailoverMaxAttempts, 1, 100)
+	applyEnvInt("VPROXY_PROXY_FAILOVER_MAX_ATTEMPTS", &cfg.ProxyFailoverMaxAttempts, 1, 200)
 	applyEnvInt("VPROXY_MAX_CONCURRENT_REQUESTS", &cfg.MaxConcurrentRequests, 1, 1000)
 	applyKeepAliveEnvironmentOverrides(cfg)
 	if cfg.ProxyFailoverMaxAttempts < cfg.ParallelPoolSize {

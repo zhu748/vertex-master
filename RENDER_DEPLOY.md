@@ -42,7 +42,7 @@
 | `VPROXY_KEEPALIVE_URL` | 空（关闭） | 可选的保活 HTTP(S) 地址；可指向当前实例的 `/keepalive` |
 | `VPROXY_KEEPALIVE_INTERVAL_SECONDS` | `60` | 保活 GET 请求间隔，范围 5–86400 秒 |
 
-代理池本身默认最多同时运行 `10` 个候选节点、每次请求最多接力尝试 `30` 个节点，并以 `1000` 毫秒的间隔启动后备节点；节点遇到 429 等可重试错误时默认允许 `10` 次节点内重试。Blueprint 中声明的设置由 Render 环境变量托管，面板会显示“环境托管”并锁定对应输入框；请在 Render 的 **Environment** 页面修改。未由环境变量托管的 `parallel_pool_size`、`parallel_pool_delay_ms`、`parallel_pool_retry_enabled` 等设置仍可在面板调整，但免费实例重启后本地修改会丢失。
+代理池本身默认最多同时运行 `16` 个候选节点、每次请求最多接力尝试 `60` 个节点，并以 `500` 毫秒的间隔启动后备节点（节点失败时会立即补满并发空位，不等待该间隔）；节点遇到 429 等可重试错误时默认允许 `10` 次节点内重试。Blueprint 中声明的设置由 Render 环境变量托管，面板会显示“环境托管”并锁定对应输入框；请在 Render 的 **Environment** 页面修改。未由环境变量托管的 `parallel_pool_size`、`parallel_pool_delay_ms`、`parallel_pool_retry_enabled` 等设置仍可在面板调整，但免费实例重启后本地修改会丢失。
 
 如需启用保活，可在管理面板的“部署保活”区域点击“使用当前服务地址”，或在 Render Environment 中设置 `VPROXY_KEEPALIVE_URL=https://你的域名/keepalive`。兼容 gcli2api 的 `KEEPALIVE_URL`、`KEEPALIVE_INTERVAL` 也可直接沿用；设置环境变量后需重新部署，面板内保存则会立即热重载。
 
