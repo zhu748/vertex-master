@@ -70,7 +70,7 @@ func ensureLoaded() {
 
 	// Load nodes
 	rows, err := database.Query(`SELECT raw_uri, type, name, disabled, source_id
-		FROM nodes ORDER BY sort_order, rowid`)
+                FROM nodes ORDER BY sort_order, rowid`)
 	if err != nil {
 		log.Printf("[Nodes] 加载节点失败: %v", err)
 		return
@@ -94,9 +94,9 @@ func ensureLoaded() {
 
 	// Load health
 	hRows, err := database.Query(`SELECT raw_uri, success_count, fail_count, consecutive_failures,
-		last_test_ms, last_test_error, last_success_at, last_fail_at, cooldown_until,
-		last_429_at, rate_limit_count, recent_use_count, last_selected_at
-		FROM node_health`)
+                last_test_ms, last_test_error, last_success_at, last_fail_at, cooldown_until,
+                last_429_at, rate_limit_count, recent_use_count, last_selected_at
+                FROM node_health`)
 	if err != nil {
 		log.Printf("[Nodes] 加载健康记录失败: %v", err)
 		return
@@ -547,24 +547,24 @@ func initHealthQueue() {
 				return err
 			}
 			stmt, err := tx.Prepare(`INSERT INTO node_health
-				(raw_uri, success_count, fail_count, consecutive_failures, last_test_ms,
-				last_test_error, last_success_at, last_fail_at, cooldown_until,
-				last_429_at, rate_limit_count, recent_use_count, last_selected_at)
-				SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-				WHERE EXISTS (SELECT 1 FROM nodes WHERE raw_uri = ?)
-				ON CONFLICT(raw_uri) DO UPDATE SET
-					success_count = excluded.success_count,
-					fail_count = excluded.fail_count,
-					consecutive_failures = excluded.consecutive_failures,
-					last_test_ms = excluded.last_test_ms,
-					last_test_error = excluded.last_test_error,
-					last_success_at = excluded.last_success_at,
-					last_fail_at = excluded.last_fail_at,
-					cooldown_until = excluded.cooldown_until,
-					last_429_at = excluded.last_429_at,
-					rate_limit_count = excluded.rate_limit_count,
-					recent_use_count = excluded.recent_use_count,
-					last_selected_at = excluded.last_selected_at`)
+                                (raw_uri, success_count, fail_count, consecutive_failures, last_test_ms,
+                                last_test_error, last_success_at, last_fail_at, cooldown_until,
+                                last_429_at, rate_limit_count, recent_use_count, last_selected_at)
+                                SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                                WHERE EXISTS (SELECT 1 FROM nodes WHERE raw_uri = ?)
+                                ON CONFLICT(raw_uri) DO UPDATE SET
+                                        success_count = excluded.success_count,
+                                        fail_count = excluded.fail_count,
+                                        consecutive_failures = excluded.consecutive_failures,
+                                        last_test_ms = excluded.last_test_ms,
+                                        last_test_error = excluded.last_test_error,
+                                        last_success_at = excluded.last_success_at,
+                                        last_fail_at = excluded.last_fail_at,
+                                        cooldown_until = excluded.cooldown_until,
+                                        last_429_at = excluded.last_429_at,
+                                        rate_limit_count = excluded.rate_limit_count,
+                                        recent_use_count = excluded.recent_use_count,
+                                        last_selected_at = excluded.last_selected_at`)
 			if err != nil {
 				_ = tx.Rollback()
 				log.Printf("[ERROR] Failed to prepare health save statement: %v", err)
@@ -1120,9 +1120,9 @@ func SyncSubscriptionNodesAndMarkRefreshed(
 		func(tx *sql.Tx, result SubscriptionNodeSyncResult) error {
 			now := time.Now().Unix()
 			updateResult, err := tx.Exec(`UPDATE proxy_subscriptions SET
-				last_refreshed_at = ?, last_attempt_at = ?, last_error = '',
-				consecutive_failures = 0, node_count = ?, updated_at = ?
-				WHERE id = ?`, now, now, result.Count, now, sourceID)
+                                last_refreshed_at = ?, last_attempt_at = ?, last_error = '',
+                                consecutive_failures = 0, node_count = ?, updated_at = ?
+                                WHERE id = ?`, now, now, result.Count, now, sourceID)
 			if err != nil {
 				return fmt.Errorf("update proxy subscription refresh state: %w", err)
 			}
@@ -3088,11 +3088,23 @@ func weightedNodeSample(candidates []scoredNode, count int) []Node {
 	return selected
 }
 
-func GetAverageLatency() float64 {
+// GetHedgeDelayLatencyMs 返回未冷却节点最近测试延迟的中位数（毫秒）。
+//
+// 用于竞速引擎的动态对冲延迟：中位数对离群慢节点稳健，反映"一个正常节点
+// 完成请求"的时长；全池平均值会被少数极慢节点显著拉高，导致对冲触发过晚、
+// 尾延迟恶化。没有任何可用样本时返回 500ms（与历史默认一致）。
+func GetHedgeDelayLatencyMs() float64 {
 	lockLoadedForRead()
 	defer mu.RUnlock()
-	var sum float64
-	var count int
+
+	const inlineLatencyLimit = 256
+	var inlineLatencies [inlineLatencyLimit]float64
+	var latencies []float64
+	if len(nodeList) > len(inlineLatencies) {
+		latencies = make([]float64, 0, len(nodeList))
+	} else {
+		latencies = inlineLatencies[:0]
+	}
 	now := time.Now().Unix()
 	indexedHealth := len(healthByNodeIndex) == len(nodeList)
 	for index, n := range nodeList {
@@ -3105,13 +3117,18 @@ func GetAverageLatency() float64 {
 		} else {
 			h = healthMap[n.RawURI]
 		}
-		if h != nil && h.LastTestMs > 0 && h.CooldownUntil <= now {
-			sum += h.LastTestMs
-			count++
+		if h == nil || h.LastTestMs <= 0 || h.CooldownUntil > now {
+			continue
 		}
+		latencies = append(latencies, h.LastTestMs)
 	}
-	if count == 0 {
+	if len(latencies) == 0 {
 		return 500.0
 	}
-	return sum / float64(count)
+	slices.Sort(latencies)
+	mid := len(latencies) / 2
+	if len(latencies)%2 == 1 {
+		return latencies[mid]
+	}
+	return (latencies[mid-1] + latencies[mid]) / 2
 }

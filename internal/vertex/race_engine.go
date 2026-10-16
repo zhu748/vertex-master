@@ -45,6 +45,15 @@ func proxyAttemptMilliseconds(elapsed time.Duration) float64 {
 	return float64(elapsed) / float64(time.Millisecond)
 }
 
+// rateLimitCooldownSeconds 依据上游 Retry-After 计算节点 429 冷却秒数。
+// 上游显式给出时遵从（夹在 [5,120] 防御异常值），未给出时用 30 秒默认。
+func rateLimitCooldownSeconds(ve *VertexError) int {
+	if ve.RetryAfter > 0 {
+		return min(120, max(5, ve.RetryAfter))
+	}
+	return 30
+}
+
 // recordProxyAttempt keeps proxy health separate from request semantics.
 // Invalid arguments, missing models, and other non-retryable upstream errors
 // describe the request rather than the proxy, so they must not cool down an
@@ -64,7 +73,7 @@ func recordProxyAttempt(uri string, err error, elapsed time.Duration) bool {
 
 	ve := asVertexError(err)
 	if ve != nil && ve.Kind == "ratelimit" {
-		nodes.RecordRateLimit(uri, 30)
+		nodes.RecordRateLimit(uri, rateLimitCooldownSeconds(ve))
 		return true
 	}
 	if ve != nil && !ve.IsRetryable() {
@@ -221,7 +230,7 @@ func runRacePreferred[T any](
 
 	delay := time.Duration(cfg.ParallelPoolDelayMs()) * time.Millisecond
 	if cfg.ParallelPoolDelayDynamic() {
-		delay = time.Duration(nodes.GetAverageLatency()) * time.Millisecond
+		delay = time.Duration(nodes.GetHedgeDelayLatencyMs()) * time.Millisecond
 	}
 	if delay < 50*time.Millisecond {
 		delay = 50 * time.Millisecond
@@ -234,6 +243,7 @@ func runRacePreferred[T any](
 	defer timer.Stop()
 
 	nextIdx := 1
+	rampBatch := 1
 	var zero T
 	var fallbackResults []T
 	finishWithFallback := func(lastErr error) (T, error) {
@@ -245,24 +255,10 @@ func runRacePreferred[T any](
 		}
 		return zero, fmt.Errorf("all nodes failed")
 	}
-	launchNext := func() bool {
-		for nextIdx < len(cands) && active < maxConcurrent {
-			candidate := cands[nextIdx]
-			nextIdx++
-			if launchNode(candidate) {
-				return true
-			}
-		}
-		return false
-	}
-
-	// launchFill 把并发空位一次性补满：节点失败/429/被取消时不再逐个接力，
-	// 而是立刻把所有空闲槽位全部填满（仍受 maxConcurrent 约束）。高负载场景下
-	// 多个节点几乎同时失败时，单个接力会让竞速长时间“空转”，补满策略能让
-	// 每个失败批次立刻换来满额的候选。返回本次新启动的节点数。
-	launchFill := func() int {
+	// launchCount 在并发配额内最多启动 limit 个候选，返回实际启动数。
+	launchCount := func(limit int) int {
 		launched := 0
-		for nextIdx < len(cands) && active < maxConcurrent {
+		for nextIdx < len(cands) && active < maxConcurrent && launched < limit {
 			candidate := cands[nextIdx]
 			nextIdx++
 			if launchNode(candidate) {
@@ -270,6 +266,14 @@ func runRacePreferred[T any](
 			}
 		}
 		return launched
+	}
+
+	// launchFill 把并发空位一次性补满：节点失败/429/被取消时不再逐个接力，
+	// 而是立刻把所有空闲槽位全部填满（仍受 maxConcurrent 约束）。高负载场景下
+	// 多个节点几乎同时失败时，单个接力会让竞速长时间“空转”，补满策略能让
+	// 每个失败批次立刻换来满额的候选。返回本次新启动的节点数。
+	launchFill := func() int {
+		return launchCount(maxConcurrent)
 	}
 
 	for {
@@ -288,11 +292,14 @@ func runRacePreferred[T any](
 			return zero, ctx.Err()
 
 		case <-timer.C:
-			if launchNext() {
-				if cfg.DebugMode() {
-					log.Printf("[Racing] 对冲延迟唤醒，已启动第 %d 个候选节点", nextIdx)
-				}
+			// 指数爬坡：每个对冲周期把启动批次翻倍（1→2→4→8…），而非每周期
+			// 只加一个。首个候选仍独跑一个周期保留对冲语义；当主候选变慢时，
+			// 满并发从“N 个周期”缩短到“log2(N) 个周期”，显著改善尾延迟。
+			if launched := launchCount(rampBatch); launched > 0 && cfg.DebugMode() {
+				log.Printf("[Racing] 对冲延迟唤醒，本批启动 %d 个候选（下一批 %d），已启动 %d/%d",
+					launched, min(rampBatch*2, maxConcurrent), nextIdx, len(cands))
 			}
+			rampBatch = min(rampBatch*2, maxConcurrent)
 			if nextIdx < len(cands) && active < maxConcurrent {
 				timer.Reset(delay)
 			}
@@ -348,7 +355,8 @@ func runRacePreferred[T any](
 				ve := asVertexError(res.err)
 				if ve != nil && ve.Kind == "ratelimit" {
 					if cfg.DebugMode() {
-						log.Printf("[Racing] 节点 %s 触发 429 API 限制，进入 30 秒短时歇息", name)
+						log.Printf("[Racing] 节点 %s 触发 429 API 限制，进入 %d 秒短时歇息",
+							name, rateLimitCooldownSeconds(ve))
 					}
 				}
 				if recordProxyAttempt(uri, res.err, res.elapsed) {

@@ -1626,3 +1626,60 @@ func TestSafeNodeLabelPreservesCleanNameWithoutAllocation(t *testing.T) {
 		t.Fatalf("clean node label allocated %.1f times", allocations)
 	}
 }
+
+func TestGetHedgeDelayLatencyUsesMedianNotMean(t *testing.T) {
+	db.CloseDB()
+	if err := db.InitDB(filepath.Join(t.TempDir(), "hedge-latency.db")); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(db.CloseDB)
+	resetState()
+	t.Cleanup(resetState)
+
+	if err := MergeNodes([]Node{
+		{RawURI: "http://fast.invalid", Name: "fast"},
+		{RawURI: "http://mid.invalid", Name: "mid"},
+		{RawURI: "http://slow.invalid", Name: "slow"},
+		{RawURI: "http://cooling.invalid", Name: "cooling"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	RecordTest("http://fast.invalid", true, 120, "")
+	RecordTest("http://mid.invalid", true, 240, "")
+	RecordTest("http://slow.invalid", true, 9000, "")
+	RecordTest("http://cooling.invalid", false, 300, "boom")
+
+	got := GetHedgeDelayLatencyMs()
+	// 健康样本 {120, 240, 9000}：中位数 240；冷却节点被排除；平均值为 3120，
+	// 会被慢节点拉高导致对冲过晚。允许 RecordTest 写入时的毫秒级抖动。
+	if got < 200 || got > 280 {
+		t.Fatalf("GetHedgeDelayLatencyMs() = %.1f, want median near 240ms", got)
+	}
+}
+
+func TestGetHedgeDelayLatencyFallsBackWithoutSamples(t *testing.T) {
+	db.CloseDB()
+	if err := db.InitDB(filepath.Join(t.TempDir(), "hedge-latency-fallback.db")); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(db.CloseDB)
+	resetState()
+	t.Cleanup(resetState)
+
+	if got := GetHedgeDelayLatencyMs(); got != 500 {
+		t.Fatalf("GetHedgeDelayLatencyMs() = %.1f, want 500 fallback without any node", got)
+	}
+
+	if err := MergeNodes([]Node{
+		{RawURI: "http://untested.invalid", Name: "untested"},
+		{RawURI: "http://disabled.invalid", Name: "disabled", Disabled: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	RecordTest("http://disabled.invalid", true, 150, "")
+
+	if got := GetHedgeDelayLatencyMs(); got != 500 {
+		t.Fatalf("GetHedgeDelayLatencyMs() = %.1f, want 500 fallback when only untested/disabled nodes exist", got)
+	}
+}

@@ -631,3 +631,118 @@ func updateAtomicMaximum(target *int32, value int32) {
 		}
 	}
 }
+
+func TestRunRaceHedgeTimerRampsExponentially(t *testing.T) {
+	const candidateCount = 8
+	installRaceTestNodes(t, candidateCount)
+	// 对冲延迟 60ms（高于 50ms 下限）：线性爬坡需要 7 个周期才能满载，
+	// 指数爬坡 1→2→4 只需 3 个周期（约 180ms）。
+	cfg := raceTestConfig(candidateCount, candidateCount, 60)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	started := make(chan int, candidateCount)
+	outcomes := make(chan bool, candidateCount)
+	type raceOutcome struct {
+		value string
+		err   error
+	}
+	result := make(chan raceOutcome, 1)
+	var calls int32
+
+	go func() {
+		value, err := RunRace(ctx, cfg, func(candidateCtx context.Context, _ string) (string, error) {
+			call := int(atomic.AddInt32(&calls, 1))
+			started <- call
+			select {
+			case succeed := <-outcomes:
+				if succeed {
+					return "winner", nil
+				}
+				return "", NewUnavailableError("retryable test failure")
+			case <-candidateCtx.Done():
+				return "", candidateCtx.Err()
+			}
+		})
+		result <- raceOutcome{value: value, err: err}
+	}()
+
+	if call := waitForRaceStart(t, started, time.Second); call != 1 {
+		t.Fatalf("first call = %d, want 1", call)
+	}
+
+	// 主候选保持“慢而不败”：只有对冲计时器能扩容。指数爬坡应在
+	// 3 个周期内启动全部 8 个候选（1 + 1 + 2 + 4 = 8）。
+	rampDeadline := time.Now().Add(1500 * time.Millisecond)
+	for atomic.LoadInt32(&calls) < candidateCount {
+		if time.Now().After(rampDeadline) {
+			t.Fatalf("candidate calls = %d after ramp window, want %d (exponential ramp)",
+				atomic.LoadInt32(&calls), candidateCount)
+		}
+		select {
+		case <-started:
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
+
+	for range candidateCount {
+		outcomes <- true
+	}
+	select {
+	case got := <-result:
+		if got.err != nil {
+			t.Fatalf("RunRace() error = %v", got.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunRace did not return after candidates succeeded")
+	}
+}
+
+func TestRateLimitCooldownSecondsClampsRetryAfter(t *testing.T) {
+	cases := []struct {
+		name       string
+		retryAfter int
+		want       int
+	}{
+		{name: "unset uses default", retryAfter: 0, want: 30},
+		{name: "small floors at five", retryAfter: 3, want: 5},
+		{name: "typical honored", retryAfter: 75, want: 75},
+		{name: "huge caps at 120", retryAfter: 9999, want: 120},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := rateLimitCooldownSeconds(NewRateLimitError("rate limited", tc.retryAfter)); got != tc.want {
+				t.Fatalf("rateLimitCooldownSeconds(RetryAfter=%d) = %d, want %d",
+					tc.retryAfter, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRunRaceRateLimitCooldownHonorsRetryAfter(t *testing.T) {
+	uris := installRaceTestNodes(t, 2)
+	cfg := raceTestConfig(2, 2, 5_000)
+
+	_, err := RunRace(context.Background(), cfg, func(_ context.Context, _ string) (string, error) {
+		return "", NewRateLimitError("quota exceeded", 75)
+	})
+	if err == nil {
+		t.Fatal("RunRace() error = nil, want rate limit error")
+	}
+
+	health := nodes.LoadHealth()[uris[0]]
+	if health == nil {
+		t.Fatal("rate-limited attempt did not create health data")
+	}
+	remaining := health.CooldownUntil - time.Now().Unix()
+	if remaining < 60 || remaining > 76 {
+		t.Fatalf("cooldown remaining = %d seconds, want ~75 from Retry-After", remaining)
+	}
+	if health.RateLimitCount != 1 {
+		t.Fatalf("rate limit count = %d, want 1", health.RateLimitCount)
+	}
+	if health.LastTestError != "429 Rate Limit" {
+		t.Fatalf("last test error = %q, want 429 marker", health.LastTestError)
+	}
+}
