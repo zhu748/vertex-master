@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/bsfdsagfadg/vertex/internal/redact"
 )
 
 // race_journal 把单次请求竞速过程中所有候选节点的结果收集成一份"账本"，
@@ -31,8 +33,6 @@ const (
 	journalMaxShownNamesPerKind = 3
 	// journalMaxLastErrChars 全败汇总里"最后错误"消息的最大字符数。
 	journalMaxLastErrChars = 160
-	// journalMaxVariablesChars 400 诊断行里 Variables payload 的最大字符数。
-	journalMaxVariablesChars = 400
 )
 
 // raceJournal 记录一次 RunRace 的全部候选结果。
@@ -260,13 +260,5 @@ func compactLogMessage(msg string, maxChars int) string {
 	if maxChars <= 0 {
 		maxChars = journalMaxLastErrChars
 	}
-	compact := strings.Join(strings.Fields(msg), " ")
-	if compact == "" {
-		return ""
-	}
-	runes := []rune(compact)
-	if len(runes) <= maxChars {
-		return compact
-	}
-	return string(runes[:maxChars]) + "…"
+	return strings.TrimSuffix(redact.Excerpt(msg, maxChars), "[截断]")
 }

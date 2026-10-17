@@ -35,6 +35,7 @@
         <button data-page="keys"><span class="ic">🔑</span> 密钥</button>
         <button data-page="models"><span class="ic">🧩</span> 模型</button>
         <button data-page="nodes"><span class="ic">🌐</span> 订阅与并发</button>
+        <button data-page="database"><span class="ic">🗄️</span> 数据库</button>
         <button data-page="logs"><span class="ic">📝</span> 运行日志</button>
         <button data-page="appearance"><span class="ic">🎨</span> 外观</button>
       </nav>
@@ -509,6 +510,22 @@
           </div>
         </section>
 
+        <section id="page-database" class="hidden">
+          <div class="page-head">
+            <h2>数据库</h2>
+            <div class="toolbar">
+              <button class="btn ghost" data-click-action="loadDatabase">刷新</button>
+              <button class="btn ghost" data-click-action="databaseAction" data-db-action="check">完整性检查</button>
+              <button class="btn" data-click-action="databaseAction" data-db-action="checkpoint">写回 WAL</button>
+            </div>
+          </div>
+          <div class="card glass">
+            <div id="dbStats" aria-live="polite"></div>
+            <p class="hint">检查点采用被动模式，读写请求繁忙时会保留未写回的 WAL 页。空闲页可供后续写入复用。</p>
+            <p id="dbResult" role="status"></p>
+          </div>
+        </section>
+
         <section id="page-logs" class="hidden">
           <div class="page-head">
             <div>
@@ -616,6 +633,7 @@
   <script src="page-nodes.js"></script>
   <script src="page-appearance.js"></script>
   <script src="page-logs.js"></script>
+  <script src="page-db.js"></script>
   <script src="admin.js"></script>
 </body>
 

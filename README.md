@@ -151,7 +151,17 @@ claude --model gemini-3.6-flash
 
 **完整的分平台部署教程**（包括开机自启、代理配置、手机部署、常见问题解答）见 **[部署指南](部署指南.md)**。
 
+## 可靠性与维护
+
+流式生成会校验上游 JSON 与真实结束帧；已输出内容后提前断流时，会通过对应协议报告 incomplete，保留已交付文本。`Retry-After` 会用于节点限流处理，并透传到非流式错误响应。调试日志使用脱敏摘要与请求元信息。
+
+管理面板的「数据库」页提供空间统计、完整性检查和被动 WAL 写回。Veo 视频模型保留目录展示，但当前匿名生成通道不支持视频，会返回明确错误。
+
+本轮上游对照、保留项和验证说明见 [上游对齐与优化说明](docs/upstream-alignment.md)。
+
 ## 🛠 自己编译（可选）
+
+源码构建已验证 **Go 1.26.9**，Docker 编译器使用相同版本。若使用 Go 1.27 分支，请使用 1.27.2 或更新的安全修订版。
 
 如果你想从源码自行编译：
 
@@ -175,6 +185,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ver
 | `port_api` | 2156 | 服务监听端口 |
 | `admin_password` | 自动生成 | 管理面板登录密码 |
 | `max_retries` | 10 | 请求失败重试次数 |
+| `stream_idle_timeout_seconds` | 60 | 流式等待基础值，文本包间默认 60 秒；首包和媒体按模型延长，范围 1–1800 秒；支持 `VPROXY_STREAM_IDLE_TIMEOUT_SECONDS` 覆盖 |
 | `max_request_mb` | 64 | 单次 HTTP 请求体上限（MiB，面板修改即时生效） |
 | `drop_max_tokens` | false | 移除客户端附带的输出 token 上限，避免思考 token 挤占正文；默认严格遵守客户端上限 |
 | `claude_prompt_injection_enabled` | false | 是否为 Claude Messages 请求前置或后置注入额外 system 提示词 |

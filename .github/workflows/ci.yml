@@ -42,13 +42,42 @@ jobs:
       - name: Vet
         run: go vet ./...
       - name: Test
-        run: go test ./... -count=1
+        run: CGO_ENABLED=0 go test ./... -count=1
       - name: Race detector
-        run: go test -race ./... -count=1
+        run: CGO_ENABLED=1 go test -race ./... -count=1
       - name: Vulnerability scan
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
           govulncheck ./...
+
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {goos: linux, goarch: amd64}
+          - {goos: linux, goarch: arm64}
+          - {goos: windows, goarch: amd64}
+          - {goos: darwin, goarch: amd64}
+          - {goos: darwin, goarch: arm64}
+          - {goos: android, goarch: arm64}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Cross compile
+        env:
+          CGO_ENABLED: '0'
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: go build -trimpath -o vertex-proxy ./cmd/vproxy
+      - name: Version smoke test
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        run: ./vertex-proxy --version
 
   docker:
     runs-on: ubuntu-latest

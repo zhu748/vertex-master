@@ -24,6 +24,7 @@ const SETTINGS_FIELDS = [
   { k: 'max_request_mb', label: '最大请求体 (MB)', type: 'number', min: 1, max: 1024, group: 'core', desc: '限制客户端请求体大小（默认 64 MB）' },
   { k: 'max_concurrent_requests', label: '全局请求并发上限', type: 'number', min: 1, max: 1000, group: 'core', desc: '限制同时执行的上游请求数量，Render Free 建议 8～16（默认 16）' },
   { k: 'request_timeout', label: '请求超时', type: 'number', max: 1800, min: 1, group: 'core', desc: '单次请求的最大连接时间 (默认 180 秒，最大 1800 秒)' },
+  { k: 'stream_idle_timeout_seconds', label: '流式包间基础超时', type: 'number', max: 1800, min: 1, group: 'core', desc: '文本包间默认 60 秒；首包及图片/音频按模型延长等待，客户端读取慢不计入此超时' },
   { k: 'aggregate_stream', label: '聚合流式', type: 'bool', group: 'core', desc: '拦截流式请求，改为一次性返回完整结果的单块流（解决部分客户端单字流式卡顿问题）' },
   { k: 'debug_mode', label: 'Debug 日志', type: 'bool', group: 'core', desc: '开启更详细的错误与负载调试日志' },
 

@@ -31,6 +31,7 @@ var adminAllowedSettings = map[string]bool{
 	"claude_prompt_replace_from":                 true,
 	"claude_prompt_replace_to":                   true,
 	"request_timeout":                            true,
+	"stream_idle_timeout_seconds":                true,
 	"parallel_pool_enabled":                      true, "parallel_pool_size": true,
 	"parallel_pool_delay_dynamic":         true,
 	"parallel_pool_delay_ms":              true,
@@ -57,6 +58,7 @@ var adminAllowedSettings = map[string]bool{
 //nolint:gochecknoglobals // Stable mapping used to explain Render-managed settings to the UI.
 var adminSettingEnvironmentVariables = map[string][]string{
 	"admin_password":                      {"VPROXY_ADMIN_PASSWORD"},
+	"stream_idle_timeout_seconds":         {"VPROXY_STREAM_IDLE_TIMEOUT_SECONDS"},
 	"max_concurrent_requests":             {"VPROXY_MAX_CONCURRENT_REQUESTS"},
 	"proxy_failover_max_attempts":         {"VPROXY_PROXY_FAILOVER_MAX_ATTEMPTS"},
 	"proxy_health_check_enabled":          {"VPROXY_PROXY_HEALTH_CHECK_ENABLED"},
@@ -119,6 +121,7 @@ func (adm *AdminHandler) adminGetSettings(w http.ResponseWriter, _ *http.Request
 			"claude_prompt_replace_from":                 legacyFrom,
 			"claude_prompt_replace_to":                   legacyTo,
 			"request_timeout":                            adm.cfg.RequestTimeout(),
+			"stream_idle_timeout_seconds":                adm.cfg.StreamIdleTimeoutSeconds(),
 			"proxy_url":                                  adm.cfg.ProxyURL(), "parallel_pool_enabled": adm.cfg.ParallelPoolEnabled(), "parallel_pool_size": adm.cfg.ParallelPoolSize(), "active_node_uri": adm.cfg.ActiveNodeURI(),
 			"parallel_pool_delay_dynamic":         adm.cfg.ParallelPoolDelayDynamic(),
 			"parallel_pool_delay_ms":              adm.cfg.ParallelPoolDelayMs(),
@@ -174,7 +177,7 @@ func (adm *AdminHandler) adminPutSettings(w http.ResponseWriter, r *http.Request
 		}
 		switch k {
 		case "max_retries", "max_spill_mb", "max_request_mb", "max_concurrent_requests", "max_n", "parallel_pool_size",
-			"parallel_pool_delay_ms", "request_timeout", "proxy_failover_max_attempts",
+			"parallel_pool_delay_ms", "request_timeout", "stream_idle_timeout_seconds", "proxy_failover_max_attempts",
 			"proxy_health_check_interval_minutes", "proxy_health_check_batch_size",
 			"proxy_health_check_concurrency", "proxy_health_check_timeout_seconds",
 			"keepalive_interval":
@@ -650,6 +653,7 @@ func validateAdminProxySetting(key string, value int) error {
 		"max_request_mb":                      {1, 1024},
 		"max_concurrent_requests":             {1, 1000},
 		"request_timeout":                     {1, 1800},
+		"stream_idle_timeout_seconds":         {1, 1800},
 		"proxy_failover_max_attempts":         {1, 200},
 		"proxy_health_check_interval_minutes": {1, 1440},
 		"proxy_health_check_batch_size":       {1, 500},

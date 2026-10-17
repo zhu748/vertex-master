@@ -153,31 +153,38 @@ func streamChunkHasPayload(chunk StreamChunk) bool {
 		if !ok {
 			continue
 		}
-		finishReason := strings.ToUpper(strings.TrimSpace(toStr(candidate["finishReason"])))
-		if finishReason != "" && !strings.Contains(finishReason, "UNSPECIFIED") {
+		if streamCandidateHasPayload(candidate) {
 			return true
 		}
-		content, _ := candidate["content"].(map[string]any)
-		parts, _ := content["parts"].([]any)
-		for _, rawPart := range parts {
-			part, ok := rawPart.(map[string]any)
-			if !ok {
-				continue
-			}
-			if text, ok := part["text"].(string); ok && text != "" {
+	}
+	return false
+}
+
+func streamCandidateHasPayload(candidate map[string]any) bool {
+	finishReason := strings.ToUpper(strings.TrimSpace(toStr(candidate["finishReason"])))
+	if finishReason != "" && !strings.Contains(finishReason, "UNSPECIFIED") {
+		return true
+	}
+	content, _ := candidate["content"].(map[string]any)
+	parts, _ := content["parts"].([]any)
+	for _, rawPart := range parts {
+		part, ok := rawPart.(map[string]any)
+		if !ok {
+			continue
+		}
+		if text, ok := part["text"].(string); ok && text != "" {
+			return true
+		}
+		for _, key := range []string{
+			"functionCall",
+			"functionResponse",
+			"inlineData",
+			"fileData",
+			"executableCode",
+			"codeExecutionResult",
+		} {
+			if isTruthyAny(part[key]) {
 				return true
-			}
-			for _, key := range []string{
-				"functionCall",
-				"functionResponse",
-				"inlineData",
-				"fileData",
-				"executableCode",
-				"codeExecutionResult",
-			} {
-				if isTruthyAny(part[key]) {
-					return true
-				}
 			}
 		}
 	}

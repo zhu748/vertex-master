@@ -22,6 +22,11 @@ const API = {
     clear(endpoint) { return API.raw('/api/admin/claude-prompt/latest?endpoint=' + encodeURIComponent(endpoint || 'messages'), { method: 'DELETE' }); },
     preview(value) { return API.raw('/api/admin/claude-prompt/preview', { method: 'POST', body: JSON.stringify(value) }); },
   },
+  database: {
+    stats() { return API.raw('/api/admin/db/stats'); },
+    check() { return API.raw('/api/admin/db/check', { method: 'POST' }); },
+    checkpoint() { return API.raw('/api/admin/db/checkpoint', { method: 'POST' }); },
+  },
   stats: {
     get() { return API.raw('/api/admin/stats'); },
     reset() { return API.raw('/api/admin/stats/reset', { method: 'POST' }); },

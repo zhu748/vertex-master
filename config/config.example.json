@@ -6,6 +6,8 @@
   "max_request_mb": 64,
   "max_concurrent_requests": 16,
   "max_retries": 10,
+  "request_timeout": 180,
+  "stream_idle_timeout_seconds": 60,
   "claude_prompt_injection_enabled": false,
   "claude_prompt_injection_position": "append",
   "claude_prompt_injection_text": "",

@@ -1,6 +1,9 @@
 package api
 
-import "strings"
+import (
+	"github.com/bsfdsagfadg/vertex/internal/config"
+	"strings"
+)
 
 // 本文件实现模型清单端点所依赖的工具函数。
 
@@ -51,13 +54,20 @@ func supportedGenerationMethods() []any {
 
 // geminiModelInfo 构造单个 Gemini 模型详情对象（供 get_model_info / list_models_gemini 用）。
 func geminiModelInfo(name string) map[string]any {
+	methods := supportedGenerationMethods()
+	description := "Vertex AI Studio anonymous model"
+	base, _ := stripFakePrefix(name, config.FakePrefixes())
+	if config.IsVideoModel(config.ResolveModelName(base)) {
+		methods = []any{}
+		description = "Video model: catalogue only; video generation is not supported"
+	}
 	return map[string]any{
 		"name":                       "models/" + name,
 		"version":                    name,
 		"displayName":                name,
-		"description":                "Vertex AI Studio anonymous model",
+		"description":                description,
 		"inputTokenLimit":            1048576,
 		"outputTokenLimit":           65536,
-		"supportedGenerationMethods": supportedGenerationMethods(),
+		"supportedGenerationMethods": methods,
 	}
 }

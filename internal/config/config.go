@@ -54,6 +54,7 @@ type AppConfig struct { //nolint:govet
 	MaxSpillMB                int               `json:"max_spill_mb"`
 	MaxRequestMB              int               `json:"max_request_mb"`
 	MaxConcurrentRequests     int               `json:"max_concurrent_requests"`
+	StreamIdleTimeoutSeconds  int               `json:"stream_idle_timeout_seconds"`
 	RequestTimeout            int               `json:"request_timeout"`
 	KeepAliveURL              string            `json:"keepalive_url"`
 	KeepAliveIntervalSeconds  int               `json:"keepalive_interval"`
@@ -319,6 +320,7 @@ func DefaultConfig() AppConfig {
 		MaxRequestMB:                    64,
 		MaxConcurrentRequests:           16,
 		RequestTimeout:                  180,
+		StreamIdleTimeoutSeconds:        60,
 		KeepAliveIntervalSeconds:        defaultKeepAliveInterval,
 		ClaudePromptInjectionPosition:   "append",
 		ClaudePromptStripPromotions:     true,
@@ -438,10 +440,13 @@ func WriteSettings(updates map[string]any) error {
 // prevents a delayed normalization goroutine from overwriting a newer admin
 // update to the same setting.
 func writeSettingsIfUnchanged(expected, updates map[string]any) error {
+	return writeSettingsIfUnchangedAt(configPath(), expected, updates)
+}
+
+func writeSettingsIfUnchangedAt(path string, expected, updates map[string]any) error {
 	settingsWriteMu.Lock()
 	defer settingsWriteMu.Unlock()
 
-	path := configPath()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("读取待归一化配置 %s: %w", path, err)
@@ -562,7 +567,8 @@ func loadCacheEntry() *cacheEntry {
 	}
 
 	cfg := DefaultConfig()
-	data, err := os.ReadFile(configPath())
+	path := configPath()
+	data, err := os.ReadFile(path)
 	if err == nil {
 		if errUnm := json.Unmarshal(data, &cfg); errUnm != nil { //nolint:govet
 			log.Printf("[Config] 解析 config.json 失败: %v", errUnm)
@@ -594,6 +600,7 @@ func loadCacheEntry() *cacheEntry {
 					recordNormalization(key, original, value)
 				}
 			}
+			normalize("stream_idle_timeout_seconds", &cfg.StreamIdleTimeoutSeconds, 1, 1800, 60)
 			normalize(
 				"parallel_pool_size",
 				&cfg.ParallelPoolSize,
@@ -656,11 +663,11 @@ func loadCacheEntry() *cacheEntry {
 			if len(normalized) > 0 {
 				// 异步回写，避免阻塞加载；仅修改仍与本次读取一致的值，
 				// 防止覆盖管理员在此期间提交的新配置。
-				go func(expectedValues, updates map[string]any) {
-					if err := writeSettingsIfUnchanged(expectedValues, updates); err != nil {
+				go func(path string, expectedValues, updates map[string]any) {
+					if err := writeSettingsIfUnchangedAt(path, expectedValues, updates); err != nil {
 						log.Printf("[Config] 自动回写归一化配置失败: %v", err)
 					}
-				}(expected, normalized)
+				}(path, expected, normalized)
 			}
 			if !bytes.Equal(data, lastLoadedConfigRaw) {
 				log.Printf("[Config] 成功加载配置文件 config.json")
@@ -709,6 +716,7 @@ func applyEnvironmentOverrides(cfg *AppConfig) {
 	applyEnvInt("VPROXY_PROXY_HEALTH_CHECK_TIMEOUT_SECONDS", &cfg.ProxyHealthCheckTimeoutSeconds, 2, 60)
 	applyEnvInt("VPROXY_PROXY_FAILOVER_MAX_ATTEMPTS", &cfg.ProxyFailoverMaxAttempts, 1, 200)
 	applyEnvInt("VPROXY_MAX_CONCURRENT_REQUESTS", &cfg.MaxConcurrentRequests, 1, 1000)
+	applyEnvInt("VPROXY_STREAM_IDLE_TIMEOUT_SECONDS", &cfg.StreamIdleTimeoutSeconds, 1, 1800)
 	applyKeepAliveEnvironmentOverrides(cfg)
 	if cfg.ProxyFailoverMaxAttempts < cfg.ParallelPoolSize {
 		log.Printf(

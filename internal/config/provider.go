@@ -16,6 +16,7 @@ type ConfigProvider interface {
 	MaxConcurrentRequests() int
 	MaxSpillMB() int
 	RequestTimeout() int
+	StreamIdleTimeoutSeconds() int
 	KeepAliveURL() string
 	KeepAliveIntervalSeconds() int
 
@@ -182,3 +183,5 @@ func normalizeClaudePromptInjectionPosition(position string) string {
 		return "append"
 	}
 }
+
+func (d dynamicConfig) StreamIdleTimeoutSeconds() int { return Load().StreamIdleTimeoutSeconds }

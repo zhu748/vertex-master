@@ -12,6 +12,7 @@ import (
 
 	"github.com/bsfdsagfadg/vertex/internal/config"
 	"github.com/bsfdsagfadg/vertex/internal/jsonx"
+	"github.com/bsfdsagfadg/vertex/internal/redact"
 	"github.com/bsfdsagfadg/vertex/internal/vertex"
 )
 
@@ -161,10 +162,21 @@ func reqID24WithPrefix(prefix string) string {
 	return id.String()
 }
 
+func writeVertexRetryAfter(w http.ResponseWriter, e *vertex.VertexError) {
+	if e != nil && e.RetryAfter > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(e.RetryAfter))
+	}
+}
+
+func writeOAIVertexError(w http.ResponseWriter, e *vertex.VertexError) {
+	writeVertexRetryAfter(w, e)
+	writeJSON(w, e.Code, vertexErrorToOAI(e))
+}
+
 func vertexErrorToOAI(e *vertex.VertexError) map[string]any {
 	var errType string
 	switch e.Kind {
-	case "invalid":
+	case "invalid", "unsupported":
 		errType = "invalid_request_error"
 	case "ratelimit":
 		errType = "rate_limit_error"
@@ -187,7 +199,7 @@ func withUpstreamDetail(friendly string, e *vertex.VertexError) string {
 	if detail == "" {
 		detail = strings.TrimSpace(e.UpstreamResponse)
 	}
-	detail = redactUpstreamProjectIDs(detail)
+	detail = redact.Excerpt(redactUpstreamProjectIDs(detail), 400)
 	if detail == "" || strings.Contains(friendly, detail) {
 		return friendly
 	}

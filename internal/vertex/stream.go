@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/bsfdsagfadg/vertex/internal/nodes"
+	"github.com/bsfdsagfadg/vertex/internal/redact"
 	"github.com/bsfdsagfadg/vertex/internal/spool"
 	"github.com/bsfdsagfadg/vertex/internal/transport"
 )
@@ -72,6 +73,10 @@ var errStreamObjectTooLarge = errors.New("upstream stream object too large")
 // 不再重试（已发出的内容不能重来）。ctx 取消（客户端断开/关闭）时干净结束流：
 // 重试退避被打断、上游流连接中断，不再空转。
 func (c *VertexAIClient) StreamChat(ctx context.Context, model string, geminiPayload map[string]any, yield func(StreamChunk) bool) {
+	if err := c.generationModelError(model); err != nil {
+		yield(StreamChunk{Err: err})
+		return
+	}
 	preparedVariables := buildRequestVariables(model, geminiPayload, c.cfg)
 	op := func(ctx context.Context, proxyURI string) <-chan StreamChunk {
 		// Keep backpressure end-to-end. StreamParallel probes this channel while
@@ -213,7 +218,9 @@ retryLoop:
 
 		case ve != nil && ve.Kind == "ratelimit":
 			lastError = ve
-			if payloadYielded || attempt >= maxRetries {
+			// Long server-advised waits belong to node cooldown/failover. Do not
+			// pin a candidate (and its request slot) for minutes or hours.
+			if payloadYielded || attempt >= maxRetries || ve.RetryAfter > 10 {
 				if cfg.DebugMode() {
 					log.Printf("[Vertex] [StreamChat] (Attempt %d/%d) 节点 %s 触发 429 失败, 请求ID=%s, 代理=%s", attempt, maxRetries, model, reqID, nodeName)
 				}
@@ -252,12 +259,12 @@ retryLoop:
 			// 【关键改动】：如果是网络不通等内部错误，直接熔断并停止重试。
 			if ve.Kind == "internal" || !ve.IsRetryable() || payloadYielded || attempt >= maxRetries {
 				if cfg.DebugMode() {
-					log.Printf("[Vertex] [StreamChat] (Attempt %d/%d) 节点 %s 触发异常错误失败: [%s] %s, 请求ID=%s, 代理=%s", attempt, maxRetries, model, ve.Kind, ve.Message, reqID, nodeName)
+					log.Printf("[Vertex] [StreamChat] (Attempt %d/%d) 节点 %s 触发异常错误失败: [%s] %s, 请求ID=%s, 代理=%s", attempt, maxRetries, model, ve.Kind, compactLogMessage(ve.Message, journalMaxLastErrChars), reqID, nodeName)
 				}
 				break retryLoop
 			}
 			if cfg.DebugMode() {
-				log.Printf("[Vertex] [StreamChat] (Attempt %d/%d) 节点 %s 触发异常错误将重试: [%s] %s, 请求ID=%s, 代理=%s", attempt, maxRetries, model, ve.Kind, ve.Message, reqID, nodeName)
+				log.Printf("[Vertex] [StreamChat] (Attempt %d/%d) 节点 %s 触发异常错误将重试: [%s] %s, 请求ID=%s, 代理=%s", attempt, maxRetries, model, ve.Kind, compactLogMessage(ve.Message, journalMaxLastErrChars), reqID, nodeName)
 			}
 			attempt++
 			if err := sleepCtx(ctx, backoff(attempt)); err != nil {
@@ -337,13 +344,11 @@ func (c *VertexAIClient) executeStreamingAttempt(ctx context.Context, sess *tran
 			return NewUnavailableError("read upstream error response: " + readErr.Error())
 		}
 		if cfg.DebugMode() {
-			debugReq, _ := json.Marshal(newBody)
 			log.Printf("[DEBUG] [StreamChat] HTTP 报错! 状态码: %d", sr.StatusCode)
-			log.Printf("[DEBUG] [StreamChat] 完整请求体: %s", string(debugReq))
-			log.Printf("[DEBUG] [StreamChat] 上游回复: %s", errText)
+			log.Printf("[DEBUG] [StreamChat] 请求诊断: 模型=%s, 请求ID=%s, 代理=%s", model, reqID, nodeName)
+			log.Printf("[DEBUG] [StreamChat] 上游摘要: %s", redact.Excerpt(errText, journalMaxLastErrChars))
 		} else if sr.StatusCode == 400 {
-			debugBody, _ := json.Marshal(newBody.Variables)
-			log.Printf("[Vertex] [Stream] 收到 400 Bad Request, Variables Payload: %s", compactLogMessage(string(debugBody), journalMaxVariablesChars))
+			log.Printf("[Vertex] [Stream] 收到 400 Bad Request, 模型=%s, 请求ID=%s, 代理=%s", model, reqID, nodeName)
 		}
 
 		if sr.StatusCode == 401 || sr.StatusCode == 403 ||
@@ -353,28 +358,55 @@ func (c *VertexAIClient) executeStreamingAttempt(ctx context.Context, sess *tran
 		}
 		if parsed := parseErrorResponse(errText); parsed != nil {
 			parsed.UpstreamResponse = errText
+			if sr.StatusCode == 429 {
+				parsed.RetryAfter = parseRetryAfterHeader(sr.Header, time.Now())
+			}
 			return parsed
 		}
-		return raiseForStatus(sr.StatusCode, "", "Upstream Error: "+errText, nil, errText)
+		upstreamErr := raiseForStatus(sr.StatusCode, "", "Upstream Error: "+errText, nil, errText)
+		if sr.StatusCode == 429 {
+			upstreamErr.RetryAfter = parseRetryAfterHeader(sr.Header, time.Now())
+		}
+		return upstreamErr
 	}
 
 	// 增量扫描上游流，逐个完整 JSON 对象提取 chunk。不能在真实 finishReason 后立即
 	// 停止：Gemini 可能把 usageMetadata 放在随后的独立末帧，因此正常路径仍读到 EOF。
-	scanErr := scanStreamRaw(sr.Body, func(raw []byte) (stop bool, err error) {
+	var streamBody io.Reader = sr.Body
+	if timeout := cfg.StreamIdleTimeoutSeconds(); timeout > 0 {
+		first, between := streamIdleTimeouts(cfg.ResolveModelName(model), timeout)
+		streamBody = &idleStreamReader{body: sr.Body, closeBody: sr.Close, timeout: between, firstTimeout: first}
+	}
+	var integrity streamIntegrity
+	stopped := false
+	scanErr := scanStreamRaw(streamBody, func(raw []byte) (stop bool, err error) {
 		// 从单个上游对象提取（可能多个）chunk，逐个 emit。
-		return processStreamingJSON(raw, emit)
+		return processStreamingJSON(raw, func(chunk StreamChunk) bool {
+			integrity.observe(chunk)
+			if !emit(chunk) {
+				stopped = true
+				return false
+			}
+			return true
+		})
 	})
 
 	if scanErr != nil && cfg.DebugMode() && !errors.Is(scanErr, context.Canceled) {
-		debugReq, _ := json.Marshal(newBody)
-		log.Printf("[DEBUG] [StreamChat] 扫描流数据报错! error: %v", scanErr)
-		log.Printf("[DEBUG] [StreamChat] 完整请求体: %s", string(debugReq))
+		log.Printf("[DEBUG] [StreamChat] 扫描流数据报错! error: %s", compactLogMessage(scanErr.Error(), journalMaxLastErrChars))
+		log.Printf("[DEBUG] [StreamChat] 请求诊断: 模型=%s, 请求ID=%s, 代理=%s", model, reqID, nodeName)
 	}
 	if errors.Is(scanErr, errStreamObjectTooLarge) {
 		sr.Close()
 	}
 
 	if scanErr == nil {
+		if !stopped && ctx.Err() == nil {
+			// Keep a zero-frame EOF for the anonymous endpoint's first-auth retry,
+			// and metadata-only fallbacks for native Gemini compatibility.
+			if integrityErr := integrity.err(); integrityErr != nil {
+				return integrityErr
+			}
+		}
 		return nil
 	}
 	if ctx.Err() != nil {
@@ -420,7 +452,7 @@ func scanStreamWithLimit(
 	return scanStreamRawWithLimit(body, maxObjectBytes, func(raw []byte) (bool, error) {
 		object := parseJSONObject(raw)
 		if object == nil {
-			return false, nil
+			return false, newStreamProtocolError()
 		}
 		return onObject(object)
 	})
@@ -654,7 +686,7 @@ func processStreamingJSON(raw []byte, emit func(StreamChunk) bool) (bool, error)
 
 	object := parseJSONObject(trimmed)
 	if object == nil {
-		return false, nil
+		return false, newStreamProtocolError()
 	}
 	return processStreamingObject(object, func(chunk map[string]any) bool {
 		return emit(StreamChunk{Data: chunk})

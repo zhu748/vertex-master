@@ -108,6 +108,10 @@ func printLegacyBanner() {
 }
 
 func main() {
+	if len(os.Args) == 2 && (os.Args[1] == "version" || os.Args[1] == "--version") {
+		fmt.Printf("Vertex AI Proxy %s (commit=%s, built=%s, %s/%s)\n", version, buildCommit, buildTime, runtime.GOOS, runtime.GOARCH)
+		return
+	}
 	setupTermuxCerts() // 优先初始化 Termux 证书
 	if renderCommit := strings.TrimSpace(os.Getenv("RENDER_GIT_COMMIT")); buildCommit == "unknown" && renderCommit != "" {
 		buildCommit = renderCommit

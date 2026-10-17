@@ -90,7 +90,7 @@ func (img *ImageHandler) handleImageGenerations(w http.ResponseWriter, r *http.R
 	images, vErr := img.vc.CompleteChatImage(r.Context(), model, geminiPayload)
 	if vErr != nil {
 		ve := toVertexError(vErr)
-		writeJSON(w, ve.Code, vertexErrorToOAI(ve))
+		writeOAIVertexError(w, ve)
 		return
 	}
 
@@ -210,7 +210,7 @@ func (img *ImageHandler) runOAIImageRequest(ctx context.Context, w http.Response
 		images, vErr := img.vc.CompleteChatImage(ctx, model, geminiPayload)
 		if vErr != nil {
 			ve := toVertexError(vErr)
-			writeJSON(w, ve.Code, vertexErrorToOAI(ve))
+			writeOAIVertexError(w, ve)
 			return
 		}
 		for _, img := range images {

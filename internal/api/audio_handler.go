@@ -94,7 +94,7 @@ func (a *AudioHandler) handleAudioSpeech(w http.ResponseWriter, r *http.Request)
 	audio, vErr := a.vc.CompleteChatAudio(r.Context(), actualModel, geminiPayload)
 	if vErr != nil {
 		ve := toVertexError(vErr)
-		writeJSON(w, ve.Code, vertexErrorToOAI(ve))
+		writeOAIVertexError(w, ve)
 		return
 	}
 

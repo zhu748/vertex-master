@@ -34,7 +34,7 @@ func countLogLinesContaining(haystack, needle string) int {
 
 // frontendErrorKeywords 与管理面板 page-logs.js 的错误分级关键词保持同步。
 // 胜出/回退汇总行必须避开这些词，才能在前端保持 info 级不被误报为错误。
-var frontendErrorKeywords = []string{
+var frontendErrorKeywords = []string{ //nolint:gochecknoglobals // Read-only frontend classification vocabulary shared by tests.
 	"失败", "错误", "报错", "超时", "异常", "429", "警告",
 	"error", "fail", "failed", "failure", "timeout", "timed out",
 	"refused", "unreachable", "denied",

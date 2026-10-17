@@ -162,6 +162,8 @@ func readAllWithCapacity(reader io.Reader, capacity int64) ([]byte, error) {
 type StreamResponse struct { //nolint:govet
 	StatusCode int
 	Body       io.ReadCloser
+	Header     Header
+	closeOnce  sync.Once
 }
 
 func (sr *StreamResponse) Close() {
@@ -169,8 +171,7 @@ func (sr *StreamResponse) Close() {
 	if body == nil {
 		return
 	}
-	sr.Body = nil
-	_ = body.Close()
+	sr.closeOnce.Do(func() { _ = body.Close() })
 }
 
 func (s *Session) DoStream(ctx context.Context, method, url string, header http.Header, body io.Reader) (*StreamResponse, error) {
@@ -178,7 +179,7 @@ func (s *Session) DoStream(ctx context.Context, method, url string, header http.
 	if err != nil {
 		return nil, err
 	}
-	return &StreamResponse{StatusCode: resp.StatusCode, Body: resp.Body}, nil
+	return &StreamResponse{StatusCode: resp.StatusCode, Body: resp.Body, Header: resp.Header}, nil
 }
 
 func (s *Session) Close() {

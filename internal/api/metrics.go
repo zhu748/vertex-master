@@ -30,6 +30,7 @@ type requestStatusSnapshot struct {
 type requestMetricsSnapshot struct {
 	Active               int64                 `json:"active"`
 	Total                uint64                `json:"total"`
+	Completed            uint64                `json:"completed"`
 	Errors               uint64                `json:"errors"`
 	Panics               uint64                `json:"panics"`
 	AverageLatencyMillis float64               `json:"average_latency_ms"`
@@ -85,13 +86,15 @@ func (m *requestMetrics) snapshot() requestMetricsSnapshot {
 		ClientError:   m.statusClasses[4].Load(),
 		ServerError:   m.statusClasses[5].Load(),
 	}
+	completed := status.Unknown + status.Informational + status.Successful + status.Redirection + status.ClientError + status.ServerError
 	averageMillis := 0.0
-	if total > 0 {
-		averageMillis = float64(m.durationNanos.Load()) / float64(total) / float64(time.Millisecond)
+	if completed > 0 {
+		averageMillis = float64(m.durationNanos.Load()) / float64(completed) / float64(time.Millisecond)
 	}
 	return requestMetricsSnapshot{
 		Active:               m.active.Load(),
 		Total:                total,
+		Completed:            completed,
 		Errors:               status.ClientError + status.ServerError,
 		Panics:               m.panics.Load(),
 		AverageLatencyMillis: averageMillis,

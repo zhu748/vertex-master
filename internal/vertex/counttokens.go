@@ -49,7 +49,7 @@ func (c *VertexAIClient) CountTokensExact(
 func (c *VertexAIClient) CountTokenSets(ctx context.Context, model string, contentSets ...[]any) []int {
 	counts, err := c.countTokenSets(ctx, model, contentSets...)
 	if err != nil {
-		log.Printf("[Vertex] [CountTokens] 上游精确计数失败: 模型=%s, 请求ID=%s, 原因=%v", model, RequestIDFromContext(ctx), err)
+		log.Printf("[Vertex] [CountTokens] 上游精确计数失败: 模型=%s, 请求ID=%s, 原因=%v", model, RequestIDFromContext(ctx), compactLogMessage(err.Error(), journalMaxLastErrChars))
 	}
 	return counts
 }

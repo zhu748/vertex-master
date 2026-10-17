@@ -755,10 +755,10 @@ func anthropicStopReason(finish string, hasTools bool) string {
 	if hasTools || strings.EqualFold(finish, "tool_calls") {
 		return "tool_use"
 	}
-	switch strings.ToLower(finish) {
+	switch strings.ToLower(strings.TrimSpace(finish)) {
 	case "length", "max_tokens":
 		return "max_tokens"
-	case "content_filter", "safety", "recitation", "prohibited_content":
+	case "content_filter", "safety", "recitation", "prohibited_content", "blocklist", "spii", "image_safety", "image_prohibited_content":
 		return "refusal"
 	default:
 		return "end_turn"
@@ -1296,12 +1296,13 @@ func (h *AnthropicHandler) anthropicError(w http.ResponseWriter, status int, typ
 }
 
 func (h *AnthropicHandler) writeAnthropicVertexError(w http.ResponseWriter, err *vertex.VertexError) {
+	writeVertexRetryAfter(w, err)
 	h.anthropicError(w, err.Code, anthropicErrorType(err), vertex.FriendlyErrorMessage(err))
 }
 
 func anthropicErrorType(err *vertex.VertexError) string {
 	switch err.Kind {
-	case "invalid":
+	case "invalid", "unsupported":
 		return "invalid_request_error"
 	case "auth":
 		return "authentication_error"

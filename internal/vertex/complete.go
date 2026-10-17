@@ -15,6 +15,9 @@ type candidateResult struct {
 }
 
 func (c *VertexAIClient) CompleteChat(ctx context.Context, model string, geminiPayload map[string]any) (map[string]any, error) {
+	if err := c.generationModelError(model); err != nil {
+		return nil, err
+	}
 	return c.completeChatPrepared(
 		ctx,
 		model,

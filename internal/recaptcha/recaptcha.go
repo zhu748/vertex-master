@@ -131,12 +131,8 @@ func FetchTokenWithSession(ctx context.Context, sess *transport.Session, debugMo
 	}
 	m := tokenRe.FindSubmatch(anchorBody)
 	if m == nil {
-		bodyStr := string(anchorBody)
-		if len(bodyStr) > 500 {
-			bodyStr = bodyStr[:500] + "..."
-		}
 		if debugMode {
-			log.Printf("[Recaptcha] anchor token正则匹配失败, body前缀: %s", bodyStr)
+			log.Printf("[Recaptcha] anchor token正则匹配失败, 响应字节数: %d", len(anchorBody))
 		}
 		return "", fmt.Errorf("从 anchor HTML 解析 recaptcha-token 失败")
 	}
@@ -168,7 +164,7 @@ func FetchTokenWithSession(ctx context.Context, sess *transport.Session, debugMo
 	}
 	if status != 200 {
 		if debugMode {
-			log.Printf("[Recaptcha] Reload 失败, HTTP 状态码: %d, 返回内容: %s", status, truncateForLog(string(reloadBody), 300))
+			log.Printf("[Recaptcha] Reload 失败, HTTP 状态码: %d, 响应字节数: %d", status, len(reloadBody))
 		}
 	}
 	rm := rrespRe.FindSubmatch(reloadBody)
@@ -176,14 +172,4 @@ func FetchTokenWithSession(ctx context.Context, sess *transport.Session, debugMo
 		return "", fmt.Errorf("从 reload 响应解析 rresp 失败")
 	}
 	return string(rm[1]), nil
-}
-
-// truncateForLog 把可能多行的响应体压成单行并截断，防止单条日志爆炸。
-func truncateForLog(s string, maxChars int) string {
-	compact := strings.Join(strings.Fields(s), " ")
-	runes := []rune(compact)
-	if len(runes) <= maxChars {
-		return compact
-	}
-	return string(runes[:maxChars]) + "…"
 }

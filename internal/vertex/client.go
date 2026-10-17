@@ -81,6 +81,9 @@ func (c *VertexAIClient) getBatchGraphqlURL() string {
 const largePayloadThreshold = 1 << 20 // 1MB
 
 func (c *VertexAIClient) CompleteChatN(ctx context.Context, model string, geminiPayload map[string]any, n int) ([]map[string]any, error) {
+	if err := c.generationModelError(model); err != nil {
+		return nil, err
+	}
 	if n > 1 {
 		remaining := largePayloadThreshold
 		if !valueFitsBudget(geminiPayload, &remaining) {

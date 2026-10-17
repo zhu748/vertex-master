@@ -98,3 +98,5 @@ func (s staticConfig) FakePrefixes() []string            { return s.c.FakePrefix
 func (s staticConfig) ResolveModelName(s_ string) string { return s.c.ResolveModelName(s_) }
 func (s staticConfig) ConfigDir() string                 { return s.c.ConfigDir() }
 func (s staticConfig) ConfigPath() string                { return s.c.ConfigPath() }
+
+func (s staticConfig) StreamIdleTimeoutSeconds() int { return s.c.StreamIdleTimeoutSeconds }

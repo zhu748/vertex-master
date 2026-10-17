@@ -101,6 +101,18 @@ func (adm *AdminHandler) handleAdminAPI(w http.ResponseWriter, r *http.Request) 
 	}
 
 	switch path {
+	case "/db/stats":
+		if !requireMethod(http.MethodGet) {
+			return
+		}
+		adm.adminDatabase(w, r, "stats")
+		return
+	case "/db/check", "/db/checkpoint":
+		if !requireMethod(http.MethodPost) {
+			return
+		}
+		adm.adminDatabase(w, r, strings.TrimPrefix(path, "/db/"))
+		return
 	case "/nodes":
 		switch r.Method {
 		case http.MethodGet:

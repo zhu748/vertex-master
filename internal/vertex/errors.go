@@ -33,14 +33,20 @@ type VertexError struct { //nolint:govet
 	Details          map[string]any
 	UpstreamResponse string
 	RetryAfter       int // 仅 ratelimit 用，0 表示未设
+	cause            error
 }
 
 // Error 实现 error 接口。
 func (e *VertexError) Error() string { return e.Message }
 
+func (e *VertexError) Unwrap() error { return e.cause }
+
 // IsRetryable 判定是否可重试：408/429/5xx 可重试；认证错误（按 Kind 判，不看 code）也可重试。
 func (e *VertexError) IsRetryable() bool {
 	if strings.Contains(e.Message, "Please ensure that the number of function response parts is equal to the number of function call parts") {
+		return false
+	}
+	if e.Kind == "unsupported" {
 		return false
 	}
 	switch e.Code {
@@ -196,6 +202,10 @@ func FriendlyErrorMessage(e *VertexError) string {
 		return "请求参数有误，请检查请求内容 (invalid argument)"
 	case e.Kind == "empty":
 		return "上游返回空响应，请重试 (empty response)"
+	case e.Kind == "incomplete":
+		return "上游响应未完整结束，请重试 (incomplete response)"
+	case e.Kind == "unsupported":
+		return e.Message
 	case e.Kind == "unavailable" || e.Code == 503:
 		return "服务暂时不可用，请稍后再试 (service unavailable)"
 	case e.Code == 502:

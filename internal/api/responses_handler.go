@@ -81,7 +81,7 @@ func (h *ResponsesHandler) handleResponses(w http.ResponseWriter, r *http.Reques
 	geminiResp, vErr := h.vc.CompleteChat(r.Context(), model, payload)
 	if vErr != nil {
 		ve := toVertexError(vErr)
-		writeJSON(w, ve.Code, vertexErrorToOAI(ve))
+		writeOAIVertexError(w, ve)
 		return
 	}
 	out := outputFromResponseConverter(h.respConv, geminiResp, model)
@@ -721,7 +721,7 @@ func responsesIncompleteReason(finish string) string {
 	switch strings.ToLower(strings.TrimSpace(finish)) {
 	case "length", "max_tokens", "max_output_tokens":
 		return "max_output_tokens"
-	case "content_filter", "safety", "recitation", "prohibited_content", "blocklist", "spii":
+	case "content_filter", "safety", "recitation", "prohibited_content", "blocklist", "spii", "image_safety", "image_prohibited_content":
 		return "content_filter"
 	default:
 		return ""

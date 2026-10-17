@@ -361,7 +361,7 @@ func runRacePreferred[T any](
 			if !errors.Is(res.err, context.Canceled) {
 				journal.recordFailure(name, res.err)
 				if cfg.DebugMode() {
-					log.Printf("[Racing] 节点 %s 失败: %s", name, res.err.Error())
+					log.Printf("[Racing] 节点 %s 失败: %s", name, compactLogMessage(res.err.Error(), journalMaxLastErrChars))
 				}
 
 				ve := asVertexError(res.err)

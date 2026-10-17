@@ -136,7 +136,7 @@ func (c *ChatHandler) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 				writeJSON(w, http.StatusOK, oaiSafetyResponse(model))
 				return
 			}
-			writeJSON(w, ve.Code, vertexErrorToOAI(ve))
+			writeOAIVertexError(w, ve)
 			return
 		}
 		oaiResp := c.respConv.AggregateN(responses, model)
@@ -156,7 +156,7 @@ func (c *ChatHandler) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 			writeJSON(w, http.StatusOK, oaiSafetyResponse(model))
 			return
 		}
-		writeJSON(w, ve.Code, vertexErrorToOAI(ve))
+		writeOAIVertexError(w, ve)
 		return
 	}
 

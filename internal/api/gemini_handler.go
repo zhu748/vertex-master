@@ -110,6 +110,7 @@ func (g *GeminiHandler) handleGeminiGenerate(w http.ResponseWriter, r *http.Requ
 			writeJSON(w, http.StatusOK, geminiSafetyResponse(ve))
 			return
 		}
+		writeVertexRetryAfter(w, ve)
 		writeJSON(w, ve.Code, vertexErrorToGemini(ve))
 		return
 	}
@@ -503,6 +504,7 @@ func (g *GeminiHandler) handleCountTokens(w http.ResponseWriter, r *http.Request
 	total, countErr := g.vc.CountTokensExact(r.Context(), actualModel, protocolInputContents(body))
 	if countErr != nil {
 		ve := toVertexError(countErr)
+		writeVertexRetryAfter(w, ve)
 		writeJSON(w, ve.Code, vertexErrorToGemini(ve))
 		return
 	}
