@@ -1,4 +1,4 @@
-FROM golang:1.26.9-alpine AS builder
+FROM golang:1.27.3-alpine AS builder
 
 ARG VPROXY_VERSION=dev
 ARG VPROXY_BUILD_COMMIT=unknown
